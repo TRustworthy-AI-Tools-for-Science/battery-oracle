@@ -4,6 +4,14 @@
 
 # battery-oracle
 
+[![CI](https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/actions/workflows/ci.yml/badge.svg)](https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/actions/workflows/ci.yml)
+[![Docs](https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/actions/workflows/docs.yml/badge.svg)](https://trustworthy-ai-tools-for-science.github.io/battery-oracle/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Built with PyBaMM](https://img.shields.io/badge/built%20with-PyBaMM-orange)](https://www.pybamm.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle)
+
 A standalone PyBaMM/SPMe battery oracle. Given a 6-D charge/discharge protocol
 it runs a PyBaMM single-particle-with-electrolyte (SPMe) simulation, synthesises
 an EIS spectrum, and fits an equivalent-circuit model (ECM). This mimics the same
