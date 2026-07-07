@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from battery_oracle.tune import (
+    _eol_target_cycles,
+    _eol_target_cycles_from_range,
     compute_real_targets,
     score_candidate,
     slope_match_error,
@@ -60,6 +62,20 @@ def test_slope_match_error():
     assert slope_match_error(0.10, ci) == 0.0        # inside CI
     assert slope_match_error(0.25, ci) > 0.0         # outside CI
     assert slope_match_error(None, ci) == float("inf")
+
+
+def test_eol_target_cycles_from_range():
+    assert _eol_target_cycles_from_range("40-70") == pytest.approx(55.0)
+    assert _eol_target_cycles_from_range("200-400") == pytest.approx(300.0)
+    assert _eol_target_cycles_from_range(None) is None
+    assert _eol_target_cycles_from_range("") is None
+
+
+def test_eol_target_cycles_sourced_from_oracle_yaml():
+    # Matches config_oracle_defaults.yml's documented preset_constants ranges.
+    assert _eol_target_cycles("accelerated") == pytest.approx(55.0)
+    assert _eol_target_cycles("severe") == pytest.approx(35.0)
+    assert _eol_target_cycles("nominal") == pytest.approx(300.0)
 
 
 def test_write_oracle_config(tmp_path):

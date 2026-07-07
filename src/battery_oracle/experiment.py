@@ -95,6 +95,141 @@ def load_experiment_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def load_oracle_config(path: str | Path | None = None) -> dict:
+    """Parse an oracle-defaults YAML into a plain ``dict``.
+
+    Parameters
+    ----------
+    path : str or Path, optional
+        Path to a ``config_oracle_*.yml`` file (e.g. a tune-oracle-skill
+        calibration output). ``None`` (default) loads the packaged
+        ``config_oracle_defaults.yml``.
+
+    Returns
+    -------
+    dict
+        The parsed config, unvalidated -- every consumer reads fields via
+        ``.get(key, <PyBaMMOracle's own default>)``, so a partial or
+        hand-edited file degrades gracefully rather than raising.
+
+    Notes
+    -----
+    PyYAML only -- no PyBaMM import, mirrors :func:`load_experiment_config`.
+    """
+    if path is None:
+        with resources.files("battery_oracle").joinpath(
+            _ORACLE_CONFIG_NAME
+        ).open("r") as fh:
+            return yaml.safe_load(fh) or {}
+    with open(path) as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None) -> dict:
+    """Map an oracle-defaults YAML dict to a full ``PyBaMMOracle(**kwargs)`` dict.
+
+    Every field is read with ``.get(key, <PyBaMMOracle's own Python literal
+    default>)`` so an absent field falls back to PyBaMMOracle's constructor
+    default rather than raising -- this is the base layer of the three-layer
+    precedence (PyBaMMOracle Python defaults < oracle YAML < experiment YAML;
+    see :func:`oracle_kwargs_from_config`).
+
+    ``preset`` overrides the resolved ``degradation.preset`` (used when an
+    experiment YAML specifies its own preset); defaults to the oracle YAML's
+    own ``degradation.preset``. Also resolves ``degradation.preset_constants``
+    down to the numeric-only dict for the resolved preset.
+
+    PyBaMM-free (PyYAML/numpy only), matching :func:`oracle_kwargs_from_config`'s
+    design.
+    """
+    cycling = oracle_cfg.get("cycling", {}) or {}
+    solver = oracle_cfg.get("solver", {}) or {}
+    solver_primary = solver.get("primary", {}) or {}
+    solver_emergency = solver.get("emergency", {}) or {}
+    bounds = oracle_cfg.get("protocol_bounds", {}) or {}
+    eis = oracle_cfg.get("eis", {}) or {}
+    linkk = eis.get("linkk", {}) or {}
+    ecm = oracle_cfg.get("ecm", {}) or {}
+    cpe_seeds = ecm.get("cpe_seeds", {}) or {}
+    autoeis = ecm.get("autoeis", {}) or {}
+    degradation = oracle_cfg.get("degradation", {}) or {}
+    c2_stress = degradation.get("c2_stress", {}) or {}
+    preset_constants_all = degradation.get("preset_constants", {}) or {}
+    protocol_scaling = oracle_cfg.get("protocol_scaling", {}) or {}
+
+    resolved_preset = preset or degradation.get("preset", "accelerated")
+    rescale_r0 = ecm.get("rescale_target_r0", 0.1334)
+
+    freq_min = float(eis.get("freq_min_hz", 0.01))
+    freq_max = float(eis.get("freq_max_hz", 10000.0))
+    n_freq = int(eis.get("n_freq_points", 60))
+
+    return {
+        "n_cycles": int(cycling.get("n_cycles", 1)),
+        "temperature_K": float(cycling.get("temperature_K", 298.15)),
+        "parameter_set": cycling.get("parameter_set", "Chen2020"),
+        "real_cell_capacity_mah": float(
+            protocol_scaling.get("real_cell_capacity_mah_legacy_default", 200.0)
+        ),
+        "rest_s": float(cycling.get("rest_s", 1200.0)),
+        "initial_soc": float(cycling.get("initial_soc", 0.8)),
+
+        "degradation_preset": resolved_preset,
+        "eol_capacity_fraction": float(degradation.get("eol_capacity_fraction", 0.80)),
+        "capacity_check": bool(degradation.get("capacity_check", False)),
+        "ec_diffusivity_base_factor": float(degradation.get("ec_diffusivity_base_factor", 0.25)),
+        "lam_ceiling": float(degradation.get("lam_ceiling", 0.95)),
+        "dod_lam_scale": float(degradation.get("dod_lam_scale", 0.0)),
+        "c2_stress_scale": float(c2_stress.get("scale", 0.0)),
+        "c2_stress_slope_mah_per_ma": float(c2_stress.get("slope_mah_per_ma", 0.0794)),
+        "c2_stress_ref_ma": float(c2_stress.get("ref_ma", 75.27)),
+        "preset_constants": preset_constants_all.get(resolved_preset),
+        "kinetics_scale": float(protocol_scaling.get("kinetics_scale", 1.0)),
+        "sei_rate_scale": float(protocol_scaling.get("sei_rate_scale", 1.0)),
+        "dead_li_decay_scale": float(protocol_scaling.get("dead_li_decay_scale", 1.0)),
+        "plating_rate_scale": float(protocol_scaling.get("plating_rate_scale", 1.0)),
+
+        "frequencies": np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq),
+        "eis_noise_level": float(eis.get("noise_level", 0.02)),
+        "eis_noise_model": eis.get("noise_model", "combined"),
+        "eis_drift_scale": float(eis.get("drift_scale", 0.0)),
+        "eis_drift_tau_s": float(eis.get("drift_tau_s", 600.0)),
+        "eis_drift_n_periods": float(eis.get("drift_n_periods", 4.0)),
+        "noise_combined_flicker_frac": float(eis.get("noise_combined_flicker_frac", 0.75)),
+        "noise_combined_white_frac": float(eis.get("noise_combined_white_frac", 0.25)),
+        "soc_clip_min": float(eis.get("soc_clip_min", 0.05)),
+        "soc_clip_max": float(eis.get("soc_clip_max", 0.99)),
+        "linkk_c": float(linkk.get("c", 0.85)),
+        "linkk_max_M": int(linkk.get("max_M", 50)),
+
+        "circuit": ecm.get("circuit") or _FALLBACK_ECM_CIRCUIT,
+        "cpe_w_seed": cpe_seeds.get("w"),
+        "cpe_n_seed": cpe_seeds.get("n"),
+        "cpe_w_default": float(cpe_seeds.get("w_default", 0.1)),
+        "cpe_n_default": float(cpe_seeds.get("n_default", 0.80)),
+        "ecm_rescale_target_r0": float(rescale_r0) if rescale_r0 is not None else None,
+        "autoeis_num_warmup": int(autoeis.get("num_warmup", 500)),
+        "autoeis_num_samples": int(autoeis.get("num_samples", 200)),
+
+        "solver_rtol": float(solver_primary.get("rtol", 1e-3)),
+        "solver_atol": float(solver_primary.get("atol", 1e-6)),
+        "solver_dt_max_s": float(solver_primary.get("dt_max_s", 60.0)),
+        "emergency_solver_rtol": float(solver_emergency.get("rtol", 1e-2)),
+        "emergency_solver_atol": float(solver_emergency.get("atol", 1e-5)),
+        "emergency_solver_dt_max_s": float(solver_emergency.get("dt_max_s", 10.0)),
+
+        "c_min_mA": float(bounds.get("c_min_mA", 50.0)),
+        "c_max_mA": float(bounds.get("c_max_mA", 10_000.0)),
+        "c2_min_mA": float(bounds.get("c2_min_mA", 20.0)),
+        "c2_max_mA": float(bounds.get("c2_max_mA", 10_000.0)),
+        "dur_min_s": float(bounds.get("dur_min_s", 60.0)),
+        "dur_max_s": float(bounds.get("dur_max_s", 28_800.0)),
+        "v_charge_max": float(bounds.get("v_charge_max", 4.3)),
+        "v_discharge_min": float(bounds.get("v_discharge_min", 3.0)),
+        "charge_stage_max_s": float(bounds.get("charge_stage_max_s", 900.0)),
+    }
+
+
 def load_default_ecm_circuit() -> str:
     """Return the default ECM circuit string from ``config_oracle_defaults.yml``.
 
@@ -142,6 +277,12 @@ def _validate_config(cfg: dict) -> None:
             f"Unknown ecm.fitter {fitter!r}; choose one of {_VALID_ECM_FITTERS}."
         )
 
+    # 'oracle_config' is optional: a path to a custom oracle-defaults YAML
+    # used as the base layer instead of the packaged config_oracle_defaults.yml.
+    oracle_config = cfg.get("oracle_config")
+    if oracle_config is not None and not isinstance(oracle_config, (str, Path)):
+        raise ValueError("Experiment config 'oracle_config' must be a path string or null.")
+
     protocols = cfg["protocols"]
     if not isinstance(protocols, list) or not protocols:
         raise ValueError("Experiment config 'protocols' must be a non-empty list.")
@@ -153,48 +294,74 @@ def _validate_config(cfg: dict) -> None:
             raise ValueError(f"protocols[{i}] is missing field(s): {missing}")
 
 
-def oracle_kwargs_from_config(cfg: dict) -> dict:
+def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict:
     """Map a validated config ``dict`` to :class:`PyBaMMOracle` ``**kwargs``.
+
+    Three-layer precedence: starts from ``oracle_kwargs_from_oracle_config``'s
+    base layer (``oracle_cfg``, defaulting to the packaged
+    ``config_oracle_defaults.yml`` if not supplied), then overlays every field
+    the experiment config ``cfg`` actually specifies. Fields ``cfg`` omits fall
+    back to the base layer's value rather than raising, so a minimal
+    experiment YAML (just the five required sections) still works.
 
     PyBaMM-free: the parameter set and ECM fitter are carried as plain strings
     (``"parameter_set"`` e.g. ``"Chen2020"``; ``"ecm_fitter"`` e.g. ``"randles"``)
     rather than resolved objects — :func:`build_oracle_from_config` pops and
     resolves them (``parameter_set`` -> ``pybamm.ParameterValues``, ``ecm_fitter``
-    -> the ``ecm_model_fn`` callable).  The ``eis`` block is converted to a
-    ``frequencies`` array here (numpy is a core dependency).  Optional calibration
-    scales default to ``1.0``.
+    -> the ``ecm_model_fn`` callable).
     """
     cycling = cfg["cycling"]
     degradation = cfg["degradation"]
     eis = cfg["eis"]
 
-    freqs = np.logspace(
-        np.log10(float(eis["freq_min_hz"])),
-        np.log10(float(eis["freq_max_hz"])),
-        int(eis["n_freq_points"]),
-    )
+    if oracle_cfg is None:
+        oracle_cfg = load_oracle_config()
+    kwargs = oracle_kwargs_from_oracle_config(oracle_cfg, preset=degradation.get("preset"))
 
-    kwargs: dict = {
-        "model": cfg["model"]["type"],
-        "n_cycles": int(cycling["n_cycles"]),
-        "temperature_K": float(cycling["temperature_K"]),
-        "parameter_set": cycling.get("parameter_set", "Chen2020"),
-        "real_cell_capacity_mah": float(cycling["real_cell_capacity_mah"]),
-        "degradation_preset": degradation["preset"],
-        "eol_capacity_fraction": float(degradation["eol_capacity_fraction"]),
-        "capacity_check": bool(degradation["capacity_check"]),
-        "frequencies": freqs,
-        "eis_noise_level": float(eis["noise_level"]),
-        "eis_noise_model": eis["noise_model"],
-        # Carried as a string (like parameter_set); build_oracle_from_config
-        # resolves it to the ecm_model_fn callable, keeping this layer PyBaMM-free.
-        "ecm_fitter": cfg.get("ecm", {}).get("fitter", _DEFAULT_ECM_FITTER),
-        # ECM structure -> PyBaMMOracle(circuit=...). Loaded from the experiment
-        # config's ecm.circuit, or the oracle config default. No layout is assumed.
-        "circuit": cfg.get("ecm", {}).get("circuit") or load_default_ecm_circuit(),
-    }
+    kwargs["model"] = cfg["model"]["type"]
+    kwargs["n_cycles"] = int(cycling.get("n_cycles", kwargs["n_cycles"]))
+    kwargs["temperature_K"] = float(cycling.get("temperature_K", kwargs["temperature_K"]))
+    kwargs["parameter_set"] = cycling.get("parameter_set", kwargs["parameter_set"])
+    kwargs["real_cell_capacity_mah"] = float(
+        cycling.get("real_cell_capacity_mah", kwargs["real_cell_capacity_mah"])
+    )
+    kwargs["rest_s"] = float(cycling.get("rest_s", kwargs["rest_s"]))
+    kwargs["initial_soc"] = float(cycling.get("initial_soc", kwargs["initial_soc"]))
+
+    kwargs["degradation_preset"] = degradation["preset"]
+    kwargs["eol_capacity_fraction"] = float(
+        degradation.get("eol_capacity_fraction", kwargs["eol_capacity_fraction"])
+    )
+    kwargs["capacity_check"] = bool(degradation.get("capacity_check", kwargs["capacity_check"]))
+    kwargs["dod_lam_scale"] = float(degradation.get("dod_lam_scale", kwargs["dod_lam_scale"]))
+    kwargs["c2_stress_scale"] = float(
+        degradation.get("c2_stress_scale", kwargs["c2_stress_scale"])
+    )
+    kwargs["c2_stress_slope_mah_per_ma"] = float(
+        degradation.get("c2_stress_slope_mah_per_ma", kwargs["c2_stress_slope_mah_per_ma"])
+    )
+    kwargs["c2_stress_ref_ma"] = float(
+        degradation.get("c2_stress_ref_ma", kwargs["c2_stress_ref_ma"])
+    )
     for field in _SCALE_FIELDS:
-        kwargs[field] = float(degradation.get(field, 1.0))
+        kwargs[field] = float(degradation.get(field, kwargs[field]))
+
+    freq_min = float(eis.get("freq_min_hz", oracle_cfg.get("eis", {}).get("freq_min_hz", 0.01)))
+    freq_max = float(eis.get("freq_max_hz", oracle_cfg.get("eis", {}).get("freq_max_hz", 10000.0)))
+    n_freq = int(eis.get("n_freq_points", oracle_cfg.get("eis", {}).get("n_freq_points", 60)))
+    kwargs["frequencies"] = np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq)
+    kwargs["eis_noise_level"] = float(eis.get("noise_level", kwargs["eis_noise_level"]))
+    kwargs["eis_noise_model"] = eis.get("noise_model", kwargs["eis_noise_model"])
+    kwargs["eis_drift_scale"] = float(eis.get("drift_scale", kwargs["eis_drift_scale"]))
+    kwargs["eis_drift_tau_s"] = float(eis.get("drift_tau_s", kwargs["eis_drift_tau_s"]))
+    kwargs["eis_drift_n_periods"] = float(eis.get("drift_n_periods", kwargs["eis_drift_n_periods"]))
+
+    # Carried as a string (like parameter_set); build_oracle_from_config
+    # resolves it to the ecm_model_fn callable, keeping this layer PyBaMM-free.
+    kwargs["ecm_fitter"] = cfg.get("ecm", {}).get("fitter", _DEFAULT_ECM_FITTER)
+    # ECM structure -> PyBaMMOracle(circuit=...). Experiment YAML's ecm.circuit
+    # wins; otherwise falls back to the oracle-config base layer's circuit.
+    kwargs["circuit"] = cfg.get("ecm", {}).get("circuit") or kwargs["circuit"]
     return kwargs
 
 
@@ -213,6 +380,10 @@ def protocols_from_config(cfg: dict) -> list[np.ndarray]:
 def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     """Construct a :class:`PyBaMMOracle` from a config dict (or a path to load first).
 
+    Resolves ``cfg``'s optional top-level ``oracle_config`` field (a path to a
+    custom ``config_oracle_*.yml``, e.g. a tune-oracle-skill calibration
+    output) as the base layer instead of the packaged
+    ``config_oracle_defaults.yml`` -- see :func:`oracle_kwargs_from_config`.
     Resolves the ``parameter_set`` string to a ``pybamm.ParameterValues`` and
     imports :class:`PyBaMMOracle` lazily so the parse/mapping layer stays
     PyBaMM-free.
@@ -220,7 +391,8 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     if not isinstance(cfg, dict):
         cfg = load_experiment_config(cfg)
 
-    kwargs = oracle_kwargs_from_config(cfg)
+    oracle_cfg = load_oracle_config(cfg.get("oracle_config"))
+    kwargs = oracle_kwargs_from_config(cfg, oracle_cfg)
     pset = kwargs.pop("parameter_set", None)
     if pset:
         import pybamm  # local import — keeps the mapping layer PyBaMM-free

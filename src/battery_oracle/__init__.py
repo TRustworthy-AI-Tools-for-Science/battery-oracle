@@ -29,7 +29,9 @@ from battery_oracle.experiment import (
     build_oracle_from_config,
     load_default_ecm_circuit,
     load_experiment_config,
+    load_oracle_config,
     oracle_kwargs_from_config,
+    oracle_kwargs_from_oracle_config,
     protocols_from_config,
     run_experiment,
 )
@@ -68,4 +70,6 @@ __all__ = [
     "build_oracle_from_config",
     "run_experiment",
     "load_default_ecm_circuit",
+    "load_oracle_config",
+    "oracle_kwargs_from_oracle_config",
 ]

@@ -48,7 +48,7 @@ from battery_oracle._circuit import (
     _param_labels_from_circuit,
     randles_pairs_from_circuit,
 )
-from battery_oracle.experiment import load_default_ecm_circuit
+from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
 from battery_oracle.oracle import OracleFailure, PyBaMMOracle
 
 log = logging.getLogger(__name__)
@@ -78,15 +78,29 @@ def _ecm_indices(circuit: str) -> tuple[int, list[int]]:
     ohmic = next((l for l in labels if l.startswith("R") and l not in arc_rs), labels[0])
     return labels.index(ohmic), [labels.index(r) for r in arc_rs]
 
-# Midpoint of the documented target_eol_cycles_at_1c ranges per preset. Used to
-# penalize candidates whose implied EOL cycle count is wildly off the physically
-# reasonable range — without this the BO can fit arc_ratio/r1_growth within the
-# scoring window while reaching real EOL in <10 cycles or >500 cycles.
-_EOL_TARGET_CYCLES = {
-    "nominal":     300.0,   # documented range "200-400"
-    "accelerated": 55.0,    # documented range "40-70"
-    "severe":      35.0,    # documented range "20-50"
-}
+def _eol_target_cycles_from_range(range_str: str | None) -> float | None:
+    """Parse a ``"lo-hi"`` cycle-count range string (e.g. ``"40-70"``) to its midpoint."""
+    if not range_str:
+        return None
+    try:
+        lo, hi = str(range_str).split("-")
+        return (float(lo) + float(hi)) / 2.0
+    except ValueError:
+        return None
+
+
+def _eol_target_cycles(preset: str, oracle_cfg: dict | None = None) -> float | None:
+    """Midpoint of config_oracle_defaults.yml's ``target_eol_cycles_at_1c`` range for *preset*.
+
+    Used to penalize candidates whose implied EOL cycle count is wildly off the
+    physically reasonable range — without this the BO can fit arc_ratio/r1_growth
+    within the scoring window while reaching real EOL in <10 cycles or >500 cycles.
+    Sourced from the YAML (single source of truth shared with oracle.py's
+    ``_build_degradation_config`` defaults) rather than a hand-duplicated dict.
+    """
+    oracle_cfg = oracle_cfg if oracle_cfg is not None else load_oracle_config()
+    preset_constants = (oracle_cfg.get("degradation", {}) or {}).get("preset_constants", {}) or {}
+    return _eol_target_cycles_from_range((preset_constants.get(preset) or {}).get("target_eol_cycles_at_1c"))
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +443,7 @@ def score_candidate(
         real_r1 = real_targets["r1_growth_pct"]
         if abs(real_r1) > 1e-3:
             r1_err = abs(result["oracle_r1_growth_pct"] / real_r1 - 1.0)
-    eol_target = _EOL_TARGET_CYCLES.get(preset)
+    eol_target = _eol_target_cycles(preset)
     implied_eol = result.get("implied_eol_cycle")
     if eol_target and implied_eol and implied_eol > 0:
         eol_err = abs(math.log(implied_eol / eol_target))
@@ -450,12 +464,15 @@ def score_candidate(
 # EIS non-stationarity drift calibration (oracle-side; real target passed in)
 # ---------------------------------------------------------------------------
 
-def _linkk_lowhigh_ratio(freq, Z) -> float:
+def _linkk_lowhigh_ratio(freq, Z, c: float = 0.85, max_M: int = 50) -> float:
     """linKK low/high-freq residual ratio — the non-stationarity signature.
 
     A spectrum that drifts during the sweep has KK residuals elevated at low
     frequency; returns mean|res|(low tercile) / mean|res|(high tercile). Uses
     impedance.py with the NumPy-2.x eval-builder fix (see _eis/kk.py).
+
+    ``c``/``max_M`` default to the same values as ``_eis/kk.py``'s
+    ``linkk_rmse`` (config_oracle_defaults.yml's ``eis.linkk`` section).
     """
     import contextlib
     import io
@@ -473,7 +490,7 @@ def _linkk_lowhigh_ratio(freq, Z) -> float:
     f, Z = f[o], Z[o]
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            _, _, _, res_real, res_imag = linKK(f, Z, c=0.85, max_M=50)
+            _, _, _, res_real, res_imag = linKK(f, Z, c=c, max_M=max_M)
     except Exception:
         return float("nan")
     res = np.sqrt(np.asarray(res_real) ** 2 + np.asarray(res_imag) ** 2)
@@ -664,7 +681,7 @@ def calibrate_oracle(
             f"{result['oracle_r1_growth_pct']:.1f}%" if result["oracle_r1_growth_pct"] is not None else "n/a",
             f"{real_targets['r1_growth_pct']:.1f}%" if real_targets["r1_growth_pct"] else "?",
             f"{result['implied_eol_cycle']:.0f}" if result["implied_eol_cycle"] is not None else "n/a",
-            _EOL_TARGET_CYCLES.get(preset, "?"),
+            _eol_target_cycles(preset) or "?",
             f"{ratio:.2f}" if ratio is not None else "n/a",
             crate_sensitivity_min,
             f"{oracle_slope:.5f}" if oracle_slope is not None else "n/a",
@@ -725,7 +742,7 @@ def print_summary(
     r1_real_str  = f"{real_targets['r1_growth_pct']:.1f}%" if real_targets["r1_growth_pct"]  else "n/a"
     print(f"\n{'='*75}")
     print(f"  Calibration BO [{sampler.upper()}] — dataset={dataset}  preset={preset}  cell={cell_id}")
-    eol_target = _EOL_TARGET_CYCLES.get(preset)
+    eol_target = _eol_target_cycles(preset)
     eol_target_str = f"{eol_target:.0f}" if eol_target else "n/a"
     print(f"  Real targets:  arc_ratio={arc_real_str}   r1_growth={r1_real_str}   eol_cycle~{eol_target_str}")
     print(f"{'='*75}")
@@ -774,6 +791,10 @@ def write_oracle_config(
     drift_result: dict | None = None,
 ) -> None:
     """Write YAML config with calibration provenance to *output_path*."""
+    oracle_defaults = load_oracle_config()
+    _od_cycling = oracle_defaults.get("cycling", {}) or {}
+    _od_eis = oracle_defaults.get("eis", {}) or {}
+    _od_degradation = oracle_defaults.get("degradation", {}) or {}
     today = date.today().isoformat()
     ks_swept  = sorted({r["kinetics_scale"]       for r in all_results})
     srs_swept = sorted({r["sei_rate_scale"]        for r in all_results})
@@ -798,7 +819,7 @@ def write_oracle_config(
     dds_best   = best.get("dead_li_decay_scale", 1.0)
     prs_best   = best.get("plating_rate_scale", 1.0)
 
-    eol_target  = _EOL_TARGET_CYCLES.get(preset)
+    eol_target  = _eol_target_cycles(preset, oracle_defaults)
     eol_implied = best.get("implied_eol_cycle")
     eol_close   = (eol_target and eol_implied and abs(math.log(eol_implied / eol_target)) < math.log(2.0))
     eol_status  = "validated (within 2x)" if eol_close else "partial — implied EOL off by >2x documented target"
@@ -842,16 +863,16 @@ def write_oracle_config(
         f"#   --dds-min {dds_range[0]:.3g} --dds-max {dds_range[1]:.3g}",
         "",
         "cycling:",
-        "  n_cycles: 1",
-        "  parameter_set: Chen2020",
-        "  temperature_K: 298.15",
+        f"  n_cycles: {_od_cycling.get('n_cycles', 1)}",
+        f"  parameter_set: {_od_cycling.get('parameter_set', 'Chen2020')}",
+        f"  temperature_K: {_od_cycling.get('temperature_K', 298.15)}",
         "",
         "eis:",
-        "  freq_min_hz: 0.01",
-        "  freq_max_hz: 10000.0",
-        "  n_freq_points: 60",
-        "  noise_level: 0.02",
-        "  noise_model: combined",
+        f"  freq_min_hz: {_od_eis.get('freq_min_hz', 0.01)}",
+        f"  freq_max_hz: {_od_eis.get('freq_max_hz', 10000.0)}",
+        f"  n_freq_points: {_od_eis.get('n_freq_points', 60)}",
+        f"  noise_level: {_od_eis.get('noise_level', 0.02)}",
+        f"  noise_model: {_od_eis.get('noise_model', 'combined')}",
         "  # Non-stationarity drift (EIS measured while the OCP still relaxes); coupled to",
         "  # cycling.rest_s. Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126)",
         "  # Eqs (40)/(43). 0.0 disables. See _calibration.drift below.",
@@ -861,9 +882,9 @@ def write_oracle_config(
         "",
         "degradation:",
         f"  preset: {preset}",
-        "  eol_capacity_fraction: 0.80",
-        "  capacity_check: true",
-        "  ec_diffusivity_base_factor: 0.25",
+        f"  eol_capacity_fraction: {_od_degradation.get('eol_capacity_fraction', 0.80)}",
+        "  capacity_check: true",  # deliberate calibration-time override, not a stale default
+        f"  ec_diffusivity_base_factor: {_od_degradation.get('ec_diffusivity_base_factor', 0.25)}",
         "",
         "protocol_scaling:",
         "  real_cell_capacity_mah_legacy_default: 200.0  # always auto-detect per cell",

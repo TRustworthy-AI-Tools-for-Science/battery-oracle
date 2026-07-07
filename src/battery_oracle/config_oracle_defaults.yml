@@ -1,16 +1,50 @@
 # Base PyBaMMOracle hyperparameters (oracle.py defaults, Chen2020 parameter set).
 #
-# This is the fallback config: dataset-specific calibrations produced by the
-# tune-oracle skill live alongside it as config_oracle_{dataset}.yml and override
-# the fields under `protocol_scaling` and `degradation` (see that skill for the
-# calibration workflow). Sections marked "informational only" document oracle
-# internals that influence degradation behavior but aren't yet independent
-# constructor kwargs -- see oracle.py's _build_degradation_config.
+# This file is parsed, not just documentation: every field here is read by
+# battery_oracle.experiment.oracle_kwargs_from_oracle_config() and used to
+# override PyBaMMOracle's own Python-literal defaults. A field omitted here
+# falls back to that Python default. This is the fallback config: dataset-
+# specific calibrations produced by the tune-oracle skill live alongside it as
+# config_oracle_{dataset}.yml and override any field here (commonly
+# `protocol_scaling` and `degradation`) -- point an experiment YAML's
+# top-level `oracle_config:` field at one to use it (see that skill for the
+# calibration workflow).
 
 cycling:
   n_cycles: 1
   parameter_set: Chen2020          # pybamm.ParameterValues("Chen2020"), 5 Ah NMC/graphite pouch cell
   temperature_K: 298.15            # 25 degC; sets "Ambient temperature [K]" when != 298.15
+  initial_soc: 0.80                # first-call starting SOC (keeps initial OCV inside the voltage window)
+  rest_s: 1200.0                   # OCV rest (s) on each side of a cycle, before/after EIS (Jones et al. 2022)
+
+solver:
+  # PyBaMM solver tolerances. IDAKLUSolver (primary) ignores dt_max_s; it only
+  # applies to the CasadiSolver fallback used when IDAKLU is unavailable.
+  primary:
+    rtol: 1.0e-3
+    atol: 1.0e-6
+    dt_max_s: 60.0
+  # Deliberately a different solver family (not just looser primary tolerances):
+  # CasadiSolver(mode="safe") integrates through the CC->CV control-mode switch
+  # that reproducibly trips IDAKLUSolver. See oracle.py:_build_native_state.
+  emergency:
+    rtol: 1.0e-2
+    atol: 1.0e-5
+    dt_max_s: 10.0
+
+# Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah). Sanitises
+# protocol vectors before building the PyBaMM Experiment -- see
+# oracle.py:_sanitise_current/_sanitise_duration/_protocol_to_experiment.
+protocol_bounds:
+  c_min_mA: 50.0            # charge step 1 / discharge lower bound
+  c_max_mA: 10000.0         # 2C on a 5 Ah cell -- SPMe/solver accuracy degrades above this
+  c2_min_mA: 20.0           # charge step 2 (taper stage) lower bound
+  c2_max_mA: 10000.0        # shares the 2C ceiling with c_max_mA (see oracle.py comment)
+  dur_min_s: 60.0
+  dur_max_s: 28800.0        # 8 h
+  v_charge_max: 4.3         # charge safety cutoff (V) -- Jones, Stimming & Lee 2022
+  v_discharge_min: 3.0      # discharge cutoff (V)
+  charge_stage_max_s: 900.0 # 15 min per CC charge stage (paper limit)
 
 eis:
   freq_min_hz: 0.01
@@ -18,6 +52,24 @@ eis:
   n_freq_points: 60                # np.logspace(-2, 4, 60)
   noise_level: 0.02                # fractional amplitude; mimics ~2% potentiostat noise typical of lab EIS
   noise_model: combined            # white | flicker | combined | none
+  # "combined" noise budget split between the flicker (1/f) and white terms.
+  noise_combined_flicker_frac: 0.75
+  noise_combined_white_frac: 0.25
+  # SOC is clamped to this range before EIS is simulated (avoids the SPMe
+  # particle-concentration singularities at the extremes).
+  soc_clip_min: 0.05
+  soc_clip_max: 0.99
+  # Non-stationarity drift (EIS measured while the OCP still relaxes); coupled
+  # to cycling.rest_s. Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126)
+  # Eqs (40)/(43). 0.0 disables (default -- see oracle.py's known-limitation note).
+  drift_scale: 0.0
+  drift_tau_s: 600.0
+  drift_n_periods: 4.0
+  # Kramers-Kronig linKK validation (impedance.py), used both for the oracle's
+  # per-cycle linkk_rmse diagnostic and the tune engine's drift calibration.
+  linkk:
+    c: 0.85
+    max_M: 50
 
 ecm:
   # Equivalent-circuit structure fitted to each EIS spectrum. The ECM parameter
@@ -28,6 +80,29 @@ ecm:
   # no circuit is passed. AutoEIS labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE
   # exponent, so this 9-parameter circuit -> [R1,P2w,P2n,R3,P4w,P4n,R5,P6w,P6n].
   circuit: "R1-P2-[R3,P4]-[R5,P6]"
+  # AutoEIS initial-guess seeds for the CPE terms, keyed by canonical AutoEIS
+  # label. Admittance (w) seeds are jones2022 training-partition medians, kept
+  # close to the training scale; exponents (n) are typical for Li-ion SPMe at
+  # moderate SOC (Chen2020). Unknown labels (e.g. a migrated circuit) fall back
+  # to w_default/n_default.
+  cpe_seeds:
+    w:
+      P2w: 7.32
+      P4w: 0.071
+      P6w: 0.043
+    n:
+      P2n: 0.85
+      P4n: 0.80
+      P6n: 0.75
+    w_default: 0.1
+    n_default: 0.80
+  # Spectrum-rescaling target ohmic resistance for the AutoEIS fit (Option B):
+  # pooled training-median R1 (ohmic) across jones2022 featurized records. Set
+  # to null to disable rescaling. See oracle.py's _autoeis_ecm docstring.
+  rescale_target_r0: 0.1334
+  autoeis:
+    num_warmup: 500
+    num_samples: 200
 
 degradation:
   preset: accelerated              # nominal | accelerated | severe (see oracle.py:_build_degradation_config)
@@ -38,8 +113,24 @@ degradation:
   # quality is treated as a cell property, not a degradation-severity setting.
   ec_diffusivity_base_factor: 0.25 # Chen2020 EC diffusivity x this, before protocol_scaling.sei_rate_scale is also applied
 
-  # Informational only: hardcoded per-preset inside _build_degradation_config,
-  # not yet exposed as independent constructor kwargs.
+  lam_ceiling: 0.95        # max allowed loss-of-active-material fraction fed into the EIS linearisation
+
+  # DISABLED BY DEFAULT (scale=0.0). Explicit, additive C_rate_2 capacity-loss
+  # term, kept for provenance -- see oracle.py's c2_stress docstring for why it
+  # is off (the fitted real-data slope was found to be a measurement-noise
+  # artifact, not a validated relationship).
+  c2_stress:
+    scale: 0.0
+    slope_mah_per_ma: 0.0794
+    ref_ma: 75.27
+
+  # DISABLED BY DEFAULT (0.0). Explicit, additive depth-of-discharge /
+  # charge-induced-stress LAM term -- see oracle.py's dod_lam_scale docstring.
+  # Must be calibrated to a literature magnitude or deep-DoD dataset before
+  # enabling.
+  dod_lam_scale: 0.0
+
+  # Read by oracle.py:_build_degradation_config for the active preset above.
   # NOTE: particle_cracking is DISABLED in all presets (PyBaMM 26.6.2.0 regression).
   # The Chen2020 LGM50 graphite OCP causes IDAGetDky: IDA_BAD_K at t=0 when
   # 'particle mechanics: swelling and cracking' is active. Root cause: the cracking

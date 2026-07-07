@@ -31,9 +31,6 @@ from battery_oracle._circuit import (
     DEFAULT_CIRCUIT as _PROJECT_CIRCUIT,
 )
 from battery_oracle._circuit import (
-    ECM_PARAM_NAMES as _ECM_PARAM_NAMES,
-)
-from battery_oracle._circuit import (
     _param_labels_from_circuit as _param_labels_from_circuit,
 )
 from battery_oracle._circuit import (
@@ -180,6 +177,8 @@ def _randles_stub_ecm(
     frequencies: np.ndarray,
     Z_real: np.ndarray,
     Z_imag: np.ndarray,
+    *,
+    cpe_n_seed: dict | None = None,
 ) -> np.ndarray:
     """Fast Randles stub — fallback when AutoEIS is unavailable or fails.
 
@@ -187,7 +186,12 @@ def _randles_stub_ecm(
     high/low-frequency asymptotes and the peak imaginary frequency.  Returns
     the same 9-parameter half-vector duplicated for charge and discharge
     (18-D state vector).
+
+    ``cpe_n_seed`` (default ``None`` -> the module ``_CPE_N_SEED``) supplies
+    the CPE exponent seeds; ``PyBaMMOracle`` passes its own
+    (YAML-overridable, ``ecm.cpe_seeds.n`` in config_oracle_defaults.yml) map.
     """
+    cpe_n_seed = cpe_n_seed or _CPE_N_SEED
     # argmax/argmin give the highest/lowest frequency regardless of sort order
     hf_idx = np.argmax(frequencies)   # HF limit → ohmic resistance R_∞
     lf_idx = np.argmin(frequencies)   # LF limit → R_∞ + sum(R_RC)
@@ -200,8 +204,8 @@ def _randles_stub_ecm(
     P2w = 1.0 / max(R1 * omega_peak, 1e-9)
     P4w = 1.0 / max(R3 * omega_peak, 1e-9)
     P6w = 1.0 / max(R5 * omega_peak, 1e-9)
-    half = np.array([R1, P2w, _CPE_N_SEED["P2n"], R3, P4w, _CPE_N_SEED["P4n"],
-                     R5, P6w, _CPE_N_SEED["P6n"]], dtype=np.float64)
+    half = np.array([R1, P2w, cpe_n_seed["P2n"], R3, P4w, cpe_n_seed["P4n"],
+                     R5, P6w, cpe_n_seed["P6n"]], dtype=np.float64)
     return np.concatenate([half, half])
 
 
@@ -213,6 +217,13 @@ def _autoeis_ecm(
     circuit: str | None = None,
     _diag: dict | None = None,
     return_samples: bool = False,
+    cpe_w_seed: dict | None = None,
+    cpe_n_seed: dict | None = None,
+    cpe_w_default: float = _CPE_W_DEFAULT,
+    cpe_n_default: float = _CPE_N_DEFAULT,
+    rescale_target_r0: float | None = _ECM_RESCALE_TARGET_R0,
+    num_warmup: int = 500,
+    num_samples: int = 200,
 ) -> np.ndarray:
     """Fit ECM parameters to an EIS spectrum using AutoEIS Bayesian inference.
 
@@ -225,6 +236,11 @@ def _autoeis_ecm(
     generically from the circuit (ohmic R, arc [R,P] pairs, series CPEs), so a
     migrated circuit (e.g. the 7-param ``R1-[R2,P3]-[R4,P5]``) works unchanged.
 
+    ``cpe_w_seed``/``cpe_n_seed``/``cpe_w_default``/``cpe_n_default``/
+    ``rescale_target_r0``/``num_warmup``/``num_samples`` default to the module
+    constants (mirroring config_oracle_defaults.yml's ``ecm`` section);
+    ``PyBaMMOracle`` passes its own (YAML-overridable) values here.
+
     Falls back to :func:`_randles_stub_ecm` if AutoEIS inference fails.
     """
     if not _AUTOEIS_AVAILABLE:
@@ -234,14 +250,16 @@ def _autoeis_ecm(
         )
 
     circuit = circuit or _PROJECT_CIRCUIT
+    cpe_w_seed = cpe_w_seed or _CPE_W_SEED
+    cpe_n_seed = cpe_n_seed or _CPE_N_SEED
 
     # Option B: rescale the spectrum to the training ohmic-R scale before fitting
     # so the CPE admittances land in the training distribution (see
-    # _ECM_RESCALE_TARGET_R0). The fit then runs at real-cell scale; resistances
+    # rescale_target_r0). The fit then runs at real-cell scale; resistances
     # are restored to the oracle's native scale after fitting.
     _R0_native = float(Z_real[np.argmax(frequencies)])
-    if _ECM_RESCALE_TARGET_R0 and _R0_native > 1e-9:
-        _scale = float(_ECM_RESCALE_TARGET_R0) / _R0_native
+    if rescale_target_r0 and _R0_native > 1e-9:
+        _scale = float(rescale_target_r0) / _R0_native
     else:
         _scale = 1.0
     # Rescaled copies feed the fit; native Z_real/Z_imag are kept for the stub
@@ -267,12 +285,12 @@ def _autoeis_ecm(
     p0 = {ohmic: max(R0_est, 1e-4)}
     for (r, p), w in zip(pairs, weights):
         p0[r] = R_rc * w
-        p0[f"{p}w"] = _CPE_W_SEED.get(f"{p}w", _CPE_W_DEFAULT)
-        p0[f"{p}n"] = _CPE_N_SEED.get(f"{p}n", _CPE_N_DEFAULT)
+        p0[f"{p}w"] = cpe_w_seed.get(f"{p}w", cpe_w_default)
+        p0[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
     for l in labels:                                   # series CPE(s): P not in any arc
         if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
-            p0[l] = _CPE_W_SEED.get(l, _CPE_W_DEFAULT)
-            p0[f"{l[:-1]}n"] = _CPE_N_SEED.get(f"{l[:-1]}n", _CPE_N_DEFAULT)
+            p0[l] = cpe_w_seed.get(l, cpe_w_default)
+            p0[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
 
     _raw_samples: dict | None = None
     _variables: list[str] = []
@@ -280,7 +298,7 @@ def _autoeis_ecm(
         results = _autoeis.perform_bayesian_inference(
             circuit, frequencies, Z,
             p0=p0,
-            num_warmup=500, num_samples=200,
+            num_warmup=num_warmup, num_samples=num_samples,
             progress_bar=False, parallel=False,
         )
         _raw_samples = results[0].samples
@@ -316,7 +334,7 @@ def _autoeis_ecm(
             }
     except Exception as exc:
         log.warning("[AutoEIS] inference failed (%s); using Randles stub fallback", exc)
-        half = _randles_stub_ecm(frequencies, Z_real, Z_imag)[:len(labels)]
+        half = _randles_stub_ecm(frequencies, Z_real, Z_imag, cpe_n_seed=cpe_n_seed)[:len(labels)]
         if _diag is not None:
             _diag["max_cv"]    = float("nan")
             _diag["converged"] = False
@@ -348,6 +366,26 @@ def _autoeis_ecm(
 # Degradation configuration helper
 # ---------------------------------------------------------------------------
 
+# Numeric per-preset degradation constants, mirroring
+# config_oracle_defaults.yml's degradation.preset_constants section (which is
+# the actual, YAML-overridable source — see experiment.oracle_kwargs_from_config).
+# This module-level dict is only the fallback used when _build_degradation_config
+# is called directly with preset_constants=None (e.g. from a bare PyBaMMOracle()).
+_DEFAULT_PRESET_CONSTANTS: dict[str, dict] = {
+    "nominal": {},
+    "accelerated": {
+        "plating_kinetic_rate_constant_m_s": 1e-8,
+        "dead_lithium_decay_constant_s": 4e-6,
+        "initial_plated_lithium_concentration_mol_m3": 0.0,
+    },
+    "severe": {
+        "plating_kinetic_rate_constant_m_s": 1e-7,
+        "dead_lithium_decay_constant_s": 1e-4,
+        "initial_plated_lithium_concentration_mol_m3": 0.0,
+    },
+}
+
+
 def _build_degradation_config(
     preset: str,
     pv,
@@ -355,6 +393,8 @@ def _build_degradation_config(
     sei_rate_scale: float = 1.0,
     dead_li_decay_scale: float = 1.0,
     plating_rate_scale: float = 1.0,
+    ec_diffusivity_base_factor: float = 0.25,
+    preset_constants: dict | None = None,
 ) -> tuple[dict, object]:
     """Return (model_options, pv_modified) for the requested degradation preset.
 
@@ -426,6 +466,14 @@ def _build_degradation_config(
     Physical basis: Reniers et al. (2019) for SEI; Ai et al. (2020) for crack/LAM
     parameters and the underlying sigma_hyd(C-rate) stress model; OKane et al.
     (2022) for plating kinetics.
+
+    ``ec_diffusivity_base_factor`` (default 0.25) is the universal EC
+    diffusivity correction factor described below; ``preset_constants``
+    (default ``None`` -> :data:`_DEFAULT_PRESET_CONSTANTS`) supplies the
+    numeric per-preset plating/dead-Li constants used in the accelerated/severe
+    branches. Both mirror config_oracle_defaults.yml's ``degradation`` section
+    (``ec_diffusivity_base_factor`` and ``preset_constants`` respectively) —
+    ``PyBaMMOracle`` passes its own (YAML-overridable) values here.
     """
 
     if preset not in ("nominal", "accelerated", "severe"):
@@ -435,6 +483,7 @@ def _build_degradation_config(
         )
 
     pv = copy.deepcopy(pv)
+    pc = preset_constants if preset_constants is not None else _DEFAULT_PRESET_CONSTANTS[preset]
 
     # Universal EC diffusivity correction: commercial-grade electrolyte (FEC/VC additives)
     # forms a denser, more passivating SEI, reducing effective EC transport through the
@@ -442,7 +491,9 @@ def _build_degradation_config(
     # Pinson & Bazant, 2013).  Applied identically to all presets because electrolyte
     # quality is a cell property, not a degradation severity setting.
     try:
-        pv["EC diffusivity [m2.s-1]"] = float(pv["EC diffusivity [m2.s-1]"]) * 0.25 * sei_rate_scale
+        pv["EC diffusivity [m2.s-1]"] = (
+            float(pv["EC diffusivity [m2.s-1]"]) * ec_diffusivity_base_factor * sei_rate_scale
+        )
     except Exception:
         pass
 
@@ -502,12 +553,18 @@ def _build_degradation_config(
             "lithium plating": "partially reversible",
         }
         _override = {
-            "Lithium plating kinetic rate constant [m.s-1]": ("set", 1e-8 * plating_rate_scale),
-            "Dead lithium decay constant [s-1]": ("set", 4e-6 * dead_li_decay_scale),
+            "Lithium plating kinetic rate constant [m.s-1]": (
+                "set", pc.get("plating_kinetic_rate_constant_m_s", 1e-8) * plating_rate_scale
+            ),
+            "Dead lithium decay constant [s-1]": (
+                "set", pc.get("dead_lithium_decay_constant_s", 4e-6) * dead_li_decay_scale
+            ),
             # Zero out OKane2022's formation-cycle plated Li: the oracle starts with
             # a fresh cell.  Non-zero initial concentration strips during early cycling
             # at low C-rates and drives "Loss of capacity to ... plating" negative.
-            "Initial plated lithium concentration [mol.m-3]": ("set", 0.0),
+            "Initial plated lithium concentration [mol.m-3]": (
+                "set", pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
+            ),
         }
 
     else:  # severe
@@ -518,9 +575,15 @@ def _build_degradation_config(
             # regression applies here (see nominal preset comment above).
         }
         _override = {
-            "Lithium plating kinetic rate constant [m.s-1]": ("set", 1e-7 * plating_rate_scale),
-            "Dead lithium decay constant [s-1]": ("set", 1e-4 * dead_li_decay_scale),
-            "Initial plated lithium concentration [mol.m-3]": ("set", 0.0),
+            "Lithium plating kinetic rate constant [m.s-1]": (
+                "set", pc.get("plating_kinetic_rate_constant_m_s", 1e-7) * plating_rate_scale
+            ),
+            "Dead lithium decay constant [s-1]": (
+                "set", pc.get("dead_lithium_decay_constant_s", 1e-4) * dead_li_decay_scale
+            ),
+            "Initial plated lithium concentration [mol.m-3]": (
+                "set", pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
+            ),
         }
 
     # Borrow plating parameters that Chen2020 lacks from OKane2022.
@@ -675,6 +738,15 @@ class PyBaMMOracle:
     temperature_K : float
         Ambient temperature in Kelvin (default 298.15 K = 25 °C).  Sets the
         PyBaMM ``"Ambient temperature [K]"`` parameter.
+
+    Every kwarg not documented above (solver tolerances, protocol
+    current/voltage/duration bounds, the first-call ``initial_soc``, SOC/LAM
+    clip bounds, the combined-noise split, linKK validation params, the
+    degradation preset's numeric physics constants, and the ECM CPE fit
+    seeds/AutoEIS sampler settings) is a lower-level constant documented in
+    ``config_oracle_defaults.yml`` — its default here matches that file's
+    documented value, and ``experiment.build_oracle_from_config`` overrides it
+    from the YAML (packaged or a user-supplied ``config_oracle_*.yml``).
     """
 
     # Steps appended when capacity_check=True (must match _cap_check_steps()).
@@ -708,6 +780,45 @@ class PyBaMMOracle:
         rest_s: float = 1200.0,
         circuit: str | None = None,
         action_names: list[str] | None = None,
+        # -- Solver tolerances (config_oracle_defaults.yml: solver.*) --------
+        solver_rtol: float = 1e-3,
+        solver_atol: float = 1e-6,
+        solver_dt_max_s: float = 60.0,
+        emergency_solver_rtol: float = 1e-2,
+        emergency_solver_atol: float = 1e-5,
+        emergency_solver_dt_max_s: float = 10.0,
+        # -- Protocol sanitisation bounds (config_oracle_defaults.yml: protocol_bounds.*) --
+        c_min_mA: float = 50.0,
+        c_max_mA: float = 10_000.0,
+        c2_min_mA: float = 20.0,
+        c2_max_mA: float = 10_000.0,
+        dur_min_s: float = 60.0,
+        dur_max_s: float = 28_800.0,
+        v_charge_max: float = 4.3,
+        v_discharge_min: float = 3.0,
+        charge_stage_max_s: float = 900.0,
+        # -- First-call SOC and internal clip bounds (config_oracle_defaults.yml: cycling.initial_soc, eis.soc_clip_*/lam_ceiling) --
+        initial_soc: float = 0.8,
+        soc_clip_min: float = 0.05,
+        soc_clip_max: float = 0.99,
+        lam_ceiling: float = 0.95,
+        # -- Combined-noise split (config_oracle_defaults.yml: eis.noise_combined_*_frac) --
+        noise_combined_flicker_frac: float = 0.75,
+        noise_combined_white_frac: float = 0.25,
+        # -- linKK validation params (config_oracle_defaults.yml: eis.linkk.*) --
+        linkk_c: float = 0.85,
+        linkk_max_M: int = 50,
+        # -- Degradation preset physics (config_oracle_defaults.yml: degradation.*) --
+        ec_diffusivity_base_factor: float = 0.25,
+        preset_constants: dict | None = None,
+        # -- ECM CPE fit seeds + AutoEIS sampler (config_oracle_defaults.yml: ecm.*) --
+        cpe_w_seed: dict | None = None,
+        cpe_n_seed: dict | None = None,
+        cpe_w_default: float = 0.1,
+        cpe_n_default: float = 0.80,
+        ecm_rescale_target_r0: float | None = 0.1334,
+        autoeis_num_warmup: int = 500,
+        autoeis_num_samples: int = 200,
     ) -> None:
         self._pb = _pb
         # ECM circuit fitted to every spectrum + the protocol/action feature
@@ -823,6 +934,50 @@ class PyBaMMOracle:
         self._eis_drift_scale = float(eis_drift_scale)
         self._eis_drift_tau_s = float(eis_drift_tau_s)
         self._eis_drift_n_periods = float(eis_drift_n_periods)
+
+        # Solver tolerances (see _build_native_state).
+        self._solver_rtol = float(solver_rtol)
+        self._solver_atol = float(solver_atol)
+        self._solver_dt_max_s = float(solver_dt_max_s)
+        self._emergency_solver_rtol = float(emergency_solver_rtol)
+        self._emergency_solver_atol = float(emergency_solver_atol)
+        self._emergency_solver_dt_max_s = float(emergency_solver_dt_max_s)
+
+        # Protocol sanitisation bounds (see _sanitise_current/_sanitise_duration/
+        # _protocol_to_experiment/_cap_check_steps). Instance attributes (not
+        # class constants) so a YAML-driven build can override them per oracle.
+        self._C_MIN_mA = float(c_min_mA)
+        self._C_MAX_mA = float(c_max_mA)
+        self._C2_MIN_mA = float(c2_min_mA)
+        self._C2_MAX_mA = float(c2_max_mA)
+        self._DUR_MIN_s = float(dur_min_s)
+        self._DUR_MAX_s = float(dur_max_s)
+        self._V_CHARGE_MAX = float(v_charge_max)
+        self._V_DISCHARGE_MIN = float(v_discharge_min)
+        self._CHARGE_STAGE_MAX_s = float(charge_stage_max_s)
+
+        # First-call SOC + internal clip bounds (see __call__).
+        self._initial_soc = float(initial_soc)
+        self._soc_clip_min = float(soc_clip_min)
+        self._soc_clip_max = float(soc_clip_max)
+        self._lam_ceiling = float(lam_ceiling)
+
+        # Combined-noise split + linKK validation params (see __call__/_eis_and_correct).
+        self._noise_combined_flicker_frac = float(noise_combined_flicker_frac)
+        self._noise_combined_white_frac = float(noise_combined_white_frac)
+        self._linkk_c = float(linkk_c)
+        self._linkk_max_M = int(linkk_max_M)
+
+        # ECM CPE fit seeds + AutoEIS sampler settings (see _fit_half).
+        self._cpe_w_seed = cpe_w_seed
+        self._cpe_n_seed = cpe_n_seed
+        self._cpe_w_default = float(cpe_w_default)
+        self._cpe_n_default = float(cpe_n_default)
+        self._ecm_rescale_target_r0 = (
+            float(ecm_rescale_target_r0) if ecm_rescale_target_r0 is not None else None
+        )
+        self._autoeis_num_warmup = int(autoeis_num_warmup)
+        self._autoeis_num_samples = int(autoeis_num_samples)
         try:
             self._c20_A = float(self._pv["Nominal cell capacity [A.h]"]) / 20.0
         except Exception:
@@ -847,6 +1002,8 @@ class PyBaMMOracle:
             kinetics_scale=kinetics_scale, sei_rate_scale=sei_rate_scale,
             dead_li_decay_scale=dead_li_decay_scale,
             plating_rate_scale=plating_rate_scale,
+            ec_diffusivity_base_factor=ec_diffusivity_base_factor,
+            preset_constants=preset_constants,
         )
 
         # EIS model is built fresh each __call__ so degraded ParameterValues can
@@ -929,13 +1086,13 @@ class PyBaMMOracle:
         """
         self._cycling_model = self._model_cls(options=self._deg_opts)
         try:
-            self._solver = self._pb.IDAKLUSolver(rtol=1e-3, atol=1e-6)
+            self._solver = self._pb.IDAKLUSolver(rtol=self._solver_rtol, atol=self._solver_atol)
         except Exception:
             self._solver = self._pb.CasadiSolver(
                 mode="safe",
-                dt_max=60.0,
-                rtol=1e-3,
-                atol=1e-6,
+                dt_max=self._solver_dt_max_s,
+                rtol=self._solver_rtol,
+                atol=self._solver_atol,
             )
 
         # Emergency solver: deliberately a *different solver family*, not just
@@ -947,9 +1104,9 @@ class PyBaMMOracle:
         # it reliably, so it is always the emergency solver here.
         self._solver_emerg = self._pb.CasadiSolver(
             mode="safe",
-            dt_max=10.0,
-            rtol=1e-2,
-            atol=1e-5,
+            dt_max=self._emergency_solver_dt_max_s,
+            rtol=self._emergency_solver_rtol,
+            atol=self._emergency_solver_atol,
         )
 
     def reset(self) -> None:
@@ -965,27 +1122,24 @@ class PyBaMMOracle:
         self._cumulative_dod_throughput_ah = 0.0
         self._build_native_state()
 
-    # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah).
-    # Upper C-rate: 1C = 5 000 mA; SPMe accuracy degrades above this and the
-    # DAE solver diverges above ~2–3C.  Upper duration: 8 h is generous for any
-    # step that also has a voltage-cutoff termination condition.
-    _C_MIN_mA  = 50.0;    _C_MAX_mA  = 10_000.0  # charge step 1 / discharge (2C on 5 Ah cell)
-    # charge step 2 (taper stage): real jones2022 variable-discharge cells
-    # (see project_crate_real_data_finding memory) run C_rate_2 at 35-118 mA
-    # raw, which scales (via _cap_scale, ~118x for these ~42 mAh cells) to
-    # 4_140-13_954 mA -- within _C_MAX_mA's validated-stable 2C envelope, so
-    # C_rate_2 shares that ceiling rather than an independent, lower one.
-    # C_rate_2 is the one protocol dimension real data shows correlates with
-    # degradation (rho=0.111, p=8e-05).
-    _C2_MIN_mA = 20.0;    _C2_MAX_mA = 10_000.0  # charge step 2 (taper stage)
-    _DUR_MIN_s = 60.0;    _DUR_MAX_s = 28_800.0  # 1 min – 8 h
-    # Protocol cutoffs from Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806),
-    # Methods "Battery cycling": two-stage CC charge (<=15 min/stage) stopping at
-    # 4.3 V (no CV hold), single-stage CC discharge until 3.0 V. These replace the
-    # earlier 4.1 V/3.3 V + CV-hold approximation.
-    _V_CHARGE_MAX   = 4.3   # charge safety cutoff (V)
-    _V_DISCHARGE_MIN = 3.0  # discharge cutoff (V)
-    _CHARGE_STAGE_MAX_s = 900.0  # 15 min per CC charge stage (paper limit)
+    # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah) --
+    # _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/_DUR_MAX_s/
+    # _V_CHARGE_MAX/_V_DISCHARGE_MIN/_CHARGE_STAGE_MAX_s are set as INSTANCE
+    # attributes in __init__ (from the c_min_mA/... kwargs, YAML-overridable
+    # via config_oracle_defaults.yml's protocol_bounds section), not class
+    # constants here. Upper C-rate: 1C = 5 000 mA; SPMe accuracy degrades
+    # above this and the DAE solver diverges above ~2-3C.  Upper duration:
+    # 8 h is generous for any step that also has a voltage-cutoff termination
+    # condition. charge step 2 (taper stage): real jones2022 variable-discharge
+    # cells (see project_crate_real_data_finding memory) run C_rate_2 at
+    # 35-118 mA raw, which scales (via _cap_scale, ~118x for these ~42 mAh
+    # cells) to 4_140-13_954 mA -- within _C_MAX_mA's validated-stable 2C
+    # envelope, so C_rate_2 shares that ceiling rather than an independent,
+    # lower one. C_rate_2 is the one protocol dimension real data shows
+    # correlates with degradation (rho=0.111, p=8e-05). Voltage/duration
+    # cutoffs from Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806), Methods
+    # "Battery cycling": two-stage CC charge (<=15 min/stage) stopping at
+    # 4.3 V (no CV hold), single-stage CC discharge until 3.0 V.
     # jones2022 CR2032 coin cells vs Chen2020 SPMe (5 Ah): protocol currents are
     # scaled so the same C-rate fraction is applied to the larger cell. Default
     # assumes a ~200 mAh cell; pass real_cell_capacity_mah to __init__ for an
@@ -1080,7 +1234,7 @@ class PyBaMMOracle:
         # Chen2020's default initial stoichiometry x_neg = 0.901 gives OCV ≈ 4.10 V,
         # which immediately triggers the Maximum-voltage infeasibility event.
         _first_call = self._prev_solution is None
-        _solve_kw: dict = {"initial_soc": 0.8} if _first_call else {}
+        _solve_kw: dict = {"initial_soc": self._initial_soc} if _first_call else {}
         # Expected step count for the cycle(s) this call adds — used below to
         # detect a *silent* truncation.  PyBaMM's Experiment runner catches
         # internal solver errors (e.g. IDA_ERR_FAIL at the CC->CV switch) on
@@ -1160,7 +1314,7 @@ class PyBaMMOracle:
             )
         except Exception:
             x_neg_chg = float(sol["Average negative particle stoichiometry"].entries[-1])
-        soc_charge = float(np.clip(x_neg_chg / x100, 0.05, 0.99))
+        soc_charge = float(np.clip(x_neg_chg / x100, self._soc_clip_min, self._soc_clip_max))
 
         try:
             x_neg_dis = float(
@@ -1168,7 +1322,7 @@ class PyBaMMOracle:
             )
         except Exception:
             x_neg_dis = x_neg_chg
-        soc_discharge = float(np.clip(x_neg_dis / x100, 0.05, 0.99))
+        soc_discharge = float(np.clip(x_neg_dis / x100, self._soc_clip_min, self._soc_clip_max))
 
         # --- DoD / charge-induced-stress LAM increment (see __init__) -------
         # Computed HERE, before the EIS linearisation, so depth-of-discharge
@@ -1195,7 +1349,7 @@ class PyBaMMOracle:
         if self._eps_s_nominal is not None:
             try:
                 lam_pct = float(sol["Loss of active material in negative electrode [%]"].entries[-1])
-                lam_frac = float(np.clip(lam_pct / 100.0, 0.0, 0.95))
+                lam_frac = float(np.clip(lam_pct / 100.0, 0.0, self._lam_ceiling))
             except Exception:
                 lam_frac = 0.0
             try:
@@ -1204,7 +1358,7 @@ class PyBaMMOracle:
                 # plus the DoD/charge-induced-stress LAM. lam_frac alone still
                 # feeds lam_cap_loss below; the DoD part is added to eol_loss
                 # separately, so combining them here does not double-count.
-                eff_lam = float(np.clip(lam_frac + self._cumulative_dod_lam_frac, 0.0, 0.95))
+                eff_lam = float(np.clip(lam_frac + self._cumulative_dod_lam_frac, 0.0, self._lam_ceiling))
                 if eff_lam > 1e-4:
                     eis_pv["Negative electrode active material volume fraction"] = (
                         self._eps_s_nominal * (1.0 - eff_lam)
@@ -1257,9 +1411,9 @@ class PyBaMMOracle:
                     Z = _add_white_noise(Z, nl)
                 elif self._eis_noise_model == "flicker":
                     Z = _add_flicker_noise(self.frequencies, Z, nl)
-                else:  # "combined": split budget across flicker (0.3) and white (0.1), renormalised
-                    Z = _add_flicker_noise(self.frequencies, Z, noise_level=nl * 0.75)
-                    Z = _add_white_noise(Z, noise_level=nl * 0.25)
+                else:  # "combined": split budget across flicker and white terms
+                    Z = _add_flicker_noise(self.frequencies, Z, noise_level=nl * self._noise_combined_flicker_frac)
+                    Z = _add_white_noise(Z, noise_level=nl * self._noise_combined_white_frac)
             # Non-stationarity drift: EIS measured while the OCP still relaxes
             # (Hallemans et al. 2023, Eqs 40/43). Coupled to self._rest_s, so it
             # vanishes for well-rested cells; disabled at scale 0.0.
@@ -1432,7 +1586,7 @@ class PyBaMMOracle:
         self._last_Z = Z_charge.copy()
 
         # ── linKK and DRT use the post-charge spectrum (primary measurement) ────
-        linkk_rmse = _linkk_rmse(self.frequencies, Z_charge)
+        linkk_rmse = _linkk_rmse(self.frequencies, Z_charge, c=self._linkk_c, max_M=self._linkk_max_M)
 
         drt_peaks = np.array([], dtype=float)
         try:
@@ -1458,9 +1612,17 @@ class PyBaMMOracle:
                 full, raw_samples, raw_variables = _autoeis_ecm(
                     self.frequencies, Z.real, Z.imag,
                     circuit=self._circuit, _diag=_diag, return_samples=True,
+                    cpe_w_seed=self._cpe_w_seed, cpe_n_seed=self._cpe_n_seed,
+                    cpe_w_default=self._cpe_w_default, cpe_n_default=self._cpe_n_default,
+                    rescale_target_r0=self._ecm_rescale_target_r0,
+                    num_warmup=self._autoeis_num_warmup, num_samples=self._autoeis_num_samples,
                 )
                 _diag["_raw_samples"] = raw_samples
                 _diag["_raw_variables"] = raw_variables
+            elif self.ecm_model_fn is _randles_stub_ecm:
+                full = _randles_stub_ecm(
+                    self.frequencies, Z.real, Z.imag, cpe_n_seed=self._cpe_n_seed,
+                )
             else:
                 full = self.ecm_model_fn(self.frequencies, Z.real, Z.imag)
             return full[:_n_params]
@@ -1498,6 +1660,8 @@ class PyBaMMOracle:
         history: list[dict],
         out_path: str | Path,
         cell_id: str = "oracle_sim",
+        circuit: str | None = None,
+        action_names: list[str] | None = None,
     ) -> Path:
         """Save oracle history to CSV matching the jones2022 featurized record format.
 
@@ -1516,12 +1680,26 @@ class PyBaMMOracle:
             Destination CSV path.  Parent directories are created if absent.
         cell_id :
             Value written to the ``cell_id`` column.
+        circuit :
+            ECM circuit the history's ``ecm_params_*`` were fitted against.
+            Defaults to the package canonical circuit (``_PROJECT_CIRCUIT``) —
+            pass the oracle's own ``oracle._circuit`` if it was constructed
+            with a non-default ``circuit=`` kwarg, otherwise the exported
+            column names/count will not match the actual ECM parameters.
+        action_names :
+            Protocol/action column names. Defaults to the package canonical
+            names (``_ACTION_NAMES``) — pass ``oracle._action_names`` if the
+            oracle was constructed with custom ``action_names=``.
 
         Returns
         -------
         Path
             The path that was written.
         """
+        circuit = circuit or _PROJECT_CIRCUIT
+        ecm_param_names = _param_labels_from_circuit(circuit)
+        action_names = list(action_names) if action_names else list(_ACTION_NAMES)
+
         # Sequence-level symmetric-arc flip correction, matching the tsdatagen
         # featurization. The per-call ecm_params means cannot be corrected at
         # call time (the swap is only resolvable across the whole cycle list), so
@@ -1542,7 +1720,7 @@ class PyBaMMOracle:
                     idxs.append(j)
                     var_lists.append(h.get(vars_key) or list(s.keys()))
             if len(dicts) >= 2:
-                fix_parameter_flips_dicts(dicts, _PROJECT_CIRCUIT)
+                fix_parameter_flips_dicts(dicts, circuit)
                 for d, j, variables in zip(dicts, idxs, var_lists):
                     corrected[(j, state_label)] = np.array(
                         [float(np.median(d[v])) for v in variables]
@@ -1553,7 +1731,7 @@ class PyBaMMOracle:
             row: dict = {
                 "cell_id": cell_id,
                 "cycle":   h["call_idx"],
-                "circuit": _PROJECT_CIRCUIT,
+                "circuit": circuit,
             }
             for state_label, key in (
                 ("charge",    "ecm_params_charge"),
@@ -1561,15 +1739,15 @@ class PyBaMMOracle:
             ):
                 params = corrected.get((hj, state_label))
                 if params is None:
-                    params = h.get(key, np.zeros(len(_ECM_PARAM_NAMES)))
-                for i, pname in enumerate(_ECM_PARAM_NAMES):
+                    params = h.get(key, np.zeros(len(ecm_param_names)))
+                for i, pname in enumerate(ecm_param_names):
                     v = float(params[i]) if i < len(params) else 0.0
                     row[f"{pname}_{state_label}_mean"]     = v
                     row[f"{pname}_{state_label}_var"]      = 0.0
                     row[f"{pname}_{state_label}_kurtosis"] = 0.0
                     row[f"{pname}_{state_label}_skew"]     = 0.0
             proto = h.get("protocol", np.zeros(6))
-            for i, col in enumerate(_ACTION_NAMES):
+            for i, col in enumerate(action_names):
                 row[col] = float(proto[i]) if i < len(proto) else 0.0
             rows.append(row)
 

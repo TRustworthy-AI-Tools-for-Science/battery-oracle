@@ -11,7 +11,17 @@
 #   run_experiment(path)          -> list[dict]      (oracle history)
 #
 # Every field below maps directly onto a PyBaMMOracle constructor kwarg; the
-# mapping is documented in experiment.oracle_kwargs_from_config.
+# mapping is documented in experiment.oracle_kwargs_from_config. Every field
+# is optional except the five top-level sections below (model/cycling/
+# degradation/eis/protocols) -- anything omitted falls back to
+# config_oracle_defaults.yml's value, which itself falls back to
+# PyBaMMOracle's own Python-literal default.
+
+# Optional: path to a custom oracle-defaults YAML (e.g. a tune-oracle-skill
+# calibration output config_oracle_{dataset}.yml) to use instead of the
+# packaged config_oracle_defaults.yml as the base layer for every field below.
+# null (default) uses the packaged defaults.
+oracle_config: null
 
 model:
   type: SPMe                 # SPMe | SPM | DFN  -> PyBaMMOracle(model=...)
@@ -21,6 +31,9 @@ cycling:
   temperature_K: 298.15      # -> temperature_K  (sets "Ambient temperature [K]" when != 298.15)
   parameter_set: Chen2020    # -> parameter_values = pybamm.ParameterValues(<name>)
   real_cell_capacity_mah: 200.0   # -> real_cell_capacity_mah (C-rate scaling onto the 5 Ah cell)
+  # Optional; default from config_oracle_defaults.yml (cycling.rest_s / .initial_soc):
+  rest_s: 1200.0              # -> rest_s  (OCV rest duration on each side of a cycle)
+  initial_soc: 0.80           # -> initial_soc  (first-call starting SOC)
 
 degradation:
   preset: accelerated        # -> degradation_preset  (nominal | accelerated | severe)
@@ -31,6 +44,11 @@ degradation:
   sei_rate_scale: 1.0        # -> sei_rate_scale
   dead_li_decay_scale: 1.0   # -> dead_li_decay_scale
   plating_rate_scale: 1.0    # -> plating_rate_scale
+  # Optional, disabled by default (see config_oracle_defaults.yml for why):
+  dod_lam_scale: 0.0                 # -> dod_lam_scale
+  c2_stress_scale: 0.0               # -> c2_stress_scale
+  c2_stress_slope_mah_per_ma: 0.0794 # -> c2_stress_slope_mah_per_ma
+  c2_stress_ref_ma: 75.27            # -> c2_stress_ref_ma
 
 eis:
   freq_min_hz: 0.01          # -> frequencies = np.logspace(log10(min), log10(max), n)
@@ -38,6 +56,10 @@ eis:
   n_freq_points: 60
   noise_level: 0.02          # -> eis_noise_level  (fractional amplitude; ~2% lab EIS noise)
   noise_model: combined      # -> eis_noise_model  (white | flicker | combined | none)
+  # Optional, disabled by default (see config_oracle_defaults.yml eis.drift_*):
+  drift_scale: 0.0           # -> eis_drift_scale
+  drift_tau_s: 600.0         # -> eis_drift_tau_s
+  drift_n_periods: 4.0       # -> eis_drift_n_periods
 
 # Equivalent-circuit model fitted to each EIS spectrum. Optional section:
 ecm:

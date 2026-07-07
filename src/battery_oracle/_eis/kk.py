@@ -144,11 +144,15 @@ def kk_pipeline(freq, Z, circuit_fn, params, decades=20, n_per_decade=50, a=1e-6
     return kk_residuals(freq, Z, freq_full, Z_kk_full)
 
 
-def linkk_rmse(freq, Z):
+def linkk_rmse(freq, Z, c: float = 0.85, max_M: int = 50):
     """Compute linKK reconstruction RMSE for one spectrum.
 
     Uses impedance.py (numpy-based) so it is safe to call from multiple
     threads alongside a JAX-based inference run.
+
+    ``c``/``max_M`` default to the values documented in
+    config_oracle_defaults.yml's ``eis.linkk`` section; ``PyBaMMOracle``
+    passes its own (YAML-overridable) ``linkk_c``/``linkk_max_M`` here.
 
     Returns the RMS of the relative residuals as a plain float, or nan on
     any failure.
@@ -164,7 +168,7 @@ def linkk_rmse(freq, Z):
     try:
         _stdout, sys.stdout = sys.stdout, io.StringIO()
         try:
-            _, _, _Z_fit, res_real, res_imag = linKK(freq, Z, c=0.85, max_M=50)
+            _, _, _Z_fit, res_real, res_imag = linKK(freq, Z, c=c, max_M=max_M)
         finally:
             sys.stdout = _stdout
         return float(np.sqrt(np.mean(res_real ** 2 + res_imag ** 2)))
