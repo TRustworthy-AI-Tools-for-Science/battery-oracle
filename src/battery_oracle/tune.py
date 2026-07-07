@@ -791,6 +791,7 @@ def write_oracle_config(
     drift_result: dict | None = None,
 ) -> None:
     """Write YAML config with calibration provenance to *output_path*."""
+    output_path = Path(output_path)
     oracle_defaults = load_oracle_config()
     _od_cycling = oracle_defaults.get("cycling", {}) or {}
     _od_eis = oracle_defaults.get("eis", {}) or {}
