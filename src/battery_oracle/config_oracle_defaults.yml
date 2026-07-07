@@ -1,0 +1,113 @@
+# Base PyBaMMOracle hyperparameters (oracle.py defaults, Chen2020 parameter set).
+#
+# This is the fallback config: dataset-specific calibrations produced by the
+# tune-oracle skill live alongside it as config_oracle_{dataset}.yml and override
+# the fields under `protocol_scaling` and `degradation` (see that skill for the
+# calibration workflow). Sections marked "informational only" document oracle
+# internals that influence degradation behavior but aren't yet independent
+# constructor kwargs -- see oracle.py's _build_degradation_config.
+
+cycling:
+  n_cycles: 1
+  parameter_set: Chen2020          # pybamm.ParameterValues("Chen2020"), 5 Ah NMC/graphite pouch cell
+  temperature_K: 298.15            # 25 degC; sets "Ambient temperature [K]" when != 298.15
+
+eis:
+  freq_min_hz: 0.01
+  freq_max_hz: 10000.0
+  n_freq_points: 60                # np.logspace(-2, 4, 60)
+  noise_level: 0.02                # fractional amplitude; mimics ~2% potentiostat noise typical of lab EIS
+  noise_model: combined            # white | flicker | combined | none
+
+ecm:
+  # Equivalent-circuit structure fitted to each EIS spectrum. The ECM parameter
+  # layout AND the tune engine's arc-ratio / R1-growth metrics are DERIVED from
+  # this circuit (ohmic R = the resistor outside any [R,CPE] arc; arc Rs are the
+  # bracketed resistors) -- no fixed element count is assumed anywhere. Load it via
+  # battery_oracle.load_default_ecm_circuit(); the tune engine falls back to it when
+  # no circuit is passed. AutoEIS labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE
+  # exponent, so this 9-parameter circuit -> [R1,P2w,P2n,R3,P4w,P4n,R5,P6w,P6n].
+  circuit: "R1-P2-[R3,P4]-[R5,P6]"
+
+degradation:
+  preset: accelerated              # nominal | accelerated | severe (see oracle.py:_build_degradation_config)
+  eol_capacity_fraction: 0.80       # OracleFailure raised when SOH < this
+  capacity_check: false            # true appends a C/20 reference charge+discharge each call (~20x slower, more accurate)
+
+  # Universal correction applied identically across all presets -- electrolyte
+  # quality is treated as a cell property, not a degradation-severity setting.
+  ec_diffusivity_base_factor: 0.25 # Chen2020 EC diffusivity x this, before protocol_scaling.sei_rate_scale is also applied
+
+  # Informational only: hardcoded per-preset inside _build_degradation_config,
+  # not yet exposed as independent constructor kwargs.
+  # NOTE: particle_cracking is DISABLED in all presets (PyBaMM 26.6.2.0 regression).
+  # The Chen2020 LGM50 graphite OCP causes IDAGetDky: IDA_BAD_K at t=0 when
+  # 'particle mechanics: swelling and cracking' is active. Root cause: the cracking
+  # stress submodel evaluates dOCP/dc at initial conditions; the LGM50 function
+  # returns inconsistent values that make IDA DAE initialization fail.
+  # C-rate sensitivity is preserved via lithium plating kinetics in
+  # accelerated/severe presets. Nominal loses C-rate sensitivity (SEI only).
+  # See oracle.py:_build_degradation_config comments (2026-06-23) for full writeup.
+  preset_constants:
+    nominal:
+      sei: true
+      lithium_plating: false
+      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
+      sei_on_cracks: false
+      target_eol_cycles_at_1c: "200-400"  # SEI-only → much slower degradation
+    accelerated:
+      sei: true
+      lithium_plating: true
+      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
+      sei_on_cracks: false
+      plating_kinetic_rate_constant_m_s: 1.0e-8
+      dead_lithium_decay_constant_s: 4.0e-6
+      initial_plated_lithium_concentration_mol_m3: 0.0
+      target_eol_cycles_at_1c: "40-70"
+    severe:
+      sei: true
+      lithium_plating: true
+      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
+      sei_on_cracks: false               # also disabled (cracking required)
+      plating_kinetic_rate_constant_m_s: 1.0e-7
+      dead_lithium_decay_constant_s: 1.0e-4
+      initial_plated_lithium_concentration_mol_m3: 0.0
+      target_eol_cycles_at_1c: "20-50"
+
+# Real-cell calibration knobs. These are what the tune-oracle skill searches over
+# when fitting the oracle to a specific dataset's real EIS + capacity data.
+protocol_scaling:
+  # real_cell_capacity_mah is intentionally NOT set here: it varies per cell (e.g.
+  # jones2022 PJ121 ~42 mAh, PJ100 ~45 mAh) and should be auto-detected per cell at
+  # runtime from its own formation-cycle discharge (see
+  # jones_oracle_study.detect_real_capacity_mah), not pinned to one dataset-wide
+  # value. The legacy default below is only used if auto-detection is unavailable.
+  real_cell_capacity_mah_legacy_default: 200.0
+
+  kinetics_scale: 1.0   # exchange-current-density multiplier; <1 slows charge-transfer
+                          # kinetics and grows the relative EIS arc size (R3/R1, R5/R1)
+  sei_rate_scale: 1.0    # multiplies EC diffusivity (on top of ec_diffusivity_base_factor
+                          # above); <1 slows SEI/R1 growth rate, but with sharply
+                          # diminishing effect once growth becomes reaction-limited (see
+                          # oracle.py's sei_rate_scale docstring -- R1 growth-rate
+                          # calibration is not fully solved by this knob; scaling "SEI
+                          # kinetic rate constant" was tried and reverted, as it moved
+                          # growth the WRONG direction). Needed because kinetics_scale
+                          # has a side effect on SEI growth rate too (lower
+                          # exchange-current density raises overpotential, which the SEI
+                          # growth law is exponential in -- see ORACLE.md SS2.1), so this
+                          # knob exists to un-confound the two effects, even though it
+                          # currently only partially succeeds.
+  dead_li_decay_scale: 1.0  # multiplier on Dead lithium decay constant [s-1]:
+                              #   accelerated base: 4e-6 s-1  → 4e-6 * dead_li_decay_scale
+                              #   severe base:      1e-4 s-1  → 1e-4 * dead_li_decay_scale
+                              # Higher values = faster dead-Li dissolution = less dead-Li
+                              # accumulation from plating = lower R1 ohmic growth.
+                              # Swept via 4D Bayesian optimisation in tune_oracle.py.
+  plating_rate_scale: 1.0   # multiplier on Lithium plating kinetic rate constant [m.s-1]:
+                              #   accelerated base: 1e-8 m/s → 1e-8 * plating_rate_scale
+                              #   severe base:      1e-7 m/s → 1e-7 * plating_rate_scale
+                              # Lower values = slower Li plating = less dead Li formed per
+                              # cycle = lower R1 growth AND longer EOL (unlike dead_li_decay_scale
+                              # which trades one against the other).
+                              # Swept via 4D Bayesian optimisation in tune_oracle.py.

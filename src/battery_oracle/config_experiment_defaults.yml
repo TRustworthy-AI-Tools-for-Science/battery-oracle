@@ -1,0 +1,67 @@
+# Experiment protocol definition for battery_oracle.
+#
+# Unlike config_oracle_defaults.yml (reference documentation of the oracle's
+# internal defaults), THIS file is executable: it is consumed by
+# battery_oracle.experiment to build and run a PyBaMMOracle.
+#
+#   load_experiment_config(path)  -> dict            (parse + validate)
+#   oracle_kwargs_from_config(cfg)-> dict            (YAML field -> constructor kwarg)
+#   build_oracle_from_config(cfg) -> PyBaMMOracle
+#   protocols_from_config(cfg)    -> list[np.ndarray] (6-D protocol vectors)
+#   run_experiment(path)          -> list[dict]      (oracle history)
+#
+# Every field below maps directly onto a PyBaMMOracle constructor kwarg; the
+# mapping is documented in experiment.oracle_kwargs_from_config.
+
+model:
+  type: SPMe                 # SPMe | SPM | DFN  -> PyBaMMOracle(model=...)
+
+cycling:
+  n_cycles: 1                # -> n_cycles
+  temperature_K: 298.15      # -> temperature_K  (sets "Ambient temperature [K]" when != 298.15)
+  parameter_set: Chen2020    # -> parameter_values = pybamm.ParameterValues(<name>)
+  real_cell_capacity_mah: 200.0   # -> real_cell_capacity_mah (C-rate scaling onto the 5 Ah cell)
+
+degradation:
+  preset: accelerated        # -> degradation_preset  (nominal | accelerated | severe)
+  eol_capacity_fraction: 0.80  # -> eol_capacity_fraction  (OracleFailure raised when SOH < this)
+  capacity_check: false      # -> capacity_check  (true = C/20 reference discharge each call, ~20x slower)
+  # Optional calibration scales (each defaults to 1.0 if omitted):
+  kinetics_scale: 1.0        # -> kinetics_scale
+  sei_rate_scale: 1.0        # -> sei_rate_scale
+  dead_li_decay_scale: 1.0   # -> dead_li_decay_scale
+  plating_rate_scale: 1.0    # -> plating_rate_scale
+
+eis:
+  freq_min_hz: 0.01          # -> frequencies = np.logspace(log10(min), log10(max), n)
+  freq_max_hz: 10000.0
+  n_freq_points: 60
+  noise_level: 0.02          # -> eis_noise_level  (fractional amplitude; ~2% lab EIS noise)
+  noise_model: combined      # -> eis_noise_model  (white | flicker | combined | none)
+
+# Equivalent-circuit model fitted to each EIS spectrum. Optional section:
+ecm:
+  fitter: randles            # randles (fast analytic stub, works on the core install) |
+                             # autoeis (Bayesian fit; requires the [autoeis] extra)
+  circuit: "R1-P2-[R3,P4]-[R5,P6]"   # ECM structure -> PyBaMMOracle(circuit=...). The
+                             # parameter layout is derived from this string; omit to use
+                             # config_oracle_defaults.yml's ecm.circuit.
+
+# One or more 6-D charge/discharge protocols. Each maps in field order to
+#   [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]
+# 'name' is optional and used only for labels/plots.
+protocols:
+  - name: baseline
+    C_rate_1_mA: 200.0
+    C_rate_2_mA: 100.0
+    dur_1_h: 1.0
+    dur_2_h: 0.5
+    D_rate_mA: 100.0
+    dur_d_h: 1.0
+  - name: fast_charge
+    C_rate_1_mA: 400.0
+    C_rate_2_mA: 200.0
+    dur_1_h: 0.25
+    dur_2_h: 0.125
+    D_rate_mA: 100.0
+    dur_d_h: 1.0

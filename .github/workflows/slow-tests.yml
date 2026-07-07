@@ -1,0 +1,22 @@
+name: Slow tests
+
+# Heavy PyBaMM + AutoEIS (JAX/NumPyro) runs, kept off the PR path.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - name: Sync (core + dev + autoeis + tune)
+        run: uv sync --group dev --extra autoeis --extra tune
+      - name: Slow + AutoEIS tests
+        run: uv run pytest -m slow -q

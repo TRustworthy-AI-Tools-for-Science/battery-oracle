@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "battery-oracle"
+version = "0.1.0"
+description = "Standalone PyBaMM/SPMe battery oracle (simulator) + EIS + ECM fitting, with an Optuna calibration engine."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Ashley Dale", email = "ashley.dale@utoronto.ca" },
+]
+dependencies = [
+    "numpy>=2.0.0",
+    "pandas",
+    "scipy>=1.10.0",
+    "matplotlib",
+    "impedance",
+    "pybamm>=26.4.3",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# Bayesian ECM fitting. Without it, PyBaMMOracle falls back to the fast analytic
+# Randles stub (_randles_stub_ecm) for the ECM step.
+autoeis = [
+    "autoeis>=0.0.30",
+    "mpire>=2.10.0",
+]
+# Distribution-of-relaxation-times peaks (get_drt_impedance). Lazy-imported; DRT
+# peaks are simply omitted when absent.
+drt = [
+    "hybrid-drt @ git+https://github.com/jdhuang-csm/hybrid-drt.git",
+    "Mittag-Leffler @ git+https://github.com/jdhuang-csm/mittag-leffler.git",
+    "tqdm",
+]
+# Oracle calibration engine (battery_oracle.tune / battery-oracle-tune CLI).
+tune = [
+    "optuna>=3.6.1",
+]
+# For a nicer logging handler in battery_oracle._plotting.get_logger.
+rich = [
+    "rich>=13.0.0",
+]
+# Documentation site (Sphinx + furo + notebook rendering). Heavy runtime extras
+# (autoeis/optuna/drt) are lazy-imported in source, so autodoc mocks them.
+docs = [
+    "sphinx>=8.0",
+    "furo>=2024.8.6",
+    "myst-nb>=1.1.2",
+    "sphinx-copybutton>=0.5.2",
+    "sphinxcontrib-bibtex>=2.6",
+    "linkify-it-py>=2.0",
+]
+
+[project.scripts]
+battery-oracle-tune = "battery_oracle.tune:main"
+
+[project.urls]
+Homepage = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle"
+Documentation = "https://trustworthy-ai-tools-for-science.github.io/battery-oracle/"
+Repository = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle"
+Issues = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff",
+]
+
+[tool.uv.sources]
+hybrid-drt     = { git = "https://github.com/jdhuang-csm/hybrid-drt.git" }
+"Mittag-Leffler" = { git = "https://github.com/jdhuang-csm/mittag-leffler.git" }
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/battery_oracle"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests that run a full PyBaMM simulation (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+# Notebooks are intentionally loose exploratory code; docs build output is generated.
+extend-exclude = ["notebooks", "docs/notebooks", "docs/_build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501: long docstring/comment lines are intentional (formatter owns width).
+# E702/E741: the codebase deliberately uses compact semicolon statements and the
+# conventional single-letter `l` for circuit-label loops; not worth churning.
+ignore = ["E501", "E702", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored DRT helper carries an unused loop var from upstream.
+"src/battery_oracle/_eis/drt.py" = ["F841"]

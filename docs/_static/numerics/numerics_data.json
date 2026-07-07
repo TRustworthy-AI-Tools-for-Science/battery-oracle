@@ -1,0 +1,55 @@
+{
+  "solver_family": {
+    "name": "solver_family",
+    "solvers": {
+      "IDAKLUSolver": {
+        "completed": true,
+        "n_steps": 1,
+        "solve_s": 0.6,
+        "error": null
+      },
+      "CasadiSolver(safe)": {
+        "completed": true,
+        "n_steps": 1,
+        "solve_s": 0.8,
+        "error": null
+      }
+    }
+  },
+  "silent_truncation": {
+    "name": "silent_truncation",
+    "expected_steps": 4,
+    "completed_steps": 4,
+    "silently_truncated": false,
+    "error": null
+  },
+  "cracking_regression": {
+    "name": "cracking_regression",
+    "with_cracking": {
+      "completed": false,
+      "error": "KeyError: \"Parameter 'Negative electrode initial crack length [m]' not found. 'Negative electrode initial crack length [m]' not found. Best matches are ['Negative electrode thickness [m]', 'Negative electrode density [kg.m-3]', 'Negative electrode conductivity [S.m-1]']\""
+    },
+    "without_cracking": {
+      "completed": true,
+      "error": null
+    },
+    "subprocess_returncode": 0,
+    "subprocess_crashed": false
+  },
+  "jax_cache": {
+    "name": "jax_cache",
+    "available": false,
+    "with_clear": [],
+    "without_clear": [],
+    "note": "autoeis not installed; run with `uv run --extra autoeis`.",
+    "subprocess_returncode": 0,
+    "subprocess_crashed": false
+  },
+  "mpire_fork": {
+    "name": "mpire_fork",
+    "available": false,
+    "note": "autoeis/mpire not installed (No module named 'autoeis'); demo skipped.",
+    "subprocess_returncode": 0,
+    "subprocess_crashed": false
+  }
+}
