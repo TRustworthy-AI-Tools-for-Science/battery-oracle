@@ -34,7 +34,7 @@ Stiffness and DAE dimension grow down the hierarchy SPM → SPMe → DFN
 degrades above ≈1C (the first-order electrolyte correction leaves its asymptotic
 regime) and the DAE solver diverges above ≈2–3C. The oracle therefore clamps
 protocol currents to a validated envelope rather than solving unvalidated inputs
-(see [protocol semantics](protocol.md#the-6-d-protocol-vector-and-its-semantics)).
+(see [protocol semantics](protocol.md)).
 This is a harness decision: silent clipping keeps an active-learning loop alive at
 the cost of a flat response beyond the clamp boundary.
 
@@ -100,8 +100,8 @@ function in an otherwise-Ai2020 set reproduces the failure.
 
 Workaround: cracking is disabled in all presets and C-rate sensitivity is
 re-supplied through plating kinetics — an explicit mechanism substitution whose
-interpretive consequences are discussed in
-{ref}`Degradation <mechanism-3-particle-cracking-lam-deliberately-disabled>`.
+interpretive consequences are discussed in [Degradation](degradation.md)
+("Mechanism 3 — particle cracking / LAM: deliberately disabled").
 A historical dead end is documented in the code for future maintainers: lowering the
 critical stress $\sigma_c$ does not create a C-rate threshold (the LAM rate
 $\beta(\sigma_h/\sigma_c)^m$ is a smooth power law — $\sigma_c$ cancels from the

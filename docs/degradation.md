@@ -78,8 +78,8 @@ stress-driven cracking/LAM pathway is disabled (next section).
 Stock O'Kane-style coupling (crack growth from diffusion-induced stress
 {cite:p}`ai2020` → fresh SEI on crack faces → accelerated LAM) is off in every
 preset because the cracking stress submodel fails DAE initialisation against the
-Chen2020 graphite OCP on current PyBaMM (see
-{ref}`Numerical stability <particle-cracking-chen2020-initialization-failure>`).
+Chen2020 graphite OCP on current PyBaMM (see [Numerical stability](numerics.md),
+"Particle cracking + Chen2020: initialization failure").
 Two consequences you must account for when interpreting results:
 
 - there is no stress-driven LAM channel, so `lam_pct` and the crack-SEI film are

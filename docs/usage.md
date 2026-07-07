@@ -91,6 +91,7 @@ sequence level, which is why per-call `ecm_params_*` are left uncorrected.
 The oracle serialises calls with an internal lock but is designed for sequential
 use: one oracle ≈ one cell. Call `reset()` between campaigns. Besides clearing
 state, it rebuilds the model and both solvers to bound native-memory lifetimes
-(see [Numerical stability](numerics.md#process-hygiene-fork-vs-spawn-and-native-object-lifetimes)).
+(see [Numerical stability](numerics.md), "Process hygiene: fork vs spawn, and
+native-object lifetimes").
 For YAML-driven construction and worked configurations, see
 [Experiment protocols](protocol.md).

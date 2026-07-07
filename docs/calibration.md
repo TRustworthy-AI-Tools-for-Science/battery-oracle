@@ -105,4 +105,4 @@ battery-oracle-tune --cache real_ecm.json --output-config config_oracle_mycell.y
 ```
 
 Transplant the fitted `protocol_scaling` block into an experiment config as shown in
-[Worked configurations](protocol.md#calibrated-cell).
+[Worked configurations](protocol.md) ("Calibrated cell").

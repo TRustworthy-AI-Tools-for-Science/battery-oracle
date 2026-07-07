@@ -30,9 +30,9 @@ oracle bridges this with two controlled injections per call (`_eis_and_correct`)
 1. **Film resistances in series.** X-averaged SEI, crack-SEI, and dead-lithium
    thicknesses are read from the cycling solution and converted to a lumped ohmic
    shift $\Delta R_{\mathrm{ohm}}$ via the Christensen–Newman film form
-   {cite:p}`christensen2004` (formulas in
-   [Degradation](degradation.md#from-hidden-state-to-observable-impedance)), then
-   added to $\mathrm{Re}\,Z$ at all frequencies.
+   {cite:p}`christensen2004` (formulas in [Degradation](degradation.md),
+   "From hidden state to observable impedance"), then added to $\mathrm{Re}\,Z$
+   at all frequencies.
 2. **LAM as a parameter override.** Cumulative active-material loss reduces the
    negative-electrode active-material volume fraction in the EIS parameter set
    before linearisation, shrinking $a_s$ and hence growing the charge-transfer arc.
@@ -117,7 +117,7 @@ Three behaviours differ from a naïve `sim.solve()` (details and reproductions i
 
 Stock PyBaMM produces a noiseless impedance. The oracle layers on: white and/or
 $1/f$ flicker noise (amplitude $\propto |Z|/\sqrt{f}$ — the source of realistic
-low-frequency scatter; see [protocol.md](protocol.md#eis-noise-and-noisy-low-frequencies)),
+low-frequency scatter; see [protocol.md](protocol.md), "EIS noise"),
 and optionally Hallemans-style OCV-relaxation drift {cite:p}`hallemans2023` coupled
 to the protocol's rest duration. The AutoEIS Bayesian ECM fit is itself modified.
 
