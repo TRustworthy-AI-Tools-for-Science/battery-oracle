@@ -151,8 +151,10 @@ def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
             assert kw[key] == pytest.approx(val), key
         else:
             assert kw[key] == val, key
-    assert kw["cpe_w_seed"] == {"P2w": 7.32, "P4w": 0.071, "P6w": 0.043}
-    assert kw["cpe_n_seed"] == {"P2n": 0.85, "P4n": 0.80, "P6n": 0.75}
+    assert kw["cpe_w_seed"] == {"P3w": 0.071, "P5w": 0.043,
+                                "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}
+    assert kw["cpe_n_seed"] == {"P3n": 0.80, "P5n": 0.75,
+                                "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}
     assert kw["preset_constants"]["plating_kinetic_rate_constant_m_s"] == pytest.approx(1e-8)
 
 

@@ -48,6 +48,7 @@ from battery_oracle._circuit import (
     _param_labels_from_circuit,
     randles_pairs_from_circuit,
 )
+from battery_oracle._eis.kk import linkk_residuals
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
 from battery_oracle.oracle import OracleFailure, PyBaMMOracle
 
@@ -468,32 +469,18 @@ def _linkk_lowhigh_ratio(freq, Z, c: float = 0.85, max_M: int = 50) -> float:
     """linKK low/high-freq residual ratio — the non-stationarity signature.
 
     A spectrum that drifts during the sweep has KK residuals elevated at low
-    frequency; returns mean|res|(low tercile) / mean|res|(high tercile). Uses
-    impedance.py with the NumPy-2.x eval-builder fix (see _eis/kk.py).
+    frequency; returns mean|res|(low tercile) / mean|res|(high tercile). The
+    linKK call itself (input sanitizing, NumPy-2.x fix, stdout suppression)
+    lives in ``_eis/kk.py``'s :func:`linkk_residuals`.
 
     ``c``/``max_M`` default to the same values as ``_eis/kk.py``'s
     ``linkk_rmse`` (config_oracle_defaults.yml's ``eis.linkk`` section).
     """
-    import contextlib
-    import io
-
-    import impedance.models.circuits.elements as _ce
-    from impedance.validation import linKK
-    _ce.circuit_elements.setdefault("np", np)
-    f = np.asarray(freq, dtype=float)
-    Z = np.asarray(Z, dtype=complex)
-    m = np.isfinite(f) & np.isfinite(Z.real) & np.isfinite(Z.imag) & (f > 0)
-    f, Z = f[m], Z[m]
-    if len(f) < 8:
+    out = linkk_residuals(freq, Z, c=c, max_M=max_M)
+    if out is None:
         return float("nan")
-    o = np.argsort(f)
-    f, Z = f[o], Z[o]
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            _, _, _, res_real, res_imag = linKK(f, Z, c=c, max_M=max_M)
-    except Exception:
-        return float("nan")
-    res = np.sqrt(np.asarray(res_real) ** 2 + np.asarray(res_imag) ** 2)
+    f, res_real, res_imag = out
+    res = np.sqrt(res_real ** 2 + res_imag ** 2)
     q1, q2 = np.quantile(f, 1 / 3), np.quantile(f, 2 / 3)
     lo, hi = res[f < q1].mean(), res[f > q2].mean()
     return float(lo / max(hi, 1e-12))

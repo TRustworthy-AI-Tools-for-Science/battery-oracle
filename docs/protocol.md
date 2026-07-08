@@ -73,7 +73,7 @@ eis:
   noise_model: combined          # white | flicker | combined | none
 ecm:
   fitter: randles                # randles | autoeis (needs [autoeis] extra)
-  circuit: "R1-P2-[R3,P4]-[R5,P6]"   # ECM layout is DERIVED from this string
+  circuit: "R1-[R2,P3]-[R4,P5]"   # ECM layout is DERIVED from this string
 protocols:                       # ≥1 six-field entries; 'name' optional
   - name: baseline
     C_rate_1_mA: 200.0
@@ -130,7 +130,7 @@ expect order-of-magnitude longer solves:
 ```yaml
 model: {type: DFN}
 degradation: {preset: accelerated, eol_capacity_fraction: 0.80, capacity_check: false}
-ecm: {fitter: autoeis, circuit: "R1-P2-[R3,P4]-[R5,P6]"}   # requires [autoeis]
+ecm: {fitter: autoeis, circuit: "R1-[R2,P3]-[R4,P5]"}   # requires [autoeis]
 # cycling / eis / protocols as in the default
 ```
 

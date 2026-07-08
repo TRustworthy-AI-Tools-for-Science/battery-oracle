@@ -65,9 +65,11 @@ eis:
 ecm:
   fitter: randles            # randles (fast analytic stub, works on the core install) |
                              # autoeis (Bayesian fit; requires the [autoeis] extra)
-  circuit: "R1-P2-[R3,P4]-[R5,P6]"   # ECM structure -> PyBaMMOracle(circuit=...). The
+  circuit: "R1-[R2,P3]-[R4,P5]"   # ECM structure -> PyBaMMOracle(circuit=...). The
                              # parameter layout is derived from this string; omit to use
-                             # config_oracle_defaults.yml's ecm.circuit.
+                             # config_oracle_defaults.yml's ecm.circuit. Must match
+                             # battery_oracle._circuit.DEFAULT_CIRCUIT for oracle state
+                             # vectors to align with real-experiment featurization.
 
 # One or more 6-D charge/discharge protocols. Each maps in field order to
 #   [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]

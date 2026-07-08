@@ -159,8 +159,21 @@ def test_randles_stub_shape():
     # Simple synthetic spectrum: ohmic + one decaying arc
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
     out = _randles_stub_ecm(freq, Z.real, Z.imag)
-    assert out.shape == (18,)   # 9-param half duplicated for charge/discharge
+    assert out.shape == (14,)   # 7-param DEFAULT_CIRCUIT half, duplicated chg/dis
     assert np.all(np.isfinite(out))
+
+
+def test_randles_stub_circuit_generic():
+    """The stub derives its layout from the circuit — legacy 9-param still works."""
+    freq = np.logspace(-2, 4, 30)
+    Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
+    out = _randles_stub_ecm(freq, Z.real, Z.imag, circuit="R1-P2-[R3,P4]-[R5,P6]")
+    assert out.shape == (18,)
+    assert np.all(np.isfinite(out))
+    # Ohmic R lands in slot 0 (HF intercept); the two arc Rs split the LF rise 0.6/0.4
+    half = out[:9]
+    assert half[0] == pytest.approx(0.05, rel=0.05)          # R1
+    assert half[3] / half[6] == pytest.approx(0.6 / 0.4)     # R3 / R5
 
 
 @pytest.mark.slow

@@ -117,10 +117,14 @@ if _AUTOEIS_AVAILABLE:
 # are the jones2022 training-partition medians — they keep the poorly-identified
 # CPE terms near the training scale (without them the wide LogNormal prior lets
 # the posterior mean wander orders of magnitude off). Exponents are typical for
-# Li-ion SPMe at moderate SOC (Chen2020). Unknown labels (e.g. a migrated
-# circuit) fall back to the defaults.
-_CPE_W_SEED    = {"P2w": 7.32, "P4w": 0.071, "P6w": 0.043}   # series P2w; arc P4w/P6w
-_CPE_N_SEED    = {"P2n": 0.85, "P4n": 0.80, "P6n": 0.75}
+# Li-ion SPMe at moderate SOC (Chen2020). Both circuit generations are seeded:
+# the current 7-param arcs P3/P5 carry the same tuned values as the legacy
+# 9-param arcs P4/P6 they correspond to (P2 was the legacy series CPE, no
+# 7-param counterpart). Unknown labels fall back to the defaults.
+_CPE_W_SEED    = {"P3w": 0.071, "P5w": 0.043,                 # current arcs
+                  "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}    # legacy 9-param labels
+_CPE_N_SEED    = {"P3n": 0.80, "P5n": 0.75,                   # current arcs
+                  "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}      # legacy 9-param labels
 _CPE_W_DEFAULT = 0.1
 _CPE_N_DEFAULT = 0.80
 
@@ -178,34 +182,54 @@ def _randles_stub_ecm(
     Z_real: np.ndarray,
     Z_imag: np.ndarray,
     *,
+    circuit: str | None = None,
     cpe_n_seed: dict | None = None,
+    cpe_n_default: float = _CPE_N_DEFAULT,
 ) -> np.ndarray:
     """Fast Randles stub — fallback when AutoEIS is unavailable or fails.
 
-    Estimates R1 (ohmic), R3/R5 (charge-transfer), and CPE admittances from
-    high/low-frequency asymptotes and the peak imaginary frequency.  Returns
-    the same 9-parameter half-vector duplicated for charge and discharge
-    (18-D state vector).
+    Estimates the ohmic R from the high-frequency asymptote, splits the
+    remaining low-frequency resistance across the circuit's [R,CPE] arcs
+    (0.6/0.4 for two arcs, evenly otherwise), and seeds each CPE admittance
+    from 1/(R·ω_peak). The half-vector layout is derived from *circuit*
+    (default: the package circuit ``DEFAULT_CIRCUIT``) — the same labels
+    :func:`_autoeis_ecm` and the real-experiment featurization use — and is
+    duplicated for charge and discharge.
 
     ``cpe_n_seed`` (default ``None`` -> the module ``_CPE_N_SEED``) supplies
-    the CPE exponent seeds; ``PyBaMMOracle`` passes its own
-    (YAML-overridable, ``ecm.cpe_seeds.n`` in config_oracle_defaults.yml) map.
+    the CPE exponent seeds by label, with ``cpe_n_default`` as the fallback;
+    ``PyBaMMOracle`` passes its own (YAML-overridable, ``ecm.cpe_seeds.n`` in
+    config_oracle_defaults.yml) map.
     """
+    circuit = circuit or _PROJECT_CIRCUIT
     cpe_n_seed = cpe_n_seed or _CPE_N_SEED
     # argmax/argmin give the highest/lowest frequency regardless of sort order
     hf_idx = np.argmax(frequencies)   # HF limit → ohmic resistance R_∞
     lf_idx = np.argmin(frequencies)   # LF limit → R_∞ + sum(R_RC)
-    R1 = float(Z_real[hf_idx])
-    R_total_rc = max(float(Z_real[lf_idx]) - R1, 0.0)
-    R3 = R_total_rc * 0.6
-    R5 = R_total_rc * 0.4
+    R_ohmic = float(Z_real[hf_idx])
+    R_total_rc = max(float(Z_real[lf_idx]) - R_ohmic, 0.0)
     peak_idx = int(np.argmax(-Z_imag))
     omega_peak = 2 * np.pi * frequencies[peak_idx]
-    P2w = 1.0 / max(R1 * omega_peak, 1e-9)
-    P4w = 1.0 / max(R3 * omega_peak, 1e-9)
-    P6w = 1.0 / max(R5 * omega_peak, 1e-9)
-    half = np.array([R1, P2w, cpe_n_seed["P2n"], R3, P4w, cpe_n_seed["P4n"],
-                     R5, P6w, cpe_n_seed["P6n"]], dtype=np.float64)
+
+    labels = _param_labels_from_circuit(circuit)
+    pairs = _randles_pairs_from_circuit(circuit)
+    arc_rs = {r for r, _ in pairs}
+    arc_ps = {p for _, p in pairs}
+    ohmic_label = next((l for l in labels if l.startswith("R") and l not in arc_rs),
+                       labels[0])
+    weights = [0.6, 0.4] if len(pairs) == 2 else [1.0 / max(len(pairs), 1)] * len(pairs)
+
+    values = {ohmic_label: R_ohmic}
+    for (r, p), w in zip(pairs, weights):
+        values[r] = R_total_rc * w
+        values[f"{p}w"] = 1.0 / max(values[r] * omega_peak, 1e-9)
+        values[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
+    for l in labels:                                   # series CPE(s): P not in any arc
+        if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
+            values[l] = 1.0 / max(R_ohmic * omega_peak, 1e-9)
+            values[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
+
+    half = np.array([values[l] for l in labels], dtype=np.float64)
     return np.concatenate([half, half])
 
 
@@ -227,14 +251,15 @@ def _autoeis_ecm(
 ) -> np.ndarray:
     """Fit ECM parameters to an EIS spectrum using AutoEIS Bayesian inference.
 
-    Fits the canonical project circuit directly (``battmap._DEFAULT_CIRCUIT``,
-    from config/datasets.yaml) and returns its parameters under the AutoEIS
-    labels ``battmap.ECM_PARAM_NAMES`` — no oracle-specific circuit alias and no
-    remapping step. For the default circuit ``R1-P2-[R3,P4]-[R5,P6]`` this is the
-    9-D half-vector ``[R1, P2w, P2n, R3, P4w, P4n, R5, P6w, P6n]``, duplicated for
-    charge and discharge into the 18-D state. The initial guess ``p0`` is built
-    generically from the circuit (ohmic R, arc [R,P] pairs, series CPEs), so a
-    migrated circuit (e.g. the 7-param ``R1-[R2,P3]-[R4,P5]``) works unchanged.
+    Fits *circuit* directly (default: the package circuit ``DEFAULT_CIRCUIT``,
+    which mirrors the study's ``datasets.yaml default_circuit``) and returns its
+    parameters under the canonical AutoEIS labels — no oracle-specific circuit
+    alias and no remapping step. For the default 7-param circuit
+    ``R1-[R2,P3]-[R4,P5]`` this is the half-vector
+    ``[R1, R2, P3w, P3n, R4, P5w, P5n]``, duplicated for charge and discharge
+    into the 14-D state. The initial guess ``p0`` is built generically from the
+    circuit (ohmic R, arc [R,P] pairs, series CPEs), so any circuit works
+    unchanged (e.g. the legacy 9-param ``R1-P2-[R3,P4]-[R5,P6]``).
 
     ``cpe_w_seed``/``cpe_n_seed``/``cpe_w_default``/``cpe_n_default``/
     ``rescale_target_r0``/``num_warmup``/``num_samples`` default to the module
@@ -334,7 +359,8 @@ def _autoeis_ecm(
             }
     except Exception as exc:
         log.warning("[AutoEIS] inference failed (%s); using Randles stub fallback", exc)
-        half = _randles_stub_ecm(frequencies, Z_real, Z_imag, cpe_n_seed=cpe_n_seed)[:len(labels)]
+        half = _randles_stub_ecm(frequencies, Z_real, Z_imag,
+                                 circuit=circuit, cpe_n_seed=cpe_n_seed)[:len(labels)]
         if _diag is not None:
             _diag["max_cv"]    = float("nan")
             _diag["converged"] = False
@@ -1621,7 +1647,9 @@ class PyBaMMOracle:
                 _diag["_raw_variables"] = raw_variables
             elif self.ecm_model_fn is _randles_stub_ecm:
                 full = _randles_stub_ecm(
-                    self.frequencies, Z.real, Z.imag, cpe_n_seed=self._cpe_n_seed,
+                    self.frequencies, Z.real, Z.imag,
+                    circuit=self._circuit, cpe_n_seed=self._cpe_n_seed,
+                    cpe_n_default=self._cpe_n_default,
                 )
             else:
                 full = self.ecm_model_fn(self.frequencies, Z.real, Z.imag)

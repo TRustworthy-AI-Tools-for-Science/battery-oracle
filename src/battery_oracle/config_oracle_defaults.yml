@@ -77,23 +77,32 @@ ecm:
   # this circuit (ohmic R = the resistor outside any [R,CPE] arc; arc Rs are the
   # bracketed resistors) -- no fixed element count is assumed anywhere. Load it via
   # battery_oracle.load_default_ecm_circuit(); the tune engine falls back to it when
-  # no circuit is passed. AutoEIS labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE
-  # exponent, so this 9-parameter circuit -> [R1,P2w,P2n,R3,P4w,P4n,R5,P6w,P6n].
-  circuit: "R1-P2-[R3,P4]-[R5,P6]"
+  # no circuit is passed. MUST match battery_oracle._circuit.DEFAULT_CIRCUIT (and,
+  # in the battery_forecast study, datasets.yaml's default_circuit) or oracle state
+  # vectors diverge from the real-experiment (BattMAP) featurization. AutoEIS
+  # labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE exponent, so this 7-parameter
+  # circuit -> [R1,R2,P3w,P3n,R4,P5w,P5n].
+  circuit: "R1-[R2,P3]-[R4,P5]"
   # AutoEIS initial-guess seeds for the CPE terms, keyed by canonical AutoEIS
   # label. Admittance (w) seeds are jones2022 training-partition medians, kept
   # close to the training scale; exponents (n) are typical for Li-ion SPMe at
-  # moderate SOC (Chen2020). Unknown labels (e.g. a migrated circuit) fall back
-  # to w_default/n_default.
+  # moderate SOC (Chen2020). Both circuits' labels are seeded: the current
+  # 7-param arcs (P3/P5) carry the same tuned values as the legacy 9-param
+  # arcs (P4/P6) they correspond to; P2 was the legacy series CPE (no 7-param
+  # counterpart). Unknown labels fall back to w_default/n_default.
   cpe_seeds:
     w:
-      P2w: 7.32
-      P4w: 0.071
-      P6w: 0.043
+      P3w: 0.071
+      P5w: 0.043
+      P2w: 7.32     # legacy 9-param series CPE
+      P4w: 0.071    # legacy 9-param arc 1
+      P6w: 0.043    # legacy 9-param arc 2
     n:
-      P2n: 0.85
-      P4n: 0.80
-      P6n: 0.75
+      P3n: 0.80
+      P5n: 0.75
+      P2n: 0.85     # legacy 9-param series CPE
+      P4n: 0.80     # legacy 9-param arc 1
+      P6n: 0.75     # legacy 9-param arc 2
     w_default: 0.1
     n_default: 0.80
   # Spectrum-rescaling target ohmic resistance for the AutoEIS fit (Option B):

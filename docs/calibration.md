@@ -82,7 +82,9 @@ The cache contract:
 ```python
 cache = {
     "real_cell_capacity_mah": 42.0,       # per-cell measured capacity (sets current mapping)
-    "circuit": "R1-P2-[R3,P4]-[R5,P6]",   # optional: ECM layout of the vectors below
+    "circuit": "R1-[R2,P3]-[R4,P5]",   # optional: ECM layout of the vectors below
+                                       # (legacy caches may carry the 9-param
+                                       # "R1-P2-[R3,P4]-[R5,P6]")
     "cycles": ["0", "1", ...],
     "data": {"0": {"protocol": [...6...],
                    "ecm_charge": [...], "ecm_discharge": [...]}, ...},

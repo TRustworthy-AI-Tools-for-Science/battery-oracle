@@ -28,15 +28,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 import yaml
 
+from battery_oracle._circuit import DEFAULT_CIRCUIT
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from battery_oracle.oracle import PyBaMMOracle
 
 _DEFAULT_CONFIG_NAME = "config_experiment_defaults.yml"
 _ORACLE_CONFIG_NAME = "config_oracle_defaults.yml"
-# Used only if config_oracle_defaults.yml lacks an ecm.circuit field. This is the
-# canonical 9-parameter circuit; the ECM layout is still derived from the string,
-# so nothing downstream hard-codes an element count.
-_FALLBACK_ECM_CIRCUIT = "R1-P2-[R3,P4]-[R5,P6]"
+# Used only if config_oracle_defaults.yml lacks an ecm.circuit field. Aliases the
+# package's canonical circuit constant so every default path (direct construction,
+# oracle-config, experiment-config) resolves to the same string; the ECM layout is
+# still derived from the string, so nothing downstream hard-codes an element count.
+_FALLBACK_ECM_CIRCUIT = DEFAULT_CIRCUIT
 
 # 6-D protocol field order — matches PyBaMMOracle / ACTION_FEATURE_NAMES:
 #   [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]

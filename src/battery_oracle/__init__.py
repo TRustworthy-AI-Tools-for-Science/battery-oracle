@@ -51,7 +51,7 @@ from battery_oracle.tune import (
 )
 from battery_oracle.tune_plots import plot_tune_oracle_summary
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "PyBaMMOracle",

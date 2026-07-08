@@ -25,6 +25,9 @@ def _synthetic_cache():
     return {
         "cell_id": "C01",
         "real_cell_capacity_mah": 200.0,
+        # ECM vectors above use the legacy 9-param layout; the engine derives
+        # its ohmic/arc positions from this declared circuit.
+        "circuit": "R1-P2-[R3,P4]-[R5,P6]",
         "cycles": ["0", "1"],
         "first_real_capacity_mah": 200.0,
         "data": {
