@@ -601,6 +601,7 @@ def calibrate_oracle(
     dds_min: float = 0.1, dds_max: float = 1000.0,
     prs_min: float = 0.01, prs_max: float = 10.0,
     n_trials: int = 35,
+    n_jobs: int = 1,
     sampler: str = "tpe",
     seed: int = 42,
     capacity_check: bool = True,
@@ -627,6 +628,13 @@ def calibrate_oracle(
     read; no layout is assumed. ``None`` loads the default from the YAML config
     (``config_oracle_defaults.yml`` ``ecm.circuit``) — pass ``cache.get("circuit")``
     when the cache was featurized with a specific circuit.
+
+    ``n_jobs`` runs trials concurrently via Optuna's threading backend
+    (``study.optimize(n_jobs=...)``). Each trial builds its own PyBaMMOracle
+    instance with no shared mutable state, so this is memory-safe; whether it is
+    faster depends on PyBaMM's solver releasing the GIL during its C++ compute —
+    benchmark with a short ``n_trials`` run before trusting it for a full
+    calibration. Default 1 (sequential).
     """
     import optuna
 
@@ -667,10 +675,12 @@ def calibrate_oracle(
             )
             result.update(slope_probe)
         result["runtime_s"] = round(time.time() - t0, 1)
-        results.append(result)
         score = score_candidate(
             result, real_targets, preset, crate_sensitivity_min, real_crate2_slope,
         )
+        result["score"] = score if math.isfinite(score) else None
+        result["trial_number"] = trial.number
+        results.append(result)
         ratio = result.get("crate_sensitivity_ratio")
         oracle_slope = result.get("oracle_slope_mAh_per_mA")
         log.info(
@@ -713,8 +723,9 @@ def calibrate_oracle(
                 "plating_rate_scale":  1.0,
             })
 
-    log.info("Starting Optuna BO [sampler=%s, n_trials=%d, preset=%s]", sampler, n_trials, preset)
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    log.info("Starting Optuna BO [sampler=%s, n_trials=%d, n_jobs=%d, preset=%s]",
+             sampler, n_trials, n_jobs, preset)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
 
     scored = sorted(
         [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope))
@@ -987,6 +998,58 @@ def write_oracle_config(
     log.info("Wrote config to %s", output_path)
 
 
+def _json_default(obj):
+    """json.dump default= hook: numpy scalars/bools aren't natively JSON-serializable."""
+    if isinstance(obj, np.generic):
+        return obj.item()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def write_calibration_summary(
+    path: Path | str,
+    *,
+    dataset: str,
+    preset: str,
+    cell_id: str,
+    n_trials: int,
+    n_cycles: int,
+    crate_sensitivity_min: float,
+    real_targets: dict,
+    real_crate2_slope: dict | None,
+    best: dict,
+    best_score: float,
+    drift_result: dict | None = None,
+) -> Path:
+    """Write the machine-readable calibration summary JSON sidecar.
+
+    Clean, structured counterpart to :func:`write_oracle_config` for plotting
+    (:mod:`battery_oracle.tune_plots`): the YAML config carries the same
+    real-vs-achieved comparisons but as human-readable prose strings
+    ("~0.85 (PJ121)"), which would need fragile regex parsing to plot. This
+    carries the same underlying numbers as plain JSON instead.
+    """
+    path = Path(path)
+    summary = {
+        "dataset": dataset,
+        "preset": preset,
+        "cell_id": cell_id,
+        "n_trials": n_trials,
+        "n_cycles": n_cycles,
+        "crate_sensitivity_min": crate_sensitivity_min,
+        "eol_target_cycles": _eol_target_cycles(preset),
+        "real_targets": real_targets,
+        "real_crate2_slope": real_crate2_slope,
+        "best": best,
+        "best_score": best_score,
+        "drift_result": drift_result,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(summary, f, indent=2, default=_json_default)
+    log.info("Wrote calibration summary to %s", path)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Standalone CLI: calibrate from a cache JSON (dataset-free)
 # ---------------------------------------------------------------------------
@@ -1012,6 +1075,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--preset", default="accelerated",
                    choices=["nominal", "accelerated", "severe"])
     p.add_argument("--n-trials", type=int, default=35)
+    p.add_argument("--n-jobs", type=int, default=1,
+                   help="Trials to run concurrently via Optuna's threading backend. "
+                        "See calibrate_oracle's docstring before trusting >1.")
+    p.add_argument("--summary-json", type=Path, default=None,
+                   help="Optional path for the machine-readable calibration summary "
+                        "JSON (consumed by battery-oracle-tune-plot).")
     p.add_argument("--sampler", choices=["tpe", "gp"], default="tpe")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--ks-min", type=float, default=0.10)
@@ -1054,7 +1123,8 @@ def main(argv=None) -> None:
         srs_min=args.srs_min, srs_max=args.srs_max,
         dds_min=args.dds_min, dds_max=args.dds_max,
         prs_min=args.prs_min, prs_max=args.prs_max,
-        n_trials=args.n_trials, sampler=args.sampler, seed=args.seed,
+        n_trials=args.n_trials, n_jobs=args.n_jobs,
+        sampler=args.sampler, seed=args.seed,
         capacity_check=not args.no_capacity_check,
         skip_crate2_slope=(args.skip_crate2_slope or real_crate2_slope is None),
         crate_sensitivity_min=args.crate_sensitivity_min,
@@ -1073,6 +1143,16 @@ def main(argv=None) -> None:
         real_crate2_slope=real_crate2_slope,
     )
     print(f"Config written to: {args.output_config}")
+    if args.summary_json is not None:
+        write_calibration_summary(
+            args.summary_json,
+            dataset=args.dataset, preset=args.preset, cell_id=cell_id,
+            n_trials=len(out["results"]), n_cycles=len(cache["cycles"]),
+            crate_sensitivity_min=args.crate_sensitivity_min,
+            real_targets=real_targets, real_crate2_slope=real_crate2_slope,
+            best=out["best"], best_score=out["best_score"],
+        )
+        print(f"Calibration summary written to: {args.summary_json}")
 
 
 if __name__ == "__main__":

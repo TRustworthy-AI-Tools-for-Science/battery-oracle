@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "battery-oracle"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone PyBaMM/SPMe battery oracle (simulator) + EIS + ECM fitting, with an Optuna calibration engine."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -57,6 +57,7 @@ docs = [
 
 [project.scripts]
 battery-oracle-tune = "battery_oracle.tune:main"
+battery-oracle-tune-plot = "battery_oracle.tune_plots:main"
 
 [project.urls]
 Homepage = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle"

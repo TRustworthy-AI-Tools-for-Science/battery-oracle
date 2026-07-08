@@ -13,6 +13,7 @@ from battery_oracle.tune import (
     compute_real_targets,
     score_candidate,
     slope_match_error,
+    write_calibration_summary,
     write_oracle_config,
 )
 
@@ -93,3 +94,31 @@ def test_write_oracle_config(tmp_path):
     assert "protocol_scaling:" in text
     assert "kinetics_scale: 0.3" in text
     assert "_calibration:" in text
+
+
+def test_write_calibration_summary(tmp_path):
+    import json
+
+    real = {"mean_arc_ratio": 0.5, "r1_growth_pct": np.float64(10.0)}
+    best = {
+        "kinetics_scale": np.float64(0.3), "sei_rate_scale": 0.03,
+        "oracle_arc_ratio": 0.48, "oracle_r1_growth_pct": 9.5,
+        "implied_eol_cycle": 55.0, "score": np.float64(0.42),
+        "trial_number": np.int64(7), "oracle_failure": np.False_,
+    }
+    out = tmp_path / "calibration_summary.json"
+    path = write_calibration_summary(
+        out,
+        dataset="mydata", preset="accelerated", cell_id="C01",
+        n_trials=2, n_cycles=10, crate_sensitivity_min=3.0,
+        real_targets=real, real_crate2_slope=None,
+        best=best, best_score=0.42,
+    )
+    assert path == out and out.exists()
+    # numpy scalars must round-trip through the _json_default hook
+    summary = json.loads(out.read_text())
+    assert summary["best"]["trial_number"] == 7
+    assert summary["best"]["kinetics_scale"] == pytest.approx(0.3)
+    assert summary["best"]["oracle_failure"] is False
+    # engine sources the EOL target from the preset YAML, not the caller
+    assert summary["eol_target_cycles"] == pytest.approx(55.0)

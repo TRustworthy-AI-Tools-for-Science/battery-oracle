@@ -46,10 +46,12 @@ from battery_oracle.tune import (
     calibrate_drift,
     calibrate_oracle,
     compute_real_targets,
+    write_calibration_summary,
     write_oracle_config,
 )
+from battery_oracle.tune_plots import plot_tune_oracle_summary
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "PyBaMMOracle",
@@ -63,7 +65,9 @@ __all__ = [
     "calibrate_oracle",
     "calibrate_drift",
     "write_oracle_config",
+    "write_calibration_summary",
     "compute_real_targets",
+    "plot_tune_oracle_summary",
     "load_experiment_config",
     "oracle_kwargs_from_config",
     "protocols_from_config",
