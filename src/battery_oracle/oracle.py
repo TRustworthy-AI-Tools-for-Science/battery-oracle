@@ -1860,20 +1860,13 @@ class PyBaMMOracle:
             except Exception as exc:
                 log.warning("[plot_diagnostics] diagnostics CSV failed: %s", exc)
 
-        # ── Plot 1: voltage and current — one trace per cycle, waterfall offset ─
+        # ── Plot 1: voltage and current — one trace per cycle, colored by cycle ─
         if self._prev_solution is not None:
             try:
                 sol    = self._prev_solution
                 cycles = sol.cycles if sol.cycles else [sol]
                 n_cyc  = len(cycles)
                 cmap   = slipstream
-
-                # Compute offset from the full voltage range so it scales
-                # with whatever protocol was run.
-                V_all = sol["Terminal voltage [V]"].entries
-                I_all = sol["Current [A]"].entries
-                v_step = 0.15 * (V_all.max() - V_all.min()) if n_cyc > 1 else 0.0
-                i_step = 0.15 * (I_all.max() - I_all.min()) if n_cyc > 1 else 0.0
 
                 fig1, ax1 = plt.subplots(1, 1, figsize=(3.5, 3.5))
                 fig2, ax2 = plt.subplots(1, 1, figsize=(3.5, 3.5))
@@ -1885,8 +1878,14 @@ class PyBaMMOracle:
                     t_rel = (t - t[0]) / 3600.0          # hours, reset per cycle
                     color = cmap(i / max(n_cyc - 1, 1))
                     alpha = max(0.4, 1.0 - 0.06 * (n_cyc - 1 - i))
-                    ax1.plot(t_rel, V + i * v_step, color=color, alpha=alpha)
-                    ax2.plot(t_rel, I + i * i_step, color=color, alpha=alpha)
+                    # No vertical waterfall offset -- V/I are plotted at their true
+                    # physical values (a single Li-ion cell reads ~3.0-4.3 V; a
+                    # previous "+ i * v_step" stacking trick pushed the y-axis up to
+                    # ~27 V for a ~120-cycle run, which is not a real terminal
+                    # voltage and had no axis note explaining the offset). Cycle
+                    # ordering/recency is conveyed by color + alpha fade instead.
+                    ax1.plot(t_rel, V, color=color, alpha=alpha)
+                    ax2.plot(t_rel, I, color=color, alpha=alpha)
 
                 ax1.set_box_aspect(1)
                 ax1.set_ylabel("Terminal voltage (V)")
@@ -1933,15 +1932,25 @@ class PyBaMMOracle:
                 crack_ah    = _arr("cumulative_crack_sei_ah")
                 plating_ah  = _arr("cumulative_plating_ah")
                 lam_ah      = _arr("lam_cap_loss_ah")
+                dod_lam_ah  = _arr("cumulative_dod_lam_ah")
+                c2_stress_ah = _arr("cumulative_c2_stress_ah")
 
                 # Only show mechanisms that are active in this oracle's degradation
                 # config — e.g. SEI on cracks is absent for nominal/accelerated presets.
+                # dod_lam/c2_stress are oracle-level additive stress terms (not PyBaMM
+                # model_options), gated on their own scale being nonzero instead of
+                # _deg_opts membership — both feed eol_loss/SOH directly (see __call__)
+                # so omitting them here previously made the stack under-represent total
+                # degradation whenever either was calibrated on (e.g. jones2022's
+                # variable-discharge c2_stress_scale).
                 _deg = self._deg_opts
                 _all = [
-                    (sei_ah,     "SEI",           True),
-                    (crack_ah,   "SEI on cracks", "SEI on cracks" in _deg),
-                    (plating_ah, "Li plating",    "lithium plating" in _deg),
-                    (lam_ah,     "LAM",           "particle mechanics" in _deg),
+                    (sei_ah,       "SEI",           True),
+                    (crack_ah,     "SEI on cracks", "SEI on cracks" in _deg),
+                    (plating_ah,   "Li plating",    "lithium plating" in _deg),
+                    (lam_ah,       "LAM",           "particle mechanics" in _deg),
+                    (dod_lam_ah,   "DoD LAM",       self._dod_lam_scale != 0.0),
+                    (c2_stress_ah, "C-rate2 stress", self._c2_stress_scale != 0.0),
                 ]
                 active_arrs   = [a for a, _, flag in _all if flag]
                 active_labels = [l for _, l, flag in _all if flag]
