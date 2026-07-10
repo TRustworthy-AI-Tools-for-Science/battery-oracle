@@ -20,6 +20,31 @@ Optional extras:
 """
 from __future__ import annotations
 
+import os
+import subprocess
+
+# Configure JAX BEFORE any import below that pulls it in transitively
+# (battery_oracle.oracle -> pybamm -> jax). This package is designed to be
+# "imported and reused independently" (see module docstring), so it can't
+# rely on every caller setting this up first the way battery_forecast's
+# entry-point scripts currently have to. Without it, a CPU-only process (no
+# --gres=gpu) hard-crashes: jax[cuda12]'s eager CUDA backend registration
+# raises "FAILED_PRECONDITION: No visible GPU devices" instead of falling
+# back, and JAX_PLATFORMS (plural) -- not the legacy JAX_PLATFORM_NAME -- is
+# the only setting that actually stops jax from probing the cuda plugin at
+# all.
+try:
+    _HAS_GPU = bool(os.environ.get('CUDA_VISIBLE_DEVICES')) and (
+        subprocess.run(['nvidia-smi'], capture_output=True, check=True) is not None
+    )
+except (subprocess.CalledProcessError, FileNotFoundError):
+    _HAS_GPU = False
+
+if _HAS_GPU:
+    os.environ.setdefault('JAX_PLATFORMS', 'cuda,cpu')
+else:
+    os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+
 from battery_oracle._circuit import (
     ACTION_FEATURE_NAMES,
     DEFAULT_CIRCUIT,
