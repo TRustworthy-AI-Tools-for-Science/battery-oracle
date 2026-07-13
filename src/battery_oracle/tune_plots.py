@@ -43,7 +43,7 @@ def plot_pareto_front(results_df: pd.DataFrame, real_targets: dict,
     """Pareto front of the two primary co-optimized objectives.
 
     X/Y are each trial's relative error (%) against the real reference cell
-    for EIS arc-shape ((R3+R5)/R1) and R1 growth rate — the two metrics
+    for EIS arc-shape (Σ arc R / R1) and R1 growth rate — the two metrics
     that jointly determine the arc/R1 "validated" status in the written
     config. Point color encodes the full combined score (which also folds in
     the EOL and C-rate terms), so a point that looks good on arc/R1 alone but
@@ -109,7 +109,7 @@ def plot_pareto_front(results_df: pd.DataFrame, real_targets: dict,
                        color=SLIPSTREAM_COLORS[5], edgecolors="black", linewidths=0.6,
                        zorder=4, label="Selected calibration")
 
-    ax.set_xlabel("EIS arc-shape error, |Δ(R3+R5)/R1| (%)")
+    ax.set_xlabel("EIS arc-shape error, |Δ(Σarc/R1)| (%)")
     ax.set_ylabel("R1 growth-rate error (%)")
     ax.grid(True, alpha=0.3)
     ax.legend(frameon=False, loc="upper right")
@@ -197,7 +197,7 @@ def plot_alignment_summary(summary: dict, save_path=None):
     panels = []  # (title, real, achieved, ci_lo, ci_hi)
     arc_real, arc_ach = real_targets.get("mean_arc_ratio"), best.get("oracle_arc_ratio")
     if arc_real is not None and arc_ach is not None:
-        panels.append(("EIS arc ratio\n(R3+R5)/R1 (unitless)", arc_real, arc_ach, None, None))
+        panels.append(("EIS arc ratio\nΣarc/R1 (unitless)", arc_real, arc_ach, None, None))
     r1_real, r1_ach = real_targets.get("r1_growth_pct"), best.get("oracle_r1_growth_pct")
     if r1_real is not None and r1_ach is not None:
         panels.append(("R1 growth (%)", r1_real, r1_ach, None, None))

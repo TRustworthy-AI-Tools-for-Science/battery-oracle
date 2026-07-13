@@ -267,6 +267,7 @@ def run_oracle_candidate(
     circuit: str | None = None,
     calibration_model: str = CALIBRATION_MODEL,
     chemistry: str = "Chen2020",
+    dod_lam_scale: float = 0.0,
 ) -> dict[str, Any]:
     """Replay cached protocols through one oracle candidate and return metrics.
 
@@ -288,6 +289,7 @@ def run_oracle_candidate(
         sei_rate_scale=sei_rate_scale,
         dead_li_decay_scale=dead_li_decay_scale,
         plating_rate_scale=plating_rate_scale,
+        dod_lam_scale=dod_lam_scale,
         circuit=circuit,   # ECM layout matches the index-based reads below
     )
     oracle.reset()
@@ -356,6 +358,7 @@ def run_oracle_candidate(
         "sei_rate_scale":       sei_rate_scale,
         "dead_li_decay_scale":  dead_li_decay_scale,
         "plating_rate_scale":   plating_rate_scale,
+        "dod_lam_scale":        dod_lam_scale,
         "oracle_arc_ratio":     float(np.mean(arc_ratios)) if arc_ratios else None,
         "oracle_r1_growth_pct": r1_growth,
         "oracle_soh_fade_per_cycle": oracle_soh_fade_per_cycle,
@@ -468,6 +471,7 @@ def run_crate_sensitivity_probe(
     high_c_mult: float = 8.0,
     circuit: str | None = None,
     chemistry: str = "Chen2020",
+    dod_lam_scale: float = 0.0,
 ) -> dict[str, Any]:
     """Run two short oracle simulations at low vs high C-rate; return loss rates.
 
@@ -495,6 +499,7 @@ def run_crate_sensitivity_probe(
             sei_rate_scale=sei_rate_scale,
             dead_li_decay_scale=dead_li_decay_scale,
             plating_rate_scale=plating_rate_scale,
+            dod_lam_scale=dod_lam_scale,
             circuit=circuit,
         )
         oracle.reset()
@@ -540,6 +545,7 @@ def run_crate2_slope_probe(
     c2_levels_mult: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
     circuit: str | None = None,
     chemistry: str = "Chen2020",
+    dod_lam_scale: float = 0.0,
 ) -> dict[str, Any]:
     """Oracle-side analogue of the real multi-cell C_rate_2 slope.
 
@@ -568,6 +574,7 @@ def run_crate2_slope_probe(
             sei_rate_scale=sei_rate_scale,
             dead_li_decay_scale=dead_li_decay_scale,
             plating_rate_scale=plating_rate_scale,
+            dod_lam_scale=dod_lam_scale,
             circuit=circuit,
         )
         oracle.reset()
@@ -834,18 +841,25 @@ def _native(obj):
     return obj
 
 
-def _suggest_scales(trial, ranges: dict) -> tuple[float, float, float, float]:
-    """The four log-space scale suggestions — identical in both drivers."""
-    return (
-        trial.suggest_float("kinetics_scale",      ranges["ks_min"],  ranges["ks_max"],  log=True),
-        trial.suggest_float("sei_rate_scale",      ranges["srs_min"], ranges["srs_max"], log=True),
-        trial.suggest_float("dead_li_decay_scale", ranges["dds_min"], ranges["dds_max"], log=True),
-        trial.suggest_float("plating_rate_scale",  ranges["prs_min"], ranges["prs_max"], log=True),
-    )
+def _suggest_scales(trial, ranges: dict) -> tuple[float, float, float, float, float]:
+    """The scale suggestions — identical in both drivers.
+
+    Four log-space scales always; ``dod_lam_scale`` (the C_rate_1 charge-rate
+    lever) is a 5th log-space dimension only when ``dl_min``/``dl_max`` are given,
+    else fixed at 0.0 (disabled). Suggested last so runs without it keep the same
+    RNG stream as the original 4-D search.
+    """
+    ks  = trial.suggest_float("kinetics_scale",      ranges["ks_min"],  ranges["ks_max"],  log=True)
+    srs = trial.suggest_float("sei_rate_scale",      ranges["srs_min"], ranges["srs_max"], log=True)
+    dds = trial.suggest_float("dead_li_decay_scale", ranges["dds_min"], ranges["dds_max"], log=True)
+    prs = trial.suggest_float("plating_rate_scale",  ranges["prs_min"], ranges["prs_max"], log=True)
+    dl  = (trial.suggest_float("dod_lam_scale", ranges["dl_min"], ranges["dl_max"], log=True)
+           if ranges.get("dl_min") is not None and ranges.get("dl_max") is not None else 0.0)
+    return (ks, srs, dds, prs, dl)
 
 
 def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: float,
-                        cfg: dict) -> tuple[dict, float]:
+                        dl: float, cfg: dict) -> tuple[dict, float]:
     """Replay one candidate through the oracle (+ optional probes) and score it.
 
     Single source of truth for a trial's evaluation, shared by the sequential
@@ -855,7 +869,7 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
     t0 = time.time()
     result = run_oracle_candidate(cache, ks, srs, dds, prs, cfg["preset"],
                                   cfg["capacity_check"], circuit=cfg["circuit"],
-                                  chemistry=cfg["chemistry"])
+                                  chemistry=cfg["chemistry"], dod_lam_scale=dl)
     if cfg["skip_crate_probe"]:
         result["crate_probe_skipped"] = True
         result["crate_sensitivity_ratio"] = None
@@ -864,13 +878,13 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
             cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
             probe_cycles=cfg["crate_probe_cycles"], low_c_mult=cfg["crate_probe_low_c"],
             high_c_mult=cfg["crate_probe_high_c"], circuit=cfg["circuit"],
-            chemistry=cfg["chemistry"]))
+            chemistry=cfg["chemistry"], dod_lam_scale=dl))
         result["crate_probe_skipped"] = False
     if not cfg["skip_crate2_slope"]:
         result.update(run_crate2_slope_probe(
             cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
             probe_cycles=cfg["crate2_probe_cycles"], c2_levels_mult=tuple(cfg["crate2_levels"]),
-            circuit=cfg["circuit"], chemistry=cfg["chemistry"]))
+            circuit=cfg["circuit"], chemistry=cfg["chemistry"], dod_lam_scale=dl))
     result["runtime_s"] = round(time.time() - t0, 1)
     score = score_candidate(result, cfg["real_targets"], cfg["preset"],
                             cfg["crate_sensitivity_min"], cfg["real_crate2_slope"])
@@ -899,8 +913,8 @@ def _parallel_worker(study_name: str, storage_url: str, n_trials_worker: int,
                               sampler=_make_sampler(sampler, seed))
 
     def objective(trial: "optuna.Trial") -> float:
-        ks, srs, dds, prs = _suggest_scales(trial, ranges)
-        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, cfg)
+        ks, srs, dds, prs, dl = _suggest_scales(trial, ranges)
+        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, dl, cfg)
         result["trial_number"] = trial.number
         trial.set_user_attr("result", _native(result))
         if not math.isfinite(score):
@@ -983,6 +997,7 @@ def calibrate_oracle(
     srs_min: float = 0.01, srs_max: float = 1.0,
     dds_min: float = 0.1, dds_max: float = 1000.0,
     prs_min: float = 0.01, prs_max: float = 10.0,
+    dl_min: float | None = None, dl_max: float | None = None,
     n_trials: int = 35,
     n_jobs: int = 1,
     sampler: str = "tpe",
@@ -1042,7 +1057,8 @@ def calibrate_oracle(
         "real_crate2_slope": real_crate2_slope, "real_targets": real_targets,
     }
     ranges = {"ks_min": ks_min, "ks_max": ks_max, "srs_min": srs_min, "srs_max": srs_max,
-              "dds_min": dds_min, "dds_max": dds_max, "prs_min": prs_min, "prs_max": prs_max}
+              "dds_min": dds_min, "dds_max": dds_max, "prs_min": prs_min, "prs_max": prs_max,
+              "dl_min": dl_min, "dl_max": dl_max}
 
     if n_jobs and n_jobs > 1:
         return _calibrate_oracle_parallel(
@@ -1054,12 +1070,12 @@ def calibrate_oracle(
     results: list[dict] = []
 
     def objective(trial: "optuna.Trial") -> float:
-        ks, srs, dds, prs = _suggest_scales(trial, ranges)
+        ks, srs, dds, prs, dl = _suggest_scales(trial, ranges)
         log.info(
-            "── Trial %d/%d: ks=%.4f  srs=%.4f  dds=%.4f  prs=%.4f ──",
-            trial.number + 1, n_trials, ks, srs, dds, prs,
+            "── Trial %d/%d: ks=%.4f  srs=%.4f  dds=%.4f  prs=%.4f  dl=%.4g ──",
+            trial.number + 1, n_trials, ks, srs, dds, prs, dl,
         )
-        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, cfg)
+        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, dl, cfg)
         result["trial_number"] = trial.number
         results.append(result)
         ratio = result.get("crate_sensitivity_ratio")
@@ -1135,7 +1151,7 @@ def print_summary(
     eol_target_str = f"{eol_target:.0f}" if eol_target else "n/a"
     print(f"  Real targets:  arc_ratio={arc_real_str}   r1_growth={r1_real_str}   eol_cycle~{eol_target_str}")
     print(f"{'='*75}")
-    header = (f"{'ks':>8}  {'srs':>8}  {'dds':>8}  {'prs':>8}  {'arc_ratio':>10}  "
+    header = (f"{'ks':>8}  {'srs':>8}  {'dds':>8}  {'prs':>8}  {'dl':>8}  {'arc_ratio':>10}  "
                f"{'r1_growth%':>11}  {'eol_cyc':>8}  {'crate_x':>8}  {'c2_slope':>10}  "
                f"{'score':>8}  {'eol?':>5}")
     print(header)
@@ -1150,6 +1166,7 @@ def print_summary(
         print(
             f"{r['kinetics_scale']:>8.4f}  {r['sei_rate_scale']:>8.4f}  {r['dead_li_decay_scale']:>8.2f}"
             f"  {r.get('plating_rate_scale', 1.0):>8.4f}"
+            f"  {r.get('dod_lam_scale', 0.0):>8.4g}"
             f"  {r['oracle_arc_ratio'] or float('nan'):>10.2f}"
             f"  {r['oracle_r1_growth_pct'] or float('nan'):>10.1f}%"
             f"  {eol_cyc if eol_cyc is not None else float('nan'):>8.0f}"
@@ -1197,6 +1214,10 @@ def write_oracle_config(
         min(r.get("plating_rate_scale", 1.0) for r in all_results),
         max(r.get("plating_rate_scale", 1.0) for r in all_results),
     )
+    dl_range = (
+        min(r.get("dod_lam_scale", 0.0) for r in all_results),
+        max(r.get("dod_lam_scale", 0.0) for r in all_results),
+    )
 
     arc_real  = real_targets["mean_arc_ratio"]
     arc_oracle = best["oracle_arc_ratio"]
@@ -1209,6 +1230,7 @@ def write_oracle_config(
     r1_status  = "validated" if r1_close else "partial — gap > 200% of target"
     dds_best   = best.get("dead_li_decay_scale", 1.0)
     prs_best   = best.get("plating_rate_scale", 1.0)
+    dl_best    = best.get("dod_lam_scale", 0.0)
 
     eol_target  = _eol_target_cycles(preset, oracle_defaults)
     eol_implied = best.get("implied_eol_cycle")
@@ -1288,6 +1310,7 @@ def write_oracle_config(
         f"  eol_capacity_fraction: {_od_degradation.get('eol_capacity_fraction', 0.80)}",
         "  capacity_check: true",  # deliberate calibration-time override, not a stale default
         f"  ec_diffusivity_base_factor: {_od_degradation.get('ec_diffusivity_base_factor', 0.25)}",
+        f"  dod_lam_scale: {dl_best:.4g}   # C_rate_1 (charge-rate) lever; 0 = disabled (charge rate has no lifetime effect)",
         "",
         "protocol_scaling:",
         "  real_cell_capacity_mah_legacy_default: 200.0  # always auto-detect per cell",
@@ -1330,6 +1353,15 @@ def write_oracle_config(
         '    target_metric: "R1 growth % and EOL — controls how much Li is plated per cycle"',
         f'    bo_range_searched: "[{prs_range[0]:.3g}, {prs_range[1]:.3g}]"',
         '    note: "Lower prs = slower plating = less dead Li formed = lower R1 growth AND longer EOL (unlike dds which trades one for the other)"',
+        "",
+        "  dod_lam_scale:",
+        f'    best_value: {dl_best:.4g}',
+        '    target_metric: "C_rate_1 (charge-rate) sensitivity — DoD/charge-stress LAM, stress ~ sqrt(C_rate_1*DoD)"',
+        f'    bo_range_searched: "[{dl_range[0]:.3g}, {dl_range[1]:.3g}]"',
+        '    note: "0.0 disables (charge rate then has no lifetime effect); it is the ONLY degradation mode',
+        '           coupled to C_rate_1. Magnitude is an engineering choice (jones2022 shallow DoD cannot fit it).',
+        '           Higher dl = stronger charge-rate sensitivity but shorter EOL. sqrt law caps the 1C-vs-8C',
+        '           loss-rate ratio near sqrt(8)~2.83 at full LAM dominance."',
         "",
         "  implied_eol_cycle:",
         f'    status: "{eol_status}"',

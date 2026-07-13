@@ -1,0 +1,47 @@
+# MATR (Severson et al. 2019, Nature Energy) oracle calibration — PLACEHOLDER.
+#
+# Overrides config_oracle_defaults.yml for the MATR 124-cell dataset: A123
+# APR18650M1A LFP/graphite cells (~1.1 Ah). Uses the first 5 cycles of each cell
+# as warm-start; fit against the 80%-capacity-fade cycle count.
+#
+# THIS IS LFP (Prada2013), NOT NMC. LFP has a ~2.0-3.6 V window, so the default
+# 4.3 V / 3.0 V protocol_bounds would massively overcharge it — the protocol_bounds
+# override below is REQUIRED (see the SPMe/DFN/LFP notes in oracle.py). LFP also
+# behaves differently under plating; the nominal (SEI-dominated) preset is used.
+#
+# To calibrate:
+#   battery-oracle-tune --cache matr.json --chemistry Prada2013 \
+#     --preset nominal --output-config src/battery_oracle/config_oracle_matr.yml
+
+cycling:
+  parameter_set: Prada2013
+  chemistry: Prada2013
+  temperature_K: 303.15            # ~30 degC (MATR forced-convection chamber)
+
+# LFP voltage window + cell capacity. REQUIRED: the NMC defaults (4.3/3.0 V) are
+# unphysical for LFP and would trip the voltage-infeasible failure immediately.
+protocol_bounds:
+  v_charge_max: 3.65
+  v_discharge_min: 2.0
+
+degradation:
+  preset: nominal                  # LFP: SEI-dominated; plating kinetics differ from NMC
+  eol_capacity_fraction: 0.80
+  capacity_check: true
+
+protocol_scaling:
+  real_cell_capacity_mah_legacy_default: 1100.0  # A123 APR18650M1A ~1.1 Ah
+  kinetics_scale: 1.0
+  sei_rate_scale: 1.0
+  dead_li_decay_scale: 1.0
+  plating_rate_scale: 1.0
+
+_calibration:
+  status: "PLACEHOLDER — not yet calibrated (requires MATR download + tune run)"
+  dataset: matr
+  cells_used: "124 A123 APR18650M1A LFP cells; first 5 cycles warm-start; 80%-fade cycle count"
+  chemistry_note: "Prada2013 = A123 LFP. Provides the 2nd chemistry for the GIFTERS 'Fair' dimension."
+  kinetics_scale:
+    status: "not calibrated — MATR has no EIS; kinetics left at chemistry default"
+  eol_cycles:
+    status: "to be fit against the 80%-capacity-fade cycle count"

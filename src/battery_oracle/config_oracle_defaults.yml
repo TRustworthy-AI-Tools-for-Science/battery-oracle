@@ -98,14 +98,6 @@ eis:
     c: 0.85
     max_M: 50
 
-# Detrended state output (#8). Only active when __call__(detrend=True); returns
-# x_t - x_t_ref where x_t_ref is a per-protocol-group EMA. Groups are k-means
-# centroids in the 6-D protocol space, fit on the first `warmup` calls.
-detrend:
-  alpha: 0.1               # EMA decay (~10-cycle time constant)
-  n_protocol_groups: 8     # k-means k (capped at #unique warmup protocols)
-  warmup: 20               # calls before groups are fit (global-mean reference until then)
-
 ecm:
   # Equivalent-circuit structure fitted to each EIS spectrum. The ECM parameter
   # layout AND the tune engine's arc-ratio / R1-growth metrics are DERIVED from

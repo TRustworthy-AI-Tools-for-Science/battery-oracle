@@ -129,12 +129,13 @@ def test_score_candidate_present_target_missing_oracle_is_inf():
 # ── Process-parallel calibration engine (thread-safety fix) ────────────────
 
 def _stub_candidate_result(cache, ks, srs, dds, prs, preset, capacity_check,
-                           circuit=None, chemistry="Chen2020"):
+                           circuit=None, chemistry="Chen2020", dod_lam_scale=0.0):
     """Cheap stand-in for run_oracle_candidate (no PyBaMM): arc-ratio tracks ks so
     scores vary; deliberately returns numpy types to exercise the _native sanitiser."""
     return {
         "kinetics_scale": ks, "sei_rate_scale": srs,
         "dead_li_decay_scale": dds, "plating_rate_scale": prs,
+        "dod_lam_scale": dod_lam_scale,
         "oracle_arc_ratio": np.float64(0.5 + ks),
         "oracle_r1_growth_pct": np.float64(10.0),
         "oracle_soh_fade_per_cycle": None,

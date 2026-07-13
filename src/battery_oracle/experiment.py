@@ -177,7 +177,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     ecm = oracle_cfg.get("ecm", {}) or {}
     cpe_seeds = ecm.get("cpe_seeds", {}) or {}
     autoeis = ecm.get("autoeis", {}) or {}
-    detrend = oracle_cfg.get("detrend", {}) or {}
     degradation = oracle_cfg.get("degradation", {}) or {}
     c2_stress = degradation.get("c2_stress", {}) or {}
     preset_constants_all = degradation.get("preset_constants", {}) or {}
@@ -268,10 +267,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "v_discharge_min": float(bounds.get("v_discharge_min", 3.0)),
         "charge_stage_max_s": float(bounds.get("charge_stage_max_s", 900.0)),
         "dfn_max_crate": float(bounds.get("dfn_max_crate", 1.5)),
-
-        "detrend_alpha": float(detrend.get("alpha", 0.1)),
-        "n_protocol_groups": int(detrend.get("n_protocol_groups", 8)),
-        "detrend_warmup": int(detrend.get("warmup", 20)),
     }
 
 

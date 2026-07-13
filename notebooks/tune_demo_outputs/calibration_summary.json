@@ -1,0 +1,35 @@
+{
+  "dataset": "demo",
+  "preset": "accelerated",
+  "cell_id": "autoeis_battery_dataset",
+  "n_trials": 12,
+  "n_cycles": 4,
+  "crate_sensitivity_min": 3.0,
+  "eol_target_cycles": 55.0,
+  "real_targets": {
+    "mean_arc_ratio": 33.80679854703945,
+    "r1_growth_pct": 48.22443902426426,
+    "soh_fade_per_cycle": null
+  },
+  "real_crate2_slope": null,
+  "best": {
+    "kinetics_scale": 0.16930133678272968,
+    "sei_rate_scale": 0.5227270589225135,
+    "dead_li_decay_scale": 46.17010395473557,
+    "plating_rate_scale": 0.42022959710213365,
+    "dod_lam_scale": 0.0,
+    "oracle_arc_ratio": 42.806918948364626,
+    "oracle_r1_growth_pct": 92.47460706242279,
+    "oracle_soh_fade_per_cycle": 0.002045337439248174,
+    "oracle_failure": false,
+    "n_cycles_completed": 4,
+    "implied_eol_cycle": 97.78337606410614,
+    "crate_probe_skipped": true,
+    "crate_sensitivity_ratio": null,
+    "runtime_s": 59.5,
+    "score": 1.7592316326787714,
+    "trial_number": 3
+  },
+  "best_score": 1.7592316326787714,
+  "drift_result": null
+}
