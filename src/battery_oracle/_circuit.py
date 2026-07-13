@@ -26,6 +26,11 @@ ACTION_FEATURE_NAMES = [
 ]
 """Names for the 6-D action / protocol feature appended to the state vector."""
 
+ACTION_FEATURE_NAMES_TEMPERATURE = ACTION_FEATURE_NAMES + ["T_ambient_K"]
+"""7-D action names for the opt-in temperature protocol (#10): the 6-D vector
+plus a per-cycle ambient temperature slot. Used only when
+``PyBaMMOracle(use_temperature_protocol=True)``; the 6-D default is unchanged."""
+
 
 def _param_labels_from_circuit(circuit: str) -> list[str]:
     """AutoEIS parameter labels for a circuit string (no autoeis import needed).

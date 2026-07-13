@@ -11,6 +11,16 @@ metrics. Loading that cache from a specific dataset (e.g. jones2022) is the
 caller's job. The :func:`main` CLI (``battery-oracle-tune``) reads the cache + targets
 from JSON so any battery's data can drive it.
 
+Two calibration modes, selected automatically by the cache contents (see
+:func:`score_candidate`):
+
+* **EIS/ECM** — the cache carries per-cycle ``ecm_charge``/``ecm_discharge``; the
+  fit targets the arc-ratio and R1-growth signatures (jones2022 path).
+* **Capacity-fade** — the cache carries per-cycle ``real_soh`` but null ECMs (the
+  CALCE / Oxford / MATR datasets ship capacity/cycling, no EIS); the fit targets
+  the mean per-cycle SOH-loss rate instead. ``kinetics_scale`` is left near its
+  chemistry default in this mode (no charge-transfer-arc signal to constrain it).
+
 Public API
 ----------
 calibrate_oracle    — run the BO; returns best params + all trial results
@@ -54,6 +64,13 @@ from battery_oracle.oracle import OracleFailure, PyBaMMOracle
 
 log = logging.getLogger(__name__)
 
+# Calibration always runs on SPMe, regardless of the experiment-time model
+# (DFN is reserved for the final fidelity check of shortlisted protocols — it is
+# far too slow for the hundreds of oracle calls a calibration sweep makes, #5).
+# Pinned explicitly here so a future change to PyBaMMOracle's default `model`
+# can't silently pull DFN into the calibration inner loop.
+CALIBRATION_MODEL = "SPMe"
+
 
 def _resolve_circuit(circuit: str | None) -> str:
     """Return *circuit*, or the default ECM circuit loaded from the YAML config.
@@ -78,6 +95,28 @@ def _ecm_indices(circuit: str) -> tuple[int, list[int]]:
     arc_rs = [r for r, _ in pairs]
     ohmic = next((l for l in labels if l.startswith("R") and l not in arc_rs), labels[0])
     return labels.index(ohmic), [labels.index(r) for r in arc_rs]
+
+
+def _reconstruct_ecm_spectrum(circuit: str, params, frequencies: np.ndarray) -> np.ndarray:
+    """Complex impedance Z(f) of *circuit* at *params*, evaluated on *frequencies*.
+
+    ``params`` is an ECM parameter vector in :func:`_param_labels_from_circuit`
+    order — the layout the cache's ``ecm_charge``/``ecm_discharge`` and the oracle's
+    ``ecm_params_*`` both use. Used to turn a stored ECM back into a Nyquist curve
+    for the oracle-vs-real EIS plot. Maps the vector to AutoEIS's own label order
+    defensively (the two orderings are documented to match). Requires the ``[tune]``
+    extra (AutoEIS); raises if unavailable, so callers guard with try/except.
+    """
+    import autoeis as ae
+
+    values = dict(zip(_param_labels_from_circuit(circuit),
+                      np.asarray(params, dtype=float)))
+    ordered = np.array([values[lbl] for lbl in ae.parser.get_parameter_labels(circuit)],
+                       dtype=float)
+    circuit_fn = ae.utils.generate_circuit_fn(circuit)
+    return np.asarray(circuit_fn(np.asarray(frequencies, dtype=float), ordered),
+                      dtype=complex)
+
 
 def _eol_target_cycles_from_range(range_str: str | None) -> float | None:
     """Parse a ``"lo-hi"`` cycle-count range string (e.g. ``"40-70"``) to its midpoint."""
@@ -108,13 +147,38 @@ def _eol_target_cycles(preset: str, oracle_cfg: dict | None = None) -> float | N
 # Real calibration targets (operate on the cache dict; no dataset access)
 # ---------------------------------------------------------------------------
 
+def _real_soh_series(cache: dict) -> list[float]:
+    """Per-cycle real SOH across ``cache["cycles"]``, for the capacity-fade target.
+
+    Prefers each cycle's ``real_soh``; falls back to ``real_capacity_mah`` divided
+    by the cache's reference capacity (``first_real_capacity_mah`` else
+    ``real_cell_capacity_mah``). Cycles carrying neither are skipped. The order
+    follows ``cache["cycles"]`` so the series is directly comparable to the oracle
+    SOH history replayed over the same cycles in :func:`run_oracle_candidate`.
+    """
+    data = cache["data"]
+    ref_cap = cache.get("first_real_capacity_mah") or cache.get("real_cell_capacity_mah")
+    series: list[float] = []
+    for cyc in cache["cycles"]:
+        entry = data[cyc]
+        soh = entry.get("real_soh")
+        if soh is None:
+            cap = entry.get("real_capacity_mah")
+            if cap is not None and ref_cap:
+                soh = float(cap) / float(ref_cap)
+        if soh is not None:
+            series.append(float(soh))
+    return series
+
+
 def compute_real_targets(cache: dict, circuit: str | None = None) -> dict[str, float | None]:
-    """Extract arc-ratio and R1-growth targets from the real ECM cache.
+    """Extract arc-ratio, R1-growth, and capacity-fade targets from the real cache.
 
     Parameters
     ----------
     cache : dict
-        Measured cache (``ecm_charge`` / ``ecm_discharge`` per cycle + protocols).
+        Measured cache (``ecm_charge`` / ``ecm_discharge`` and/or ``real_soh`` per
+        cycle + protocols).
     circuit : str, optional
         ECM circuit string defining the parameter layout of the cached vectors.
         No structure is assumed: the ohmic/arc-resistor positions are derived from
@@ -124,10 +188,14 @@ def compute_real_targets(cache: dict, circuit: str | None = None) -> dict[str, f
     Returns
     -------
     dict
-        Mapping with two keys: ``mean_arc_ratio`` — mean (sum arc R)/(ohmic R)
-        across all cycles and states (or ``None``); and ``r1_growth_pct`` —
-        ``(R1[last]/R1[first] - 1) * 100`` from the charge ECM (or ``None``).
-        Outliers (ohmic R < 1e-6) are excluded as AutoEIS blowup artefacts.
+        Mapping with three keys: ``mean_arc_ratio`` — mean (sum arc R)/(ohmic R)
+        across all cycles and states (or ``None``); ``r1_growth_pct`` —
+        ``(R1[last]/R1[first] - 1) * 100`` from the charge ECM (or ``None``); and
+        ``soh_fade_per_cycle`` — mean per-cycle real-SOH loss over the window (or
+        ``None``). The two ECM targets come back ``None`` for an EIS-less cache
+        (``ecm_charge``/``ecm_discharge`` all null, as with CALCE/Oxford/MATR),
+        leaving ``soh_fade_per_cycle`` as the sole health signal. Outliers
+        (ohmic R < 1e-6) are excluded as AutoEIS blowup artefacts.
     """
     circuit = _resolve_circuit(circuit or cache.get("circuit"))
     ohmic_i, arc_is = _ecm_indices(circuit)
@@ -159,9 +227,23 @@ def compute_real_targets(cache: dict, circuit: str | None = None) -> dict[str, f
     if r1_first is not None and r1_last is not None:
         r1_growth = (r1_last / r1_first - 1.0) * 100.0
 
+    # Capacity-fade target: mean per-cycle SOH loss across the cache window. For
+    # datasets that ship capacity/cycling but no EIS (CALCE / Oxford / MATR) this
+    # is the only health signal — their caches carry per-cycle real_soh with null
+    # ECMs, so the two ECM targets above are None and this drives the fit. Computed
+    # over the same cycles run_oracle_candidate replays, so it is directly
+    # comparable to that function's oracle_soh_fade_per_cycle.
+    soh_series = _real_soh_series(cache)
+    soh_fade = None
+    if len(soh_series) >= 2:
+        fade = (soh_series[0] - soh_series[-1]) / (len(soh_series) - 1)
+        if fade > 0:
+            soh_fade = float(fade)
+
     return {
         "mean_arc_ratio": float(np.mean(arc_ratios)) if arc_ratios else None,
         "r1_growth_pct":  r1_growth,
+        "soh_fade_per_cycle": soh_fade,
     }
 
 
@@ -178,16 +260,22 @@ def run_oracle_candidate(
     preset: str,
     capacity_check: bool,
     circuit: str | None = None,
+    calibration_model: str = CALIBRATION_MODEL,
+    chemistry: str = "Chen2020",
 ) -> dict[str, Any]:
     """Replay cached protocols through one oracle candidate and return metrics.
 
     ``circuit`` sets the oracle's ECM structure (and the ohmic/arc-resistor
     positions the arc-ratio / R1-growth metrics read). It is not assumed: ``None``
     loads the default from ``config_oracle_defaults.yml`` (``ecm.circuit``).
+    ``calibration_model`` pins the reduced-order model (SPMe) for the sweep;
+    ``chemistry`` selects the PyBaMM parameter set (#14).
     """
     circuit = _resolve_circuit(circuit)
     ohmic_i, arc_is = _ecm_indices(circuit)
     oracle = PyBaMMOracle(
+        model=calibration_model,
+        chemistry=chemistry,
         degradation_preset=preset,
         capacity_check=capacity_check,
         real_cell_capacity_mah=float(cache["real_cell_capacity_mah"]),
@@ -240,6 +328,13 @@ def run_oracle_candidate(
     if r1_first is not None and r1_last is not None:
         r1_growth = (r1_last / r1_first - 1.0) * 100.0
 
+    # Mean per-cycle SOH loss over the replayed window — the oracle-side match to
+    # compute_real_targets' soh_fade_per_cycle (same formula, same cycles), and the
+    # metric the capacity-fade calibration term fits against.
+    oracle_soh_fade_per_cycle = None
+    if len(soh_history) >= 2:
+        oracle_soh_fade_per_cycle = (soh_history[0] - soh_history[-1]) / (len(soh_history) - 1)
+
     # Implied EOL cycle: if the oracle actually failed within the window, that IS
     # the EOL cycle. Otherwise extrapolate from the mean per-cycle capacity loss
     # rate observed over the window to the eol_capacity_fraction threshold (0.80
@@ -248,10 +343,8 @@ def run_oracle_candidate(
     implied_eol_cycle = None
     if oracle_failure:
         implied_eol_cycle = float(n_completed)
-    elif len(soh_history) >= 2:
-        mean_loss_per_cycle = (soh_history[0] - soh_history[-1]) / (len(soh_history) - 1)
-        if mean_loss_per_cycle > 1e-6:
-            implied_eol_cycle = 0.20 / mean_loss_per_cycle
+    elif oracle_soh_fade_per_cycle is not None and oracle_soh_fade_per_cycle > 1e-6:
+        implied_eol_cycle = 0.20 / oracle_soh_fade_per_cycle
 
     return {
         "kinetics_scale":       kinetics_scale,
@@ -260,10 +353,101 @@ def run_oracle_candidate(
         "plating_rate_scale":   plating_rate_scale,
         "oracle_arc_ratio":     float(np.mean(arc_ratios)) if arc_ratios else None,
         "oracle_r1_growth_pct": r1_growth,
+        "oracle_soh_fade_per_cycle": oracle_soh_fade_per_cycle,
         "oracle_failure":       oracle_failure,
         "n_cycles_completed":   n_completed,
         "implied_eol_cycle":    implied_eol_cycle,
     }
+
+
+def collect_eis_comparison(
+    cache: dict,
+    best: dict,
+    *,
+    preset: str = "accelerated",
+    capacity_check: bool = True,
+    circuit: str | None = None,
+    calibration_model: str = CALIBRATION_MODEL,
+    chemistry: str = "Chen2020",
+    max_panels: int = 2,
+) -> dict | None:
+    """Collect oracle-vs-ground-truth EIS spectra for the winning candidate.
+
+    Rebuilds one oracle with *best*'s scales, replays the cache's protocols, and
+    pairs the oracle's synthesized charge-state spectrum at representative cycles
+    (first + last with a real ECM) against the real cell's spectrum reconstructed
+    from the cached ECM parameters — same circuit, same frequency grid. Both are
+    returned in the raw ``(freq, Re, -Im)`` convention plus their ohmic R, so the
+    plotter ({func}`battery_oracle.tune_plots.plot_eis_comparison`) can normalise.
+
+    Returns ``None`` when there is nothing to compare: a capacity-only (EIS-less)
+    cache whose ECMs are all null — the CALCE/Oxford/MATR case — so the automatic
+    plot is a graceful no-op there. AutoEIS/oracle failures propagate to the
+    caller, which guards them.
+
+    Note: this replays the cache once more (a single confirmation run, negligible
+    beside the ``n_trials`` full replays the search already paid for). It needs a
+    live oracle, so — unlike the Pareto/history/alignment plots — it is produced at
+    calibration time and is not regenerable from the CSV/JSON sidecars alone.
+    """
+    circuit = _resolve_circuit(circuit or cache.get("circuit"))
+    data = cache["data"]
+    ecm_cycles = [c for c in cache["cycles"] if data[c].get("ecm_charge") is not None]
+    if not ecm_cycles:
+        log.info("EIS comparison skipped: cache has no ECM data (capacity-only mode).")
+        return None
+
+    # First + last cycle carrying a real ECM (shows arc growth over ageing). Their
+    # positions in cache["cycles"] index 1:1 into the oracle history replayed below.
+    sel_labels = ([ecm_cycles[0]] if len(ecm_cycles) == 1
+                  else [ecm_cycles[0], ecm_cycles[-1]])[:max_panels]
+    sel_pos = {lbl: cache["cycles"].index(lbl) for lbl in sel_labels}
+    max_pos = max(sel_pos.values())
+
+    oracle = PyBaMMOracle(
+        model=calibration_model, chemistry=chemistry, degradation_preset=preset,
+        capacity_check=capacity_check,
+        real_cell_capacity_mah=float(cache["real_cell_capacity_mah"]),
+        kinetics_scale=best["kinetics_scale"], sei_rate_scale=best["sei_rate_scale"],
+        dead_li_decay_scale=best["dead_li_decay_scale"],
+        plating_rate_scale=best["plating_rate_scale"], circuit=circuit,
+    )
+    oracle.reset()
+    for i, cyc in enumerate(cache["cycles"]):
+        try:
+            oracle(np.array(data[cyc]["protocol"], dtype=np.float64))
+        except OracleFailure as exc:
+            log.warning("EIS comparison: oracle EOL at cycle %s before all panels "
+                        "collected: %s", cyc, exc)
+            break
+        if i >= max_pos:
+            break
+
+    freq = np.asarray(oracle.frequencies, dtype=float)
+    hf = int(np.argmax(freq))
+    panels = []
+    for lbl in sel_labels:
+        pos = sel_pos[lbl]
+        if pos >= len(oracle._history):
+            continue
+        h = oracle._history[pos]
+        oz_re = np.asarray(h["Z_charge_real"], dtype=float)
+        oz_nim = np.asarray(h["Z_charge_neg_imag"], dtype=float)
+        try:
+            Zr = _reconstruct_ecm_spectrum(circuit, data[lbl]["ecm_charge"], freq)
+        except Exception as exc:
+            log.warning("EIS comparison: real-spectrum reconstruction failed for "
+                        "cycle %s: %s", lbl, exc)
+            continue
+        panels.append({
+            "cycle_label": str(lbl),
+            "oracle": {"z_re": oz_re, "z_neg_im": oz_nim, "r_ohmic": float(oz_re[hf])},
+            "real":   {"z_re": Zr.real, "z_neg_im": -Zr.imag,
+                       "r_ohmic": float(Zr.real[hf])},
+        })
+    if not panels:
+        return None
+    return {"circuit": circuit, "frequencies": freq, "panels": panels}
 
 
 def run_crate_sensitivity_probe(
@@ -278,6 +462,7 @@ def run_crate_sensitivity_probe(
     low_c_mult: float = 1.0,
     high_c_mult: float = 8.0,
     circuit: str | None = None,
+    chemistry: str = "Chen2020",
 ) -> dict[str, Any]:
     """Run two short oracle simulations at low vs high C-rate; return loss rates.
 
@@ -296,6 +481,8 @@ def run_crate_sensitivity_probe(
 
     def _mean_loss_per_cycle(c_rate_ma: float) -> float | None:
         oracle = PyBaMMOracle(
+            model=CALIBRATION_MODEL,
+            chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
             real_cell_capacity_mah=real_cap_mah,
@@ -347,6 +534,7 @@ def run_crate2_slope_probe(
     probe_cycles: int = 5,
     c2_levels_mult: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
     circuit: str | None = None,
+    chemistry: str = "Chen2020",
 ) -> dict[str, Any]:
     """Oracle-side analogue of the real multi-cell C_rate_2 slope.
 
@@ -366,6 +554,8 @@ def run_crate2_slope_probe(
     fade_mAh: list[float] = []
     for c2_ma in c2_levels_ma:
         oracle = PyBaMMOracle(
+            model=CALIBRATION_MODEL,
+            chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
             real_cell_capacity_mah=real_cap_mah,
@@ -430,35 +620,61 @@ def score_candidate(
     crate_sensitivity_min: float = 3.0,
     real_crate2_slope: dict | None = None,
 ) -> float:
-    """Combined relative error (lower = better). Returns inf if data is missing.
+    """Combined relative error (lower = better). Returns inf if nothing can be fit.
 
-    Terms: arc_ratio relative error, R1-growth relative error, EOL-rate
-    log-ratio error, a legacy C_rate_1 sensitivity term (skipped when the probe
-    wasn't run), and a C_rate_2 slope-matching term (see slope_match_error).
+    Two calibration modes, selected by which real targets the cache provides:
+
+    * **EIS/ECM cache** — ``mean_arc_ratio`` and/or ``r1_growth_pct`` present:
+      arc-ratio relative error + R1-growth relative error + an EOL-rate log-ratio
+      *plausibility* anchor to the preset's documented cycle-life midpoint (a
+      constant, not a data fit). This is the original scoring, unchanged.
+    * **EIS-less cache** — no ECM target (CALCE/Oxford/MATR ship capacity/cycling
+      but no EIS): the capacity-fade term (log-ratio of oracle vs real per-cycle
+      SOH loss, from ``real_soh``) is the sole health signal, and replaces the
+      preset EOL anchor.
+
+    A term whose real target IS present but whose oracle value is missing scores
+    inf (that candidate failed to produce a comparable metric). The legacy
+    C_rate_1 sensitivity term (skipped when the probe wasn't run) and the C_rate_2
+    slope-matching term (see :func:`slope_match_error`) are added in both modes.
     """
-    arc_err = r1_err = eol_err = float("inf")
-    crate_err = 0.0
-    if result["oracle_arc_ratio"] is not None and real_targets["mean_arc_ratio"]:
-        arc_err = abs(result["oracle_arc_ratio"] / real_targets["mean_arc_ratio"] - 1.0)
-    if result["oracle_r1_growth_pct"] is not None and real_targets["r1_growth_pct"]:
-        real_r1 = real_targets["r1_growth_pct"]
-        if abs(real_r1) > 1e-3:
-            r1_err = abs(result["oracle_r1_growth_pct"] / real_r1 - 1.0)
-    eol_target = _eol_target_cycles(preset)
-    implied_eol = result.get("implied_eol_cycle")
-    if eol_target and implied_eol and implied_eol > 0:
-        eol_err = abs(math.log(implied_eol / eol_target))
+    real_arc = real_targets.get("mean_arc_ratio")
+    real_r1 = real_targets.get("r1_growth_pct")
+    real_fade = real_targets.get("soh_fade_per_cycle")
+    have_ecm_target = bool(real_arc) or bool(real_r1 and abs(real_r1) > 1e-3)
+
+    terms: list[float] = []
+    if have_ecm_target:
+        if real_arc:
+            oracle_arc = result.get("oracle_arc_ratio")
+            terms.append(abs(oracle_arc / real_arc - 1.0)
+                         if oracle_arc is not None else float("inf"))
+        if real_r1 and abs(real_r1) > 1e-3:
+            oracle_r1 = result.get("oracle_r1_growth_pct")
+            terms.append(abs(oracle_r1 / real_r1 - 1.0)
+                         if oracle_r1 is not None else float("inf"))
+        eol_target = _eol_target_cycles(preset)
+        implied_eol = result.get("implied_eol_cycle")
+        terms.append(abs(math.log(implied_eol / eol_target))
+                     if eol_target and implied_eol and implied_eol > 0 else float("inf"))
+    elif real_fade and real_fade > 0:
+        oracle_fade = result.get("oracle_soh_fade_per_cycle")
+        terms.append(abs(math.log(oracle_fade / real_fade))
+                     if oracle_fade and oracle_fade > 0 else float("inf"))
+    else:
+        # No ECM target and no measured capacity fade — nothing to fit against.
+        return float("inf")
+
     ratio = result.get("crate_sensitivity_ratio")
     if ratio is not None and ratio > 0:
-        crate_err = max(0.0, math.log(crate_sensitivity_min / ratio))
+        terms.append(max(0.0, math.log(crate_sensitivity_min / ratio)))
     elif not result.get("crate_probe_skipped", False):
-        crate_err = float("inf")
-    crate2_slope_err = 0.0
+        terms.append(float("inf"))
     if real_crate2_slope is not None:
-        crate2_slope_err = slope_match_error(
-            result.get("oracle_slope_mAh_per_mA"), real_crate2_slope
-        )
-    return arc_err + r1_err + eol_err + crate_err + crate2_slope_err
+        terms.append(slope_match_error(
+            result.get("oracle_slope_mAh_per_mA"), real_crate2_slope))
+
+    return sum(terms)
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +717,7 @@ def calibrate_drift(
     n_periods: float = 4.0,
     probe_cycles: int = 3,
     scale_grid: list[float] | None = None,
+    chemistry: str = "Chen2020",
 ) -> dict[str, Any]:
     """Fit ``eis_drift_scale`` to match a real cell's linKK low/high-freq ratio.
 
@@ -521,6 +738,8 @@ def calibrate_drift(
 
     def _oracle_ratio(drift_scale: float, rest: float) -> float:
         oracle = PyBaMMOracle(
+            model=CALIBRATION_MODEL,
+            chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
             real_cell_capacity_mah=real_cap_mah,
@@ -604,6 +823,7 @@ def calibrate_oracle(
     warm_start_ks: list[float] | None = None,
     warm_start_srs: list[float] | None = None,
     circuit: str | None = None,
+    chemistry: str = "Chen2020",
 ) -> dict[str, Any]:
     """Run the Optuna BO over (kinetics, sei_rate, dead_li_decay, plating)_scale.
 
@@ -640,7 +860,7 @@ def calibrate_oracle(
         )
         t0 = time.time()
         result = run_oracle_candidate(cache, ks, srs, dds, prs, preset, capacity_check,
-                                      circuit=circuit)
+                                      circuit=circuit, chemistry=chemistry)
         if skip_crate_probe:
             result["crate_probe_skipped"] = True
             result["crate_sensitivity_ratio"] = None
@@ -649,7 +869,7 @@ def calibrate_oracle(
                 cache, ks, srs, dds, prs, preset, capacity_check,
                 probe_cycles=crate_probe_cycles,
                 low_c_mult=crate_probe_low_c, high_c_mult=crate_probe_high_c,
-                circuit=circuit,
+                circuit=circuit, chemistry=chemistry,
             )
             result.update(probe)
             result["crate_probe_skipped"] = False
@@ -658,7 +878,7 @@ def calibrate_oracle(
                 cache, ks, srs, dds, prs, preset, capacity_check,
                 probe_cycles=crate2_probe_cycles,
                 c2_levels_mult=tuple(crate2_levels),
-                circuit=circuit,
+                circuit=circuit, chemistry=chemistry,
             )
             result.update(slope_probe)
         result["runtime_s"] = round(time.time() - t0, 1)
@@ -672,13 +892,15 @@ def calibrate_oracle(
         oracle_slope = result.get("oracle_slope_mAh_per_mA")
         log.info(
             "  arc_ratio=%s (real=%s)  r1_growth=%s (real=%s)  eol_cycle~%s (target=%s)  "
-            "crate_ratio=%s (min=%.1f)  c2_slope=%s (real_CI=%s)  score=%.3f  %.0fs",
+            "fade/cyc=%s (real=%s)  crate_ratio=%s (min=%.1f)  c2_slope=%s (real_CI=%s)  score=%.3f  %.0fs",
             f"{result['oracle_arc_ratio']:.2f}" if result["oracle_arc_ratio"] is not None else "n/a",
             f"{real_targets['mean_arc_ratio']:.2f}" if real_targets["mean_arc_ratio"] else "?",
             f"{result['oracle_r1_growth_pct']:.1f}%" if result["oracle_r1_growth_pct"] is not None else "n/a",
             f"{real_targets['r1_growth_pct']:.1f}%" if real_targets["r1_growth_pct"] else "?",
             f"{result['implied_eol_cycle']:.0f}" if result["implied_eol_cycle"] is not None else "n/a",
             _eol_target_cycles(preset) or "?",
+            f"{result['oracle_soh_fade_per_cycle']:.4g}" if result.get("oracle_soh_fade_per_cycle") else "n/a",
+            f"{real_targets['soh_fade_per_cycle']:.4g}" if real_targets.get("soh_fade_per_cycle") else "?",
             f"{ratio:.2f}" if ratio is not None else "n/a",
             crate_sensitivity_min,
             f"{oracle_slope:.5f}" if oracle_slope is not None else "n/a",
@@ -787,6 +1009,7 @@ def write_oracle_config(
     crate_sensitivity_min: float = 3.0,
     real_crate2_slope: dict | None = None,
     drift_result: dict | None = None,
+    chemistry: str = "Chen2020",
 ) -> None:
     """Write YAML config with calibration provenance to *output_path*."""
     output_path = Path(output_path)
@@ -823,6 +1046,14 @@ def write_oracle_config(
     eol_close   = (eol_target and eol_implied and abs(math.log(eol_implied / eol_target)) < math.log(2.0))
     eol_status  = "validated (within 2x)" if eol_close else "partial — implied EOL off by >2x documented target"
 
+    fade_real   = real_targets.get("soh_fade_per_cycle")
+    fade_oracle = best.get("oracle_soh_fade_per_cycle")
+    if fade_real:
+        fade_close  = fade_oracle and fade_oracle > 0 and abs(math.log(fade_oracle / fade_real)) < math.log(1.5)
+        fade_status = "validated (within 1.5x)" if fade_close else "partial — fade rate off by >1.5x real"
+    else:
+        fade_status = "n/a — cache carries no real_soh (EIS-driven calibration)"
+
     crate_ratio   = best.get("crate_sensitivity_ratio")
     crate_skipped = best.get("crate_probe_skipped", False)
     if crate_skipped:
@@ -844,6 +1075,9 @@ def write_oracle_config(
     def fmt(v):
         return f"{v:.2f}" if v is not None else "n/a"
 
+    def fmt_fade(v):
+        return f"{v:.4g}" if v is not None else "n/a"
+
     _dr = drift_result or {}
     _drift_scale = _dr.get("drift_scale", 0.0)
     _drift_tau = _dr.get("drift_tau_s", 600.0)
@@ -863,7 +1097,8 @@ def write_oracle_config(
         "",
         "cycling:",
         f"  n_cycles: {_od_cycling.get('n_cycles', 1)}",
-        f"  parameter_set: {_od_cycling.get('parameter_set', 'Chen2020')}",
+        f"  parameter_set: {chemistry}",
+        f"  chemistry: {chemistry}",
         f"  temperature_K: {_od_cycling.get('temperature_K', 298.15)}",
         "",
         "eis:",
@@ -935,6 +1170,16 @@ def write_oracle_config(
         '    note: "Keeps the search within ~2x of the documented per-preset EOL target,',
         '           so candidates cannot satisfy arc_ratio/r1_growth while reaching real',
         '           EOL in <10 cycles or not for hundreds of cycles."',
+        "",
+        "  capacity_fade:",
+        f'    status: "{fade_status}"',
+        '    target_metric: "mean per-cycle real-SOH loss over the calibration window"',
+        f'    real_soh_fade_per_cycle: "{fmt_fade(fade_real)}"',
+        f'    achieved_soh_fade_per_cycle: "{fmt_fade(fade_oracle)}"',
+        '    note: "Sole health signal for EIS-less datasets (CALCE/Oxford/MATR): when the',
+        '           cache has null ECMs but per-cycle real_soh, the fit is driven by this',
+        '           term and the preset EOL anchor above is not used. n/a for EIS-driven',
+        '           calibration (no real_soh in the cache)."',
         "",
         "  crate_sensitivity:",
         f'    status: "{crate_status}"',
@@ -1058,6 +1303,9 @@ def _parse_args(argv=None) -> argparse.Namespace:
                    help="Optional real C_rate_2 slope JSON "
                         "{slope_mAh_per_mA, ci_lo, ci_hi, n_cells, n_pairs}.")
     p.add_argument("--dataset", default="custom", help="Label written into the config provenance.")
+    p.add_argument("--chemistry", default="Chen2020",
+                   choices=["Chen2020", "Xu2019", "Prada2013"],
+                   help="Cell chemistry; written to the output config's parameter_set + chemistry (#14).")
     p.add_argument("--cell-id", default=None, help="Cell label; defaults to the cache's cell_id.")
     p.add_argument("--preset", default="accelerated",
                    choices=["nominal", "accelerated", "severe"])
@@ -1081,6 +1329,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-capacity-check", action="store_true", default=False)
     p.add_argument("--skip-crate2-slope", action="store_true", default=False)
     p.add_argument("--crate-sensitivity-min", type=float, default=3.0)
+    p.add_argument("--plots-dir", type=Path, default=None,
+                   help="Directory for auto-generated calibration plots (default: "
+                        "alongside --output-config). The oracle-vs-ground-truth EIS "
+                        "Nyquist plot is written here after the search.")
+    p.add_argument("--no-eis-plot", action="store_true", default=False,
+                   help="Skip the automatic oracle-vs-ground-truth EIS Nyquist plot "
+                        "(e.g. on a capacity-only cache, where it is a no-op anyway).")
     return p.parse_args(argv)
 
 
@@ -1116,6 +1371,7 @@ def main(argv=None) -> None:
         skip_crate2_slope=(args.skip_crate2_slope or real_crate2_slope is None),
         crate_sensitivity_min=args.crate_sensitivity_min,
         real_crate2_slope=real_crate2_slope,
+        chemistry=args.chemistry,
     )
     print_summary(
         out["scored"], out["best"], real_targets,
@@ -1128,6 +1384,7 @@ def main(argv=None) -> None:
         len(cache["cycles"]), out["best"], real_targets, out["results"],
         crate_sensitivity_min=args.crate_sensitivity_min,
         real_crate2_slope=real_crate2_slope,
+        chemistry=args.chemistry,
     )
     print(f"Config written to: {args.output_config}")
     if args.summary_json is not None:
@@ -1140,6 +1397,29 @@ def main(argv=None) -> None:
             best=out["best"], best_score=out["best_score"],
         )
         print(f"Calibration summary written to: {args.summary_json}")
+
+    # Auto-generate the oracle-vs-ground-truth EIS Nyquist plot for the winning
+    # candidate. Best-effort: never let a plotting hiccup fail a completed search.
+    if not args.no_eis_plot:
+        plots_dir = args.plots_dir or Path(args.output_config).parent
+        try:
+            eis_data = collect_eis_comparison(
+                cache, out["best"], preset=args.preset,
+                capacity_check=not args.no_capacity_check,
+                circuit=cache.get("circuit"), chemistry=args.chemistry,
+            )
+            if eis_data is None:
+                print("EIS comparison plot skipped (no ground-truth EIS in cache; "
+                      "capacity-only calibration).")
+            else:
+                from battery_oracle.tune_plots import plot_eis_comparison
+                import matplotlib.pyplot as plt
+                plots_dir.mkdir(parents=True, exist_ok=True)
+                eis_path = plots_dir / "oracle_tuning_eis.png"
+                plt.close(plot_eis_comparison(eis_data, save_path=eis_path))
+                print(f"Oracle-vs-ground-truth EIS plot written to: {eis_path}")
+        except Exception as exc:
+            log.warning("EIS comparison plot skipped: %s", exc)
 
 
 if __name__ == "__main__":

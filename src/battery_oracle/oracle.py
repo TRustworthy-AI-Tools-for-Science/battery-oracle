@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+from enum import Enum
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,6 +27,9 @@ from scipy.signal import find_peaks as _find_peaks
 
 from battery_oracle._circuit import (
     ACTION_FEATURE_NAMES as _ACTION_NAMES,
+)
+from battery_oracle._circuit import (
+    ACTION_FEATURE_NAMES_TEMPERATURE as _ACTION_NAMES_TEMPERATURE,
 )
 from battery_oracle._circuit import (
     DEFAULT_CIRCUIT as _PROJECT_CIRCUIT,
@@ -155,10 +159,49 @@ _MODEL_CLASSES = {
     "DFN":  _pb.lithium_ion.DFN,
 }
 
+# Ideal gas constant (J/mol/K), for the Arrhenius EIS temperature correction (#11).
+_R_GAS = 8.314462618
+
+# Multi-chemistry switching (#14): friendly name / alias -> PyBaMM parameter-set
+# name. Layered on top of the existing parameter_values path (a validated allow-
+# list + provenance anchor), NOT a replacement. NOTE: degradation presets and
+# protocol bounds are chemistry-specific — a non-Chen2020 chemistry must be paired
+# with its own calibration YAML (voltage window, capacity, preset). In particular
+# LFP (Prada2013) has a ~2.0-3.6 V window, incompatible with the default 4.3 V/3.0 V
+# bounds; see config_oracle_matr.yml.
+_SUPPORTED_CHEMISTRIES = {
+    "Chen2020":  "Chen2020",   # LG M50, NMC811/graphite, 5 Ah (default)
+    "Xu2019":    "Xu2019",     # NMC532 half-cell
+    "Prada2013": "Prada2013",  # A123 LFP, 2.3 Ah
+    # friendly aliases
+    "LGM50":     "Chen2020",
+    "NMC532":    "Xu2019",
+    "LFP":       "Prada2013",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public exception
 # ---------------------------------------------------------------------------
+
+class FailureKind(str, Enum):
+    """Machine-readable classification of an oracle failure/degradation.
+
+    A ``str``-Enum so the value serialises directly to CSV/JSON (``fk.value``)
+    and compares equal to its string form. Stored on :class:`OracleFailure` and
+    (for non-fatal degradations) in the per-cycle history dict, so an audit hook
+    can correlate failure modes with calibration outcomes without string-matching
+    the human-readable message.
+    """
+
+    SOLVER_TRUNCATION  = "solver_truncation"   # step-count mismatch detected by _is_truncated
+    SOLVER_FAILURE     = "solver_failure"       # solver raised and no recovery succeeded
+    VOLTAGE_INFEASIBLE = "voltage_infeasible"   # experiment voltage window violated
+    END_OF_LIFE        = "end_of_life"          # SOH < eol_capacity_fraction
+    ECM_NONCONVERGENCE = "ecm_nonconvergence"   # AutoEIS and Randles stub both fail (aspirational)
+    THERMAL_RUNAWAY    = "thermal_runaway"      # T_cell exceeds runaway threshold (future)
+    SOLVER_DEGRADED    = "solver_degraded"      # fell back to a lower-fidelity solver/model (non-fatal)
+
 
 class OracleFailure(RuntimeError):
     """Raised when the PyBaMM simulation fails and no recovery is possible.
@@ -166,11 +209,69 @@ class OracleFailure(RuntimeError):
     The caller should treat this as battery end-of-life: do not reset the
     oracle, do not substitute synthetic data — end the active learning loop.
     The last protocol that triggered the failure is stored in
-    ``self.protocol`` for diagnostics.
+    ``self.protocol`` for diagnostics, and a machine-readable
+    :class:`FailureKind` in ``self.failure_kind`` (``None`` for legacy callers).
+
+    Note: ``FailureKind.SOLVER_DEGRADED`` is a *non-fatal* status recorded in the
+    history dict, never raised — raising it would end the AL loop.
     """
-    def __init__(self, message: str, protocol: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        protocol: np.ndarray | None = None,
+        failure_kind: "FailureKind | None" = None,
+    ) -> None:
         super().__init__(message)
         self.protocol = protocol
+        self.failure_kind = failure_kind
+
+
+class _SilentTruncation(Exception):
+    """Internal signal: PyBaMM returned a solution with fewer steps than requested
+    (a swallowed IDA_ERR_FAIL). Used inside the solver-fallback ladder to route a
+    truncated solve to the next tier; never surfaces to callers."""
+
+
+# ---------------------------------------------------------------------------
+# State-vector layout
+# ---------------------------------------------------------------------------
+
+def state_vector_schema(
+    n_params: int,
+    *,
+    has_std: bool = True,
+    has_t_cell: bool = False,
+) -> dict[str, tuple[int, int]]:
+    """Ordered ``{block_name: (lo, hi)}`` map describing the returned state vector.
+
+    The layout is *derived*, never hardcoded (see the project's
+    no-hardcoded-vector-lengths rule): per-half width is ``n_params`` (=
+    ``len(_param_labels_from_circuit(circuit))``), and which blocks exist — and
+    therefore the total length — is a function of the active feature flags:
+
+        [means_charge | means_discharge]                      always
+        [std_charge   | std_discharge]                        when ``has_std``
+        [T_cell_K]                                            when ``has_t_cell`` (single scalar, tail)
+
+    Downstream code (DMDc, audit hook) should slice by name via this map rather
+    than by magic index. ``has_t_cell`` is populated by the Phase-2 thermal work.
+    """
+    blocks = ["means_charge", "means_discharge"]
+    if has_std:
+        blocks += ["std_charge", "std_discharge"]
+    schema: dict[str, tuple[int, int]] = {}
+    off = 0
+    for b in blocks:
+        schema[b] = (off, off + n_params)
+        off += n_params
+    if has_t_cell:
+        schema["T_cell_K"] = (off, off + 1)
+    return schema
+
+
+# Default-circuit instance, for documentation / downstream that only needs the
+# shipped layout. Per-oracle layout lives on ``self.state_vector_schema``.
+STATE_VECTOR_SCHEMA = state_vector_schema(len(_param_labels_from_circuit(_PROJECT_CIRCUIT)))
 
 
 # ---------------------------------------------------------------------------
@@ -728,16 +829,23 @@ class PyBaMMOracle:
     4. Simulates EIS at each SOC using a separate SPMe model with
        ``surface form = differential``, then applies post-hoc ohmic corrections
        for SEI, crack-SEI, dead-Li, and LAM degradation.
-    5. Calls ``ecm_model_fn(frequencies, Z_real, Z_imag)`` independently on
-       the charge and discharge spectra and concatenates the two 9-D results
-       into the 18-D ECM state vector.
+    5. Calls ``ecm_model_fn(frequencies, Z_real, Z_imag)`` independently on the
+       charge and discharge spectra, taking ``n_params`` parameters (one half)
+       from each, then appends the per-parameter AutoEIS posterior std for each
+       state. The returned state vector is therefore
+       ``[means_charge | means_discharge | std_charge | std_discharge]`` with
+       length ``4 * n_params`` (``n_params`` derived from the ECM circuit, e.g.
+       7 for the default ``R1-[R2,P3]-[R4,P5]`` → length 28). Slice it by name
+       via :attr:`state_vector_schema` rather than by index; std slots are NaN
+       when AutoEIS is unavailable (Randles stub).
 
     Parameters
     ----------
     ecm_model_fn : callable, optional
-        Maps ``(frequencies, Z_real, Z_imag)`` to a shape-``(18,)`` array of
-        ECM parameter means.  Defaults to :func:`_autoeis_ecm`; pass
-        :func:`_randles_stub_ecm` for a fast no-AutoEIS fallback.
+        Maps ``(frequencies, Z_real, Z_imag)`` to a full circuit-derived vector
+        (charge half ++ discharge half); the oracle takes ``n_params`` per half.
+        Defaults to :func:`_autoeis_ecm`; pass :func:`_randles_stub_ecm` for a
+        fast no-AutoEIS fallback.
     n_cycles : int
         Number of charge/discharge cycles to simulate per oracle call.
     frequencies : np.ndarray, optional
@@ -784,11 +892,31 @@ class PyBaMMOracle:
         n_cycles: int = 1,
         frequencies: np.ndarray | None = None,
         parameter_values=None,
+        # Multi-chemistry (#14): validated PyBaMM parameter-set name. Ignored if an
+        # explicit parameter_values object is passed. Non-Chen2020 chemistries need
+        # their own calibration YAML (bounds/preset) — see _SUPPORTED_CHEMISTRIES.
+        chemistry: str = "Chen2020",
         model: str = "SPMe",
         degradation_preset: str = "accelerated",
         eol_capacity_fraction: float = 0.80,
         capacity_check: bool = False,
         temperature_K: float = 298.15,
+        # -- Thermal submodel (#9): "isothermal" (default) | "lumped" (Timms 2021).
+        # Lumped adds one ODE coupling cell temperature to the electrochemistry;
+        # SEI/plating/electrolyte conductivity are T-dependent so the degradation
+        # trajectory shifts for non-ambient protocols. T_cell_K is surfaced in the
+        # state vector / history / CSV. --
+        thermal: str = "isothermal",
+        T_ambient_K: float = 298.15,
+        h_total_W_per_m2K: float = 10.0,
+        # Opt-in 7-D protocol (#10): appends a per-cycle ambient temperature slot
+        # (u[6] = T_ambient_K). Requires thermal="lumped". 6-D protocols are the
+        # unchanged default; a 7-D vector overrides the ambient per call.
+        use_temperature_protocol: bool = False,
+        # -- Temperature-dependent EIS (#11): Arrhenius scaling of the charge-transfer
+        # arc (E_a) and the electrolyte/ohmic intercept (E_a_electrolyte) using T_cell. --
+        E_a_J_per_mol: float = 30e3,
+        E_a_electrolyte_J_per_mol: float = 15e3,
         eis_noise_level: float = 0.02,
         eis_noise_model: str = "combined",
         eis_drift_scale: float = 0.0,
@@ -813,6 +941,16 @@ class PyBaMMOracle:
         emergency_solver_rtol: float = 1e-2,
         emergency_solver_atol: float = 1e-5,
         emergency_solver_dt_max_s: float = 10.0,
+        # -- DFN-specific solver settings (config_oracle_defaults.yml: solver.dfn) --
+        # DFN is a stiff coupled DAE; it needs tighter IDAKLU tolerances than SPMe,
+        # and its Casadi fallback tiers use a low dt_max so IDA can backstep before
+        # a catastrophic failure at the CC->CV switch rather than silently truncate.
+        dfn_solver_rtol: float = 1e-6,
+        dfn_solver_atol: float = 1e-8,
+        dfn_solver_dt_max_s: float = 1.0,
+        # DFN loses fidelity/stability above ~1.5C (vs SPMe's validated ~2C = c_max_mA);
+        # _protocol_to_experiment tightens the current ceiling to this C-rate for DFN.
+        dfn_max_crate: float = 1.5,
         # -- Protocol sanitisation bounds (config_oracle_defaults.yml: protocol_bounds.*) --
         c_min_mA: float = 50.0,
         c_max_mA: float = 10_000.0,
@@ -845,6 +983,14 @@ class PyBaMMOracle:
         ecm_rescale_target_r0: float | None = 0.1334,
         autoeis_num_warmup: int = 500,
         autoeis_num_samples: int = 200,
+        # -- Detrended state output (#8) --
+        # detrend=True on __call__ returns x_t - x_t_ref, where x_t_ref is a
+        # per-protocol-group exponential moving average (alpha ~= 10-cycle time
+        # constant). Groups are k-means centroids in the 6-D protocol space, fit
+        # on the first `detrend_warmup` calls; before that, the global mean is used.
+        detrend_alpha: float = 0.1,
+        n_protocol_groups: int = 8,
+        detrend_warmup: int = 20,
     ) -> None:
         self._pb = _pb
         # ECM circuit fitted to every spectrum + the protocol/action feature
@@ -853,7 +999,19 @@ class PyBaMMOracle:
         # line up. ecm_param_names are derived from the circuit (AutoEIS labels).
         self._circuit = circuit or _PROJECT_CIRCUIT
         self._ecm_param_names = _param_labels_from_circuit(self._circuit)
-        self._action_names = list(action_names) if action_names else list(_ACTION_NAMES)
+        # 6-D actions by default; 7-D (adds T_ambient_K) only when the opt-in
+        # temperature protocol is enabled. An explicit action_names= wins.
+        self._use_temperature_protocol = bool(use_temperature_protocol)
+        if action_names:
+            self._action_names = list(action_names)
+        elif self._use_temperature_protocol:
+            self._action_names = list(_ACTION_NAMES_TEMPERATURE)
+        else:
+            self._action_names = list(_ACTION_NAMES)
+        # Returned-state layout, derived from the circuit + active feature flags
+        # (never a hardcoded length). Rebuilt via _refresh_state_schema() whenever
+        # a length-affecting flag (thermal, in Phase 2) changes.
+        self._refresh_state_schema()
         # OCV rest duration (s) on each side of a cycle. Default 1200 s (20 min)
         # per Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806): each cycle rests
         # 20 min at OCV in both the discharged and charged states before EIS. (The
@@ -949,7 +1107,17 @@ class PyBaMMOracle:
         self.frequencies = (
             frequencies if frequencies is not None else np.logspace(-2, 4, 60)
         )
-        self._pv = parameter_values or _pb.ParameterValues("Chen2020")
+        # Chemistry (#14): validate early (before any heavy PyBaMM work). An
+        # explicit parameter_values wins; otherwise resolve the chemistry name.
+        self._chemistry = str(chemistry)
+        if self._chemistry not in _SUPPORTED_CHEMISTRIES:
+            raise ValueError(
+                f"Unknown chemistry {chemistry!r}; choose one of "
+                f"{sorted(_SUPPORTED_CHEMISTRIES)}."
+            )
+        self._pv = parameter_values or _pb.ParameterValues(
+            _SUPPORTED_CHEMISTRIES[self._chemistry]
+        )
         self.eol_capacity_fraction = eol_capacity_fraction
         self.capacity_check = capacity_check
         self._temperature_K = float(temperature_K)
@@ -968,6 +1136,10 @@ class PyBaMMOracle:
         self._emergency_solver_rtol = float(emergency_solver_rtol)
         self._emergency_solver_atol = float(emergency_solver_atol)
         self._emergency_solver_dt_max_s = float(emergency_solver_dt_max_s)
+        self._dfn_solver_rtol = float(dfn_solver_rtol)
+        self._dfn_solver_atol = float(dfn_solver_atol)
+        self._dfn_solver_dt_max_s = float(dfn_solver_dt_max_s)
+        self._dfn_max_crate = float(dfn_max_crate)
 
         # Protocol sanitisation bounds (see _sanitise_current/_sanitise_duration/
         # _protocol_to_experiment/_cap_check_steps). Instance attributes (not
@@ -1004,6 +1176,17 @@ class PyBaMMOracle:
         )
         self._autoeis_num_warmup = int(autoeis_num_warmup)
         self._autoeis_num_samples = int(autoeis_num_samples)
+        # Detrend (#8) config + accumulators (accumulators also cleared by reset()).
+        self._detrend_alpha = float(detrend_alpha)
+        self._n_protocol_groups = int(n_protocol_groups)
+        self._detrend_warmup = int(detrend_warmup)
+        self._detrend_protocols: list[np.ndarray] = []
+        self._detrend_states: list[np.ndarray] = []
+        self._detrend_centroids: np.ndarray | None = None
+        self._detrend_whiten_std: np.ndarray | None = None
+        self._detrend_group_ema: dict[int, np.ndarray] = {}
+        self._detrend_global_sum: np.ndarray | None = None
+        self._detrend_global_count: int = 0
         try:
             self._c20_A = float(self._pv["Nominal cell capacity [A.h]"]) / 20.0
         except Exception:
@@ -1032,6 +1215,35 @@ class PyBaMMOracle:
             preset_constants=preset_constants,
         )
 
+        # Thermal submodel. Lumped (Timms 2021) adds one ODE coupling cell
+        # temperature to the electrochemistry; merge it into the degradation option
+        # dict so _build_native_state's model picks it up, and write the ambient /
+        # heat-transfer parameters. Isothermal keeps the existing behaviour.
+        self._thermal = str(thermal)
+        if self._thermal not in ("isothermal", "lumped"):
+            raise ValueError(
+                f"Unknown thermal {thermal!r}; choose 'isothermal' or 'lumped'."
+            )
+        self._T_ambient_K = float(T_ambient_K)
+        self._h_total = float(h_total_W_per_m2K)
+        if self._use_temperature_protocol and self._thermal != "lumped":
+            raise ValueError(
+                "use_temperature_protocol=True requires thermal='lumped' "
+                "(the per-cycle ambient slot only affects the lumped thermal ODE)."
+            )
+        if self._thermal == "lumped":
+            self._pv["Ambient temperature [K]"] = self._T_ambient_K
+            self._pv["Initial temperature [K]"] = self._T_ambient_K
+            self._pv["Total heat transfer coefficient [W.m-2.K-1]"] = self._h_total
+            self._deg_opts = {**self._deg_opts, "thermal": "lumped"}
+        # Arrhenius EIS temperature dependence (#11).
+        self._E_a = float(E_a_J_per_mol)
+        self._E_a_el = float(E_a_electrolyte_J_per_mol)
+        self._T_ref_K = 298.15
+        # Thermal changes the returned-state layout (adds the T_cell_K slot), so
+        # rebuild the schema now that self._thermal is known.
+        self._refresh_state_schema()
+
         # EIS model is built fresh each __call__ so degraded ParameterValues can
         # be injected for LAM before each simulation (see §4.4 ORACLE.md).
 
@@ -1045,6 +1257,17 @@ class PyBaMMOracle:
         self._last_Z: np.ndarray | None = None
         self._initial_capacity_ah: float | None = None
         self._initial_lli_ah: float | None = None  # formation-cycle LLI baseline
+        # Per-call fidelity status (reset each __call__; downgraded by Phase-1 fallback).
+        self._last_failure_kind: FailureKind | None = None
+        self._last_fidelity: str = "full"
+        # DFN solver fallback (#4): once the DFN->SPMe fallback fires, the oracle
+        # latches to SPMe (reduced fidelity) for the rest of the run — it cannot
+        # warm-start DFN back from an SPMe solution (see the SPMe/DFN
+        # starting_solution incompatibility). SPMe fallback model+solver are built
+        # lazily on first use and reused thereafter.
+        self._degraded_to_spme: bool = False
+        self._spme_fallback_model = None
+        self._spme_fallback_solver = None
 
         # Pre-compute SEI-thickness → ohmic resistance factor (Ohm / m).
         # Specific surface area of spherical particles: a_s = 3 * eps_s / r_p
@@ -1093,6 +1316,96 @@ class PyBaMMOracle:
             self._crack_sei_R_base = 0.0
             self._dead_li_to_R     = 0.0
 
+    def _fit_detrend_groups(self) -> None:
+        """Fit k-means protocol-group centroids on the buffered warmup protocols
+        (scipy.cluster.vq; whitened so mA/hour/K scales don't dominate) and seed
+        each group's EMA with the mean warmup state of its members. Frozen after
+        warmup; later protocols snap to the nearest centroid. Deterministic (seed).
+        """
+        from scipy.cluster.vq import kmeans2
+        protos = np.asarray(self._detrend_protocols, dtype=float)
+        if protos.shape[0] < 1:
+            return
+        std = protos.std(axis=0)
+        std[std < 1e-12] = 1.0            # avoid divide-by-zero on constant dims
+        self._detrend_whiten_std = std
+        w = protos / std
+        n_unique = len(np.unique(w, axis=0))
+        k = max(1, min(self._n_protocol_groups, n_unique))
+        centroids, labels = kmeans2(w, k, seed=0, minit="++", missing="warn")
+        self._detrend_centroids = np.asarray(centroids, dtype=float)
+        states = np.array([np.nan_to_num(s) for s in self._detrend_states])
+        global_mean = self._detrend_global_sum / max(self._detrend_global_count, 1)
+        for g in range(k):
+            mask = labels == g
+            self._detrend_group_ema[g] = (
+                states[mask].mean(axis=0) if mask.any() else global_mean
+            )
+
+    def _detrend_group(self, proto6: np.ndarray) -> int:
+        """Nearest protocol-group centroid for a 6-D protocol (whitened space)."""
+        from scipy.cluster.vq import vq
+        if self._detrend_centroids is None:
+            return -1
+        w = (proto6 / self._detrend_whiten_std)[None, :]
+        code, _ = vq(w, self._detrend_centroids)
+        return int(code[0])
+
+    def _detrend_state(self, state: np.ndarray, protocol: np.ndarray) -> tuple[np.ndarray, bool, int]:
+        """Return (detrended_state, is_warmup, group).
+
+        ``x_t_ref`` is the per-protocol-group EMA (decay ``detrend_alpha``); during
+        the first ``detrend_warmup`` calls it is the global mean of observed states.
+        NaN state slots (e.g. σ under the Randles stub) propagate as NaN in the
+        detrended vector — a downstream DMDc drops/imputes them. Call index is
+        ``len(self._history)`` (this call's row is already appended).
+        """
+        proto6 = np.asarray(protocol[:6], dtype=float)
+        safe = np.nan_to_num(state)
+        if self._detrend_global_sum is None or self._detrend_global_sum.shape != state.shape:
+            self._detrend_global_sum = np.zeros_like(state, dtype=float)
+            self._detrend_global_count = 0
+        self._detrend_global_sum = self._detrend_global_sum + safe
+        self._detrend_global_count += 1
+        # Buffer protocols/states only until the (one-time) k-means fit; afterwards
+        # they are dead weight, so stop growing them.
+        if self._detrend_centroids is None:
+            self._detrend_protocols.append(proto6)
+            self._detrend_states.append(safe)
+
+        n_calls = len(self._history)  # this call's row already appended above
+        global_mean = self._detrend_global_sum / max(self._detrend_global_count, 1)
+        if n_calls <= self._detrend_warmup:
+            if n_calls == self._detrend_warmup:
+                self._fit_detrend_groups()
+            return state - global_mean, True, -1
+
+        if self._detrend_centroids is None:      # <20 calls happened before groups fit
+            self._fit_detrend_groups()
+        group = self._detrend_group(proto6)
+        prev = self._detrend_group_ema.get(group, global_mean)
+        a = self._detrend_alpha
+        self._detrend_group_ema[group] = a * safe + (1.0 - a) * np.nan_to_num(prev)
+        return state - prev, False, group
+
+    def _refresh_state_schema(self) -> None:
+        """Recompute the returned-state layout from the circuit + active flags.
+
+        Called from ``__init__`` and whenever a length-affecting flag changes.
+        ``has_t_cell`` is on only when lumped thermal is active (Phase 2); read
+        defensively so this is safe to call before ``_thermal`` is assigned.
+        """
+        self.state_vector_schema = state_vector_schema(
+            len(self._ecm_param_names),
+            has_std=True,
+            has_t_cell=(getattr(self, "_thermal", "isothermal") == "lumped"),
+        )
+
+    @property
+    def state_vector_len(self) -> int:
+        """Length of the vector returned by ``__call__`` — derived, never a literal."""
+        return max(hi for _, hi in self.state_vector_schema.values())
+
     def _build_native_state(self) -> None:
         """(Re)create the cycling model and the primary/emergency IDAKLUSolvers.
 
@@ -1111,14 +1424,21 @@ class PyBaMMOracle:
         policy's iterations instead of the whole multi-seed experiment.
         """
         self._cycling_model = self._model_cls(options=self._deg_opts)
+        # DFN is a stiff coupled DAE — use tighter IDAKLU tolerances and a low
+        # dt_max on the Casadi fallback (dt_max is a no-op on IDAKLU itself, so it
+        # only bites on the Casadi tier(s), incl. the #4 fallback tier-2).
+        _is_dfn = self._model == "DFN"
+        _rtol = self._dfn_solver_rtol if _is_dfn else self._solver_rtol
+        _atol = self._dfn_solver_atol if _is_dfn else self._solver_atol
+        _dt_max = self._dfn_solver_dt_max_s if _is_dfn else self._solver_dt_max_s
         try:
-            self._solver = self._pb.IDAKLUSolver(rtol=self._solver_rtol, atol=self._solver_atol)
+            self._solver = self._pb.IDAKLUSolver(rtol=_rtol, atol=_atol)
         except Exception:
             self._solver = self._pb.CasadiSolver(
                 mode="safe",
-                dt_max=self._solver_dt_max_s,
-                rtol=self._solver_rtol,
-                atol=self._solver_atol,
+                dt_max=_dt_max,
+                rtol=_rtol,
+                atol=_atol,
             )
 
         # Emergency solver: deliberately a *different solver family*, not just
@@ -1127,10 +1447,11 @@ class PyBaMMOracle:
         # regardless of rtol/atol (verified at rtol 1e-3, 1e-2, and 1e-6) — the
         # algebraic constraint at that control-mode boundary is the problem,
         # not solver precision.  CasadiSolver(mode="safe") integrates through
-        # it reliably, so it is always the emergency solver here.
+        # it reliably, so it is always the emergency solver here. For DFN this is
+        # the #4 fallback tier-2 (loose Casadi with the low DFN dt_max).
         self._solver_emerg = self._pb.CasadiSolver(
             mode="safe",
-            dt_max=self._emergency_solver_dt_max_s,
+            dt_max=(self._dfn_solver_dt_max_s if _is_dfn else self._emergency_solver_dt_max_s),
             rtol=self._emergency_solver_rtol,
             atol=self._emergency_solver_atol,
         )
@@ -1146,6 +1467,19 @@ class PyBaMMOracle:
         self._cumulative_dod_lam_frac = 0.0
         self._cumulative_dod_lam_ah = 0.0
         self._cumulative_dod_throughput_ah = 0.0
+        self._last_failure_kind = None
+        self._last_fidelity = "full"
+        self._degraded_to_spme = False
+        self._spme_fallback_model = None
+        self._spme_fallback_solver = None
+        # Detrend (#8) accumulators.
+        self._detrend_protocols = []
+        self._detrend_states = []
+        self._detrend_centroids = None
+        self._detrend_whiten_std = None
+        self._detrend_group_ema = {}
+        self._detrend_global_sum = None
+        self._detrend_global_count = 0
         self._build_native_state()
 
     # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah) --
@@ -1178,6 +1512,18 @@ class PyBaMMOracle:
         v = float(default_mA if not np.isfinite(val_mA) else val_mA)
         return float(np.clip(v, lo, hi)) / 1000.0
 
+    def _current_ceiling_mA(self, base_hi: float) -> float:
+        """Model-aware upper current bound (in the 5 Ah PyBaMM frame, mA).
+
+        SPMe/SPM keep ``base_hi`` (typically ``_C_MAX_mA`` = 2C). DFN tightens to
+        ``_dfn_max_crate`` (1.5C) — computed from the cell's own C/20 current, so
+        no mA value is hardcoded (``nominal_A = 20 * self._c20_A``).
+        """
+        if self._model == "DFN":
+            dfn_hi_mA = self._dfn_max_crate * (20.0 * self._c20_A) * 1000.0
+            return min(base_hi, dfn_hi_mA)
+        return base_hi
+
     def _sanitise_duration(self, val_h: float, default_h: float) -> float:
         """Return a finite, physically bounded duration in seconds."""
         v = float(default_h if not np.isfinite(val_h) else val_h)
@@ -1202,11 +1548,15 @@ class PyBaMMOracle:
 
     def _protocol_to_experiment(self, protocol: np.ndarray):
         pb = self._pb
-        C1_mA, C2_mA, dur1_h, dur2_h, D_mA, dur_d_h = protocol
+        # Slots 0-5 are the electrochemical protocol; an optional slot 6 (#10) is
+        # the per-cycle ambient temperature, consumed in __call__, not here.
+        C1_mA, C2_mA, dur1_h, dur2_h, D_mA, dur_d_h = protocol[:6]
         s = self._cap_scale
-        C1    = self._sanitise_current(C1_mA * s, 500.0, self._C_MIN_mA,  self._C_MAX_mA)
-        C2    = self._sanitise_current(C2_mA * s, 250.0, self._C2_MIN_mA, self._C2_MAX_mA)
-        D     = self._sanitise_current(D_mA  * s, 500.0, self._C_MIN_mA,  self._C_MAX_mA)
+        c_hi  = self._current_ceiling_mA(self._C_MAX_mA)
+        c2_hi = self._current_ceiling_mA(self._C2_MAX_mA)
+        C1    = self._sanitise_current(C1_mA * s, 500.0, self._C_MIN_mA,  c_hi)
+        C2    = self._sanitise_current(C2_mA * s, 250.0, self._C2_MIN_mA, c2_hi)
+        D     = self._sanitise_current(D_mA  * s, 500.0, self._C_MIN_mA,  c_hi)
         # Discharge is governed by the 3.0 V cutoff (Jones 2022): use a generous
         # timeout (>= time to reach 3.0 V even at ~1C) rather than the real
         # duration, so the cell actually fully discharges. No 2 h floor.
@@ -1244,79 +1594,151 @@ class PyBaMMOracle:
                      steps)
         return pb.Experiment(cycles)
 
-    def __call__(self, protocol: np.ndarray) -> np.ndarray:
+    def _is_truncated(self, sol, experiment) -> bool:
+        """True if PyBaMM silently dropped steps from the cycle(s) this call added.
+
+        The Experiment runner catches internal solver errors (e.g. IDA_ERR_FAIL at
+        the CC->CV switch) on its own callback path and returns whatever was
+        integrated up to the failure WITHOUT raising, so a truncated cycle looks
+        identical to success unless the step count is checked explicitly.
+        """
+        if not sol.cycles:
+            return False
+        n = self.n_cycles
+        expected = experiment.cycle_lengths[-1]
+        added = sol.cycles[-n:] if n <= len(sol.cycles) else sol.cycles
+        return any(len(c.steps) < expected for c in added)
+
+    def _spme_fallback(self):
+        """Lazily build + cache an SPMe cycling model and a safe Casadi solver for
+        the DFN->SPMe reduced-fidelity fallback (#4). SPMe can warm-start from a
+        DFN solution (verified), so ``_prev_solution`` carries over cleanly; the
+        reverse is impossible, which is why the fallback latches (see #4)."""
+        if self._spme_fallback_model is None:
+            self._spme_fallback_model = _MODEL_CLASSES["SPMe"](options=self._deg_opts)
+            self._spme_fallback_solver = self._pb.CasadiSolver(
+                mode="safe",
+                dt_max=self._emergency_solver_dt_max_s,
+                rtol=self._emergency_solver_rtol,
+                atol=self._emergency_solver_atol,
+            )
+        return self._spme_fallback_model, self._spme_fallback_solver
+
+    def _solve_with_fallbacks(self, experiment, protocol, solve_kw):
+        """Solve ``experiment``, returning ``(solution, fidelity, failure_kind)``.
+
+        - SPMe/SPM (or an oracle already latched to SPMe): primary solver ->
+          emergency Casadi — the historical two-tier ladder.
+        - DFN: IDAKLU(tight) -> Casadi(loose, low dt_max) -> SPMe fallback. The SPMe
+          fallback latches ``self._degraded_to_spme`` because DFN cannot warm-start
+          back from an SPMe solution.
+
+        ``FailureKind.SOLVER_DEGRADED`` is *recorded* (returned) on any downgrade,
+        never raised — raising would end the AL loop. Only when every tier fails is
+        ``OracleFailure`` raised. Must be called holding ``self._lock``.
+        """
         pb = self._pb
+        proto = np.asarray(protocol).copy()
+
+        def _solve(model, solver):
+            sim = pb.Simulation(model, experiment=experiment,
+                                parameter_values=self._pv, solver=solver)
+            sol = sim.solve(starting_solution=self._prev_solution, **solve_kw)
+            if self._is_truncated(sol, experiment):
+                raise _SilentTruncation()
+            return sol
+
+        # ---- DFN 3-tier ladder (only while not yet latched to SPMe) ----
+        if self._model == "DFN" and not self._degraded_to_spme:
+            try:
+                return _solve(self._cycling_model, self._solver), "full", None
+            except Exception as exc1:
+                log.warning("[PyBaMMOracle] DFN IDAKLU tier failed (%s: %s); "
+                            "retrying DFN+Casadi(loose)", type(exc1).__name__, exc1)
+            try:
+                return _solve(self._cycling_model, self._solver_emerg), "full", \
+                    FailureKind.SOLVER_DEGRADED
+            except Exception as exc2:
+                log.warning("[PyBaMMOracle] DFN Casadi tier failed (%s: %s); "
+                            "falling back to SPMe (reduced fidelity)",
+                            type(exc2).__name__, exc2)
+            m, s = self._spme_fallback()
+            try:
+                sol = _solve(m, s)
+            except Exception as exc3:
+                kind = (FailureKind.VOLTAGE_INFEASIBLE if "voltage" in str(exc3).lower()
+                        else FailureKind.SOLVER_FAILURE)
+                raise OracleFailure(
+                    f"DFN solver fallbacks exhausted (IDAKLU -> Casadi -> SPMe): {exc3}",
+                    protocol=proto, failure_kind=kind,
+                ) from exc3
+            self._degraded_to_spme = True
+            log.warning("[PyBaMMOracle] degraded to SPMe (reduced fidelity) for the "
+                        "rest of the run — DFN cannot warm-start from an SPMe solution")
+            return sol, "reduced", FailureKind.SOLVER_DEGRADED
+
+        # ---- Two-tier ladder: SPMe/SPM, or a DFN oracle already latched to SPMe ----
+        if self._degraded_to_spme:
+            m, s = self._spme_fallback()
+            active_model, primary_solver, emerg_solver, base_fid = m, s, s, "reduced"
+        else:
+            active_model = self._cycling_model
+            primary_solver, emerg_solver, base_fid = self._solver, self._solver_emerg, "full"
+
+        try:
+            sol = _solve(active_model, primary_solver)
+            return sol, base_fid, (
+                FailureKind.SOLVER_DEGRADED if base_fid == "reduced" else None
+            )
+        except Exception as exc1:
+            log.warning("[PyBaMMOracle] primary solver failed (%s: %s); retrying "
+                        "with emergency solver (same cell state)",
+                        type(exc1).__name__, exc1)
+        try:
+            sol = _solve(active_model, emerg_solver)
+        except _SilentTruncation as exc2:
+            raise OracleFailure(
+                "Emergency solver also silently truncated the cycle",
+                protocol=proto, failure_kind=FailureKind.SOLVER_TRUNCATION,
+            ) from exc2
+        except Exception as exc2:
+            kind = (FailureKind.VOLTAGE_INFEASIBLE if "voltage" in str(exc2).lower()
+                    else FailureKind.SOLVER_FAILURE)
+            raise OracleFailure(
+                f"Battery simulation failed after two attempts: {exc2}",
+                protocol=proto, failure_kind=kind,
+            ) from exc2
+        # Emergency (looser Casadi) succeeded — record the degrade, keep base fidelity.
+        return sol, base_fid, FailureKind.SOLVER_DEGRADED
+
+    def __call__(self, protocol: np.ndarray, detrend: bool = False) -> np.ndarray:
+        # Per-call fidelity/degradation status, recorded into this call's history
+        # row. Reset to full fidelity every call; the DFN solver fallback (#4)
+        # downgrades these when it drops to a looser solver or the SPMe fallback.
+        self._last_failure_kind = None
+        self._last_fidelity = "full"
         experiment = self._protocol_to_experiment(protocol)
-        sim = pb.Simulation(
-            self._cycling_model,
-            experiment=experiment,
-            parameter_values=self._pv,
-            solver=self._solver,
-        )
-        # Lock protects _prev_solution so sequential state accumulation is safe
-        # even if callers inadvertently share this oracle across threads.
         # On the first call (no prior solution), start at 80 % SOC so the initial
-        # OCV (~3.9–4.0 V) sits safely inside the 4.1 V experiment voltage window.
-        # Chen2020's default initial stoichiometry x_neg = 0.901 gives OCV ≈ 4.10 V,
-        # which immediately triggers the Maximum-voltage infeasibility event.
+        # OCV (~3.9–4.0 V) sits safely inside the experiment voltage window.
         _first_call = self._prev_solution is None
         _solve_kw: dict = {"initial_soc": self._initial_soc} if _first_call else {}
-        # Expected step count for the cycle(s) this call adds — used below to
-        # detect a *silent* truncation.  PyBaMM's Experiment runner catches
-        # internal solver errors (e.g. IDA_ERR_FAIL at the CC->CV switch) on
-        # its own callback path and returns whatever was integrated up to the
-        # failure point WITHOUT raising a Python exception, so a truncated
-        # cycle (e.g. the CV hold + final rest silently dropped) looks
-        # identical to success from this function's perspective unless the
-        # step count is checked explicitly.
-        _n_cycles_added = self.n_cycles
-        _expected_steps = experiment.cycle_lengths[-1]
 
-        def _is_truncated(s) -> bool:
-            if not s.cycles:
-                return False
-            added = s.cycles[-_n_cycles_added:] if _n_cycles_added <= len(s.cycles) else s.cycles
-            return any(len(c.steps) < _expected_steps for c in added)
+        # Per-cycle ambient temperature (#10): a 7-D protocol's slot 6 overrides
+        # the lumped-thermal ambient for this call. The fresh Simulation built in
+        # _solve_with_fallbacks re-processes self._pv, so mutating the ambient here
+        # takes effect. Bounded to a physical window; T_cell is then read from the
+        # solution (self-heated above ambient).
+        if self._use_temperature_protocol and len(protocol) >= 7:
+            self._T_ambient_K = float(np.clip(protocol[6], 253.15, 333.15))
+            self._pv["Ambient temperature [K]"] = self._T_ambient_K
+            if _first_call:
+                self._pv["Initial temperature [K]"] = self._T_ambient_K
 
+        # Lock protects _prev_solution so sequential state accumulation is safe
+        # even if callers inadvertently share this oracle across threads.
         with self._lock:
-            try:
-                sol = sim.solve(starting_solution=self._prev_solution, **_solve_kw)
-                if _is_truncated(sol):
-                    raise OracleFailure(
-                        "Primary solver silently truncated the cycle "
-                        "(fewer steps completed than requested — likely an "
-                        "internal IDA_ERR_FAIL at a control-mode switch that "
-                        "PyBaMM swallowed without raising)",
-                        protocol=np.asarray(protocol).copy(),
-                    )
-            except Exception as exc1:
-                log.warning(
-                    "[PyBaMMOracle] primary solver failed (%s: %s); "
-                    "retrying with emergency solver (same cell state)",
-                    type(exc1).__name__, exc1,
-                )
-                # Built lazily, only on retry: every call paid for this
-                # Simulation's discretization unconditionally even though the
-                # vast majority of calls never need it, doubling per-call
-                # memory/CPU churn for no benefit on the common path.
-                sim_emerg = pb.Simulation(
-                    self._cycling_model,
-                    experiment=experiment,
-                    parameter_values=self._pv,
-                    solver=self._solver_emerg,
-                )
-                try:
-                    sol = sim_emerg.solve(starting_solution=self._prev_solution, **_solve_kw)
-                except Exception as exc2:
-                    raise OracleFailure(
-                        f"Battery simulation failed after two attempts: {exc2}",
-                        protocol=np.asarray(protocol).copy(),
-                    ) from exc2
-                if _is_truncated(sol):
-                    raise OracleFailure(
-                        "Emergency solver also silently truncated the cycle",
-                        protocol=np.asarray(protocol).copy(),
-                    )
+            sol, self._last_fidelity, self._last_failure_kind = \
+                self._solve_with_fallbacks(experiment, protocol, _solve_kw)
             self._prev_solution = sol
 
         # Following the jones2022 protocol, EIS is collected at two points per
@@ -1350,6 +1772,30 @@ class PyBaMMOracle:
             x_neg_dis = x_neg_chg
         soc_discharge = float(np.clip(x_neg_dis / x100, self._soc_clip_min, self._soc_clip_max))
 
+        # --- Cell temperature (#9) ------------------------------------------
+        # Volume-averaged cell temperature at the two post-rest EIS states. For
+        # isothermal runs it is exactly the setpoint; for lumped thermal it is the
+        # self-heated temperature read from the solution. T_cell_chg/dis feed the
+        # Arrhenius EIS correction (#11); a single representative value goes into
+        # the state vector / history / CSV.
+        _T_VAR = "Volume-averaged cell temperature [K]"
+        if self._thermal == "lumped":
+            def _read_T(step_idx: int) -> float:
+                try:
+                    return float(last_cycle.steps[step_idx][_T_VAR].entries[-1])
+                except Exception:
+                    try:
+                        return float(sol[_T_VAR].entries[-1])
+                    except Exception:
+                        return self._T_ambient_K
+            T_cell_chg = _read_T(4)
+            T_cell_dis = _read_T(1)
+        else:
+            T_cell_chg = T_cell_dis = (
+                self._T_ambient_K if self._thermal == "lumped" else self._temperature_K
+            )
+        T_cell_K = T_cell_chg
+
         # --- DoD / charge-induced-stress LAM increment (see __init__) -------
         # Computed HERE, before the EIS linearisation, so depth-of-discharge
         # damage reduces ε_s below and therefore shows up in the impedance as a
@@ -1371,6 +1817,12 @@ class PyBaMMOracle:
         # --- LAM a priori: reduce ε_s so the EIS linearisation sees the ---
         # --- degraded electrode microstructure. [Doyle et al., 1993]    ---
         eis_pv = self._pv.copy()
+        # For lumped thermal (#11), synthesise the EIS baseline at T_ref so the
+        # analytic Arrhenius scaling (T_ref -> T_cell in _eis_and_correct) is the
+        # SOLE temperature effect — otherwise PyBaMM's own T-dependent parameters
+        # (evaluated at the pv ambient = T_ambient_K) would double-count it.
+        if self._thermal == "lumped":
+            eis_pv["Ambient temperature [K]"] = self._T_ref_K
         lam_frac = 0.0
         if self._eps_s_nominal is not None:
             try:
@@ -1423,12 +1875,26 @@ class PyBaMMOracle:
             delta_R_ohmic += crack_sei_thick * self._crack_sei_R_base / l_crack
         delta_R_ohmic += dead_li_thick * self._dead_li_to_R
 
-        def _eis_and_correct(soc: float) -> np.ndarray:
+        def _eis_and_correct(soc: float, T_cell: float) -> np.ndarray:
             sim = _pb.EISSimulation(
                 self._model_cls(options={"surface form": "differential"}),
                 parameter_values=eis_pv,
             )
             Z = np.array(sim.solve(self.frequencies, initial_soc=soc)["Impedance [Ohm]"])
+            # Arrhenius temperature dependence (#11): the EIS model is solved
+            # isothermally, so temperature enters analytically. Scale the
+            # charge-transfer arc by exp(E_a/R (1/T - 1/T_ref)) and the
+            # electrolyte/ohmic HF intercept by the electrolyte E_a. Applied to the
+            # native spectrum BEFORE the ohmic film add and noise, so both the ECM
+            # means and the posterior std are consistently corrected (the AutoEIS
+            # target-R0 rescale is scale-equivariant and does not cancel it). R0 =
+            # HF real intercept (highest frequency), the file-wide convention.
+            if self._thermal == "lumped" and abs(T_cell - self._T_ref_K) > 1e-9:
+                inv = 1.0 / T_cell - 1.0 / self._T_ref_K
+                arr_ct = float(np.exp(self._E_a / _R_GAS * inv))
+                arr_el = float(np.exp(self._E_a_el / _R_GAS * inv))
+                R0 = float(Z.real[int(np.argmax(self.frequencies))])
+                Z = (R0 * arr_el) + arr_ct * (Z - R0)
             if delta_R_ohmic > 0.0:
                 Z = (Z.real + delta_R_ohmic) + 1j * Z.imag
             if self._eis_noise_level > 0.0 and self._eis_noise_model != "none":
@@ -1451,8 +1917,8 @@ class PyBaMMOracle:
                 )
             return Z
 
-        Z_charge    = _eis_and_correct(soc_charge)
-        Z_discharge = _eis_and_correct(soc_discharge)
+        Z_charge    = _eis_and_correct(soc_charge, T_cell_chg)
+        Z_discharge = _eis_and_correct(soc_discharge, T_cell_dis)
 
         # cap_ah: when capacity_check is enabled, read from the dedicated C/20
         # discharge step (last step) — this is sensitive to LLI and protocol.
@@ -1577,12 +2043,18 @@ class PyBaMMOracle:
                 f"+ DoD-LAM {self._cumulative_dod_lam_ah:.3f} Ah "
                 f"= {eol_loss:.3f} Ah = {eol_loss / nominal_cap:.1%} of nominal)",
                 protocol=np.asarray(protocol).copy(),
+                failure_kind=FailureKind.END_OF_LIFE,
             )
 
         self._history.append({
             "call_idx":           len(self._history),
             "model":              self._model,
+            "chemistry":          self._chemistry,
             "protocol":           np.asarray(protocol).copy(),
+            # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
+            # here, never raised. Successful full-fidelity steps carry None/"full".
+            "failure_kind":       self._last_failure_kind,
+            "fidelity":           self._last_fidelity,
             "sei_thickness_nm":   sei_thick * 1e9 if self._sei_to_R > 0.0 else float("nan"),
             "crack_sei_nm":       crack_sei_thick * 1e9,
             "dead_li_nm":         dead_li_thick * 1e9,
@@ -1592,6 +2064,7 @@ class PyBaMMOracle:
             "end_soc_charge":     soc_charge,
             "end_soc_discharge":  soc_discharge,
             "end_soh":            soh,
+            "T_cell_K":           T_cell_K,
             "capacity_ah":              cap_ah,
             "cumulative_sei_loss_ah":   _try_get("Loss of capacity to negative SEI [A.h]"),
             "cumulative_crack_sei_ah":  _try_get("Loss of capacity to negative SEI on cracks [A.h]"),
@@ -1629,8 +2102,10 @@ class PyBaMMOracle:
             pass
 
         # ── ECM fit: charge and discharge spectra fitted independently ────────
-        # ecm_model_fn(frequencies, Z_real, Z_imag) → 18-D (legacy full-vector);
-        # take first 9 elements from each call and concatenate.
+        # ecm_model_fn(frequencies, Z_real, Z_imag) returns a full circuit-derived
+        # vector (charge half ++ discharge half); take the first n_params (one
+        # half) from each call. n_params is the per-half width, derived from the
+        # circuit — never hardcoded.
         _n_params = len(self._ecm_param_names)
 
         def _fit_half(Z: np.ndarray, _diag: dict) -> np.ndarray:
@@ -1655,11 +2130,37 @@ class PyBaMMOracle:
                 full = self.ecm_model_fn(self.frequencies, Z.real, Z.imag)
             return full[:_n_params]
 
+        def _std_half(_diag: dict) -> np.ndarray:
+            """Per-parameter AutoEIS posterior std, aligned to the mean vector.
+
+            The mean half is built by iterating ``_raw_variables`` (see
+            ``_autoeis_ecm``: ``half = [median(samples[k]) for k in _variables]``),
+            so the std MUST iterate the same order to line up with the means.
+            Returns all-NaN when AutoEIS fell back to the Randles stub (no samples),
+            which a downstream DMDc/audit consumer drops or imputes.
+            """
+            samples = _diag.get("_raw_samples")
+            variables = _diag.get("_raw_variables") or []
+            out = np.full(_n_params, np.nan)
+            if not samples:
+                return out
+            vals = [float(np.std(np.asarray(samples[k]))) for k in variables[:_n_params]]
+            out[:len(vals)] = vals
+            return out
+
         _ecm_diag_chg: dict = {}
         _ecm_diag_dis: dict = {}
         params_charge    = _fit_half(Z_charge,    _ecm_diag_chg)
         params_discharge = _fit_half(Z_discharge, _ecm_diag_dis)
-        state = np.concatenate([params_charge, params_discharge])
+        std_charge    = _std_half(_ecm_diag_chg)
+        std_discharge = _std_half(_ecm_diag_dis)
+        # Layout matches self.state_vector_schema: means_charge | means_discharge |
+        # std_charge | std_discharge [| T_cell_K when lumped thermal]. Every block
+        # is registered in the schema; the length is derived, never hardcoded.
+        _blocks = [params_charge, params_discharge, std_charge, std_discharge]
+        if "T_cell_K" in self.state_vector_schema:
+            _blocks.append(np.array([T_cell_K], dtype=float))
+        state = np.concatenate(_blocks)
 
         self._history[-1].update({
             "linkk_rmse":          linkk_rmse,
@@ -1669,6 +2170,8 @@ class PyBaMMOracle:
             "drt_peaks":           drt_peaks,
             "ecm_params_charge":   params_charge.copy(),
             "ecm_params_discharge": params_discharge.copy(),
+            "ecm_std_charge":      std_charge.copy(),
+            "ecm_std_discharge":   std_discharge.copy(),
             # Raw AutoEIS MCMC posterior samples behind ecm_params_{charge,discharge}
             # above (dict: AutoEIS variable name -> (num_samples,) array), so callers
             # comparing oracle vs. real posterior distributions (e.g.
@@ -1679,7 +2182,19 @@ class PyBaMMOracle:
             "ecm_variables_charge":    _ecm_diag_chg.get("_raw_variables", []),
             "ecm_variables_discharge": _ecm_diag_dis.get("_raw_variables", []),
         })
-        return state
+
+        # Detrended state (#8): per-protocol-group EMA reference. Always computed
+        # (cheap) so `detrend` can be toggled per call; both raw and detrended are
+        # kept in history so save_to_csv/DMDc can pick either. detrend_warmup flags
+        # the first `detrend_warmup` steps (global-mean reference, before k-means).
+        detrended, warmup, group = self._detrend_state(state, protocol)
+        self._history[-1].update({
+            "state_raw":       state.copy(),
+            "state_detrended": detrended.copy(),
+            "detrend_warmup":  warmup,
+            "detrend_group":   group,
+        })
+        return detrended if detrend else state
 
     # ── CSV export ───────────────────────────────────────────────────────────
 
@@ -1694,11 +2209,14 @@ class PyBaMMOracle:
         """Save oracle history to CSV matching the jones2022 featurized record format.
 
         Columns: cell_id, cycle, circuit,
-        {param}_{state}_{moment} × 72 (9 params × 4 moments × 2 states),
-        {action} × 6.
+        {param}_{state}_{moment} (= n_params × 4 moments × 2 states, all derived
+        from the circuit — e.g. 7 params → 56 columns for the default circuit),
+        {action} (= len(action_names)), then trailing diagnostics failure_kind,
+        fidelity. No column count is hardcoded.
 
-        Variance, kurtosis, and skew are filled with 0.0 because the oracle
-        provides only posterior means from the ECM fit.
+        Variance, kurtosis, and skew are filled with 0.0 to preserve the
+        BattMAP-aligned featurized layout — the ECM posterior std is surfaced in
+        the returned state vector / history (``ecm_std_*``), not in these columns.
 
         Parameters
         ----------
@@ -1774,9 +2292,17 @@ class PyBaMMOracle:
                     row[f"{pname}_{state_label}_var"]      = 0.0
                     row[f"{pname}_{state_label}_kurtosis"] = 0.0
                     row[f"{pname}_{state_label}_skew"]     = 0.0
-            proto = h.get("protocol", np.zeros(6))
+            proto = h.get("protocol", np.zeros(len(action_names)))
             for i, col in enumerate(action_names):
                 row[col] = float(proto[i]) if i < len(proto) else 0.0
+            # Trailing diagnostic columns (outside the jones2022 featurized block):
+            # per-step fidelity + machine-readable failure classification + cell
+            # temperature. An audit hook reads these to correlate failures with
+            # calibration checks.
+            fk = h.get("failure_kind")
+            row["failure_kind"] = fk.value if isinstance(fk, FailureKind) else (fk or "")
+            row["fidelity"] = h.get("fidelity", "full")
+            row["T_cell_K"] = h.get("T_cell_K", float("nan"))
             rows.append(row)
 
         out_path = Path(out_path)
@@ -1846,8 +2372,13 @@ class PyBaMMOracle:
                         k: v for k, v in h.items()
                         if k not in (
                             "protocol", "Z_charge_real", "Z_charge_neg_imag",
+                            "Z_discharge_real", "Z_discharge_neg_imag",
                             "ecm_samples_charge", "ecm_samples_discharge",
                             "ecm_variables_charge", "ecm_variables_discharge",
+                            # array-valued state blocks (keep the diagnostics CSV scalar)
+                            "ecm_params_charge", "ecm_params_discharge",
+                            "ecm_std_charge", "ecm_std_discharge",
+                            "state_raw", "state_detrended", "drt_peaks",
                         )
                     }
                     proto = np.asarray(h.get("protocol", []))
@@ -2051,12 +2582,15 @@ def make_pybamm_candidates(
     d_rate_mA: float = 100.0,
     d_dur_h: float = 1.0,
     dur_h: float = 1.0,
+    temperature_protocol: bool = False,
+    T_ambient_range: tuple[float, float] | list[float] = (278.15, 318.15),
 ) -> list[np.ndarray]:
-    """Build a 6-D protocol candidate grid varying only the first charge current.
+    """Build a protocol candidate grid varying the first charge current.
 
     Protocol layout matches :class:`PyBaMMOracle`::
 
         [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]
+        [..., T_ambient_K]   # 7th slot only when temperature_protocol=True (#10)
 
     The second charge stage is set to half the first (two-step taper); the
     discharge stage uses ``d_rate_mA`` and ``d_dur_h``.
@@ -2073,9 +2607,23 @@ def make_pybamm_candidates(
         Fixed discharge duration (h).
     dur_h : float
         Fixed first-stage charge duration (h); second stage gets ``dur_h / 2``.
+    temperature_protocol : bool
+        When ``True``, emit 7-D vectors that also sweep the ambient temperature
+        across ``T_ambient_range`` (for ``PyBaMMOracle(use_temperature_protocol=
+        True, thermal="lumped")``). Default ``False`` keeps the 6-D layout.
+    T_ambient_range : (float, float)
+        Ambient-temperature sweep bounds (K), used only when
+        ``temperature_protocol=True``.
     """
     c_rates = np.linspace(c_rate_min_mA, c_rate_max_mA, n_candidates)
+    if not temperature_protocol:
+        return [
+            np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h], dtype=np.float64)
+            for c in c_rates
+        ]
+    t_lo, t_hi = float(T_ambient_range[0]), float(T_ambient_range[1])
+    temps = np.linspace(t_lo, t_hi, n_candidates)
     return [
-        np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h], dtype=np.float64)
-        for c in c_rates
+        np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h, t], dtype=np.float64)
+        for c, t in zip(c_rates, temps)
     ]

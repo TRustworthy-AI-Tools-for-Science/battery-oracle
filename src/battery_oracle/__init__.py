@@ -52,6 +52,7 @@ from battery_oracle._circuit import (
 )
 from battery_oracle.experiment import (
     build_oracle_from_config,
+    build_oracle_from_oracle_config,
     load_default_ecm_circuit,
     load_experiment_config,
     load_oracle_config,
@@ -61,11 +62,14 @@ from battery_oracle.experiment import (
     run_experiment,
 )
 from battery_oracle.oracle import (
+    STATE_VECTOR_SCHEMA,
+    FailureKind,
     OracleFailure,
     PyBaMMOracle,
     _autoeis_ecm,
     _randles_stub_ecm,
     make_pybamm_candidates,
+    state_vector_schema,
 )
 from battery_oracle.tune import (
     calibrate_drift,
@@ -74,13 +78,16 @@ from battery_oracle.tune import (
     write_calibration_summary,
     write_oracle_config,
 )
-from battery_oracle.tune_plots import plot_tune_oracle_summary
+from battery_oracle.tune_plots import plot_eis_comparison, plot_tune_oracle_summary
 
 __version__ = "0.3.0"
 
 __all__ = [
     "PyBaMMOracle",
     "OracleFailure",
+    "FailureKind",
+    "STATE_VECTOR_SCHEMA",
+    "state_vector_schema",
     "make_pybamm_candidates",
     "_randles_stub_ecm",
     "_autoeis_ecm",
@@ -93,10 +100,12 @@ __all__ = [
     "write_calibration_summary",
     "compute_real_targets",
     "plot_tune_oracle_summary",
+    "plot_eis_comparison",
     "load_experiment_config",
     "oracle_kwargs_from_config",
     "protocols_from_config",
     "build_oracle_from_config",
+    "build_oracle_from_oracle_config",
     "run_experiment",
     "load_default_ecm_circuit",
     "load_oracle_config",

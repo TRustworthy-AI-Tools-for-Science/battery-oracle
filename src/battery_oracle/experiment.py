@@ -48,6 +48,9 @@ _PROTOCOL_FIELDS = (
 )
 _VALID_MODELS = ("SPMe", "SPM", "DFN")
 _VALID_PRESETS = ("nominal", "accelerated", "severe")
+# Packaged per-dataset calibration configs (#12), selectable via config_dataset=.
+# Each ships as config_oracle_{name}.yml alongside config_oracle_defaults.yml.
+_VALID_DATASETS = ("calce", "oxford", "matr")
 # ECM fitter. 'randles' is the fast analytic stub (available on the core install);
 # 'autoeis' is the Bayesian fit and needs the [autoeis] extra. Default 'randles'
 # so a bare `run_experiment` works out of the box.
@@ -128,6 +131,23 @@ def load_oracle_config(path: str | Path | None = None) -> dict:
         return yaml.safe_load(fh) or {}
 
 
+def _resolve_dataset_config(name: str) -> dict:
+    """Load a packaged per-dataset calibration config (#12) by short name.
+
+    ``name`` is one of :data:`_VALID_DATASETS` (calce/oxford/matr); resolves to
+    the packaged ``config_oracle_{name}.yml`` via ``importlib.resources`` (same
+    mechanism as :func:`load_oracle_config`). PyYAML only — no PyBaMM import.
+    """
+    if name not in _VALID_DATASETS:
+        raise ValueError(
+            f"Unknown config_dataset {name!r}; choose one of {_VALID_DATASETS}."
+        )
+    with resources.files("battery_oracle").joinpath(
+        f"config_oracle_{name}.yml"
+    ).open("r") as fh:
+        return yaml.safe_load(fh) or {}
+
+
 def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None) -> dict:
     """Map an oracle-defaults YAML dict to a full ``PyBaMMOracle(**kwargs)`` dict.
 
@@ -145,16 +165,19 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     PyBaMM-free (PyYAML/numpy only), matching :func:`oracle_kwargs_from_config`'s
     design.
     """
+    model_cfg = oracle_cfg.get("model", {}) or {}
     cycling = oracle_cfg.get("cycling", {}) or {}
     solver = oracle_cfg.get("solver", {}) or {}
     solver_primary = solver.get("primary", {}) or {}
     solver_emergency = solver.get("emergency", {}) or {}
+    solver_dfn = solver.get("dfn", {}) or {}
     bounds = oracle_cfg.get("protocol_bounds", {}) or {}
     eis = oracle_cfg.get("eis", {}) or {}
     linkk = eis.get("linkk", {}) or {}
     ecm = oracle_cfg.get("ecm", {}) or {}
     cpe_seeds = ecm.get("cpe_seeds", {}) or {}
     autoeis = ecm.get("autoeis", {}) or {}
+    detrend = oracle_cfg.get("detrend", {}) or {}
     degradation = oracle_cfg.get("degradation", {}) or {}
     c2_stress = degradation.get("c2_stress", {}) or {}
     preset_constants_all = degradation.get("preset_constants", {}) or {}
@@ -168,14 +191,23 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     n_freq = int(eis.get("n_freq_points", 60))
 
     return {
+        "model": model_cfg.get("type", "SPMe"),
         "n_cycles": int(cycling.get("n_cycles", 1)),
         "temperature_K": float(cycling.get("temperature_K", 298.15)),
         "parameter_set": cycling.get("parameter_set", "Chen2020"),
+        # #14: declared chemistry (defaults to the parameter_set name). Validated
+        # against parameter_set in build_oracle_from_config to catch a mismatched
+        # calibration YAML (e.g. LFP scales loaded onto an NMC cell).
+        "chemistry": cycling.get("chemistry", cycling.get("parameter_set", "Chen2020")),
         "real_cell_capacity_mah": float(
             protocol_scaling.get("real_cell_capacity_mah_legacy_default", 200.0)
         ),
         "rest_s": float(cycling.get("rest_s", 1200.0)),
         "initial_soc": float(cycling.get("initial_soc", 0.8)),
+        "thermal": cycling.get("thermal", "isothermal"),
+        "T_ambient_K": float(cycling.get("T_ambient_K", 298.15)),
+        "h_total_W_per_m2K": float(cycling.get("h_total_W_per_m2K", 10.0)),
+        "use_temperature_protocol": bool(cycling.get("use_temperature_protocol", False)),
 
         "degradation_preset": resolved_preset,
         "eol_capacity_fraction": float(degradation.get("eol_capacity_fraction", 0.80)),
@@ -195,6 +227,8 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "frequencies": np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq),
         "eis_noise_level": float(eis.get("noise_level", 0.02)),
         "eis_noise_model": eis.get("noise_model", "combined"),
+        "E_a_J_per_mol": float(eis.get("E_a_J_per_mol", 30e3)),
+        "E_a_electrolyte_J_per_mol": float(eis.get("E_a_electrolyte_J_per_mol", 15e3)),
         "eis_drift_scale": float(eis.get("drift_scale", 0.0)),
         "eis_drift_tau_s": float(eis.get("drift_tau_s", 600.0)),
         "eis_drift_n_periods": float(eis.get("drift_n_periods", 4.0)),
@@ -220,6 +254,9 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "emergency_solver_rtol": float(solver_emergency.get("rtol", 1e-2)),
         "emergency_solver_atol": float(solver_emergency.get("atol", 1e-5)),
         "emergency_solver_dt_max_s": float(solver_emergency.get("dt_max_s", 10.0)),
+        "dfn_solver_rtol": float(solver_dfn.get("rtol", 1e-6)),
+        "dfn_solver_atol": float(solver_dfn.get("atol", 1e-8)),
+        "dfn_solver_dt_max_s": float(solver_dfn.get("dt_max_s", 1.0)),
 
         "c_min_mA": float(bounds.get("c_min_mA", 50.0)),
         "c_max_mA": float(bounds.get("c_max_mA", 10_000.0)),
@@ -230,6 +267,11 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "v_charge_max": float(bounds.get("v_charge_max", 4.3)),
         "v_discharge_min": float(bounds.get("v_discharge_min", 3.0)),
         "charge_stage_max_s": float(bounds.get("charge_stage_max_s", 900.0)),
+        "dfn_max_crate": float(bounds.get("dfn_max_crate", 1.5)),
+
+        "detrend_alpha": float(detrend.get("alpha", 0.1)),
+        "n_protocol_groups": int(detrend.get("n_protocol_groups", 8)),
+        "detrend_warmup": int(detrend.get("warmup", 20)),
     }
 
 
@@ -325,11 +367,20 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     kwargs["n_cycles"] = int(cycling.get("n_cycles", kwargs["n_cycles"]))
     kwargs["temperature_K"] = float(cycling.get("temperature_K", kwargs["temperature_K"]))
     kwargs["parameter_set"] = cycling.get("parameter_set", kwargs["parameter_set"])
+    kwargs["chemistry"] = cycling.get("chemistry", kwargs["chemistry"])
     kwargs["real_cell_capacity_mah"] = float(
         cycling.get("real_cell_capacity_mah", kwargs["real_cell_capacity_mah"])
     )
     kwargs["rest_s"] = float(cycling.get("rest_s", kwargs["rest_s"]))
     kwargs["initial_soc"] = float(cycling.get("initial_soc", kwargs["initial_soc"]))
+    kwargs["thermal"] = cycling.get("thermal", kwargs["thermal"])
+    kwargs["T_ambient_K"] = float(cycling.get("T_ambient_K", kwargs["T_ambient_K"]))
+    kwargs["h_total_W_per_m2K"] = float(
+        cycling.get("h_total_W_per_m2K", kwargs["h_total_W_per_m2K"])
+    )
+    kwargs["use_temperature_protocol"] = bool(
+        cycling.get("use_temperature_protocol", kwargs["use_temperature_protocol"])
+    )
 
     kwargs["degradation_preset"] = degradation["preset"]
     kwargs["eol_capacity_fraction"] = float(
@@ -355,6 +406,10 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     kwargs["frequencies"] = np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq)
     kwargs["eis_noise_level"] = float(eis.get("noise_level", kwargs["eis_noise_level"]))
     kwargs["eis_noise_model"] = eis.get("noise_model", kwargs["eis_noise_model"])
+    kwargs["E_a_J_per_mol"] = float(eis.get("E_a_J_per_mol", kwargs["E_a_J_per_mol"]))
+    kwargs["E_a_electrolyte_J_per_mol"] = float(
+        eis.get("E_a_electrolyte_J_per_mol", kwargs["E_a_electrolyte_J_per_mol"])
+    )
     kwargs["eis_drift_scale"] = float(eis.get("drift_scale", kwargs["eis_drift_scale"]))
     kwargs["eis_drift_tau_s"] = float(eis.get("drift_tau_s", kwargs["eis_drift_tau_s"]))
     kwargs["eis_drift_n_periods"] = float(eis.get("drift_n_periods", kwargs["eis_drift_n_periods"]))
@@ -380,30 +435,115 @@ def protocols_from_config(cfg: dict) -> list[np.ndarray]:
     ]
 
 
-def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
+def build_oracle_from_config(
+    cfg: dict | str | Path, config_dataset: str | None = None
+) -> "PyBaMMOracle":
     """Construct a :class:`PyBaMMOracle` from a config dict (or a path to load first).
 
-    Resolves ``cfg``'s optional top-level ``oracle_config`` field (a path to a
-    custom ``config_oracle_*.yml``, e.g. a tune-oracle-skill calibration
-    output) as the base layer instead of the packaged
-    ``config_oracle_defaults.yml`` -- see :func:`oracle_kwargs_from_config`.
-    Resolves the ``parameter_set`` string to a ``pybamm.ParameterValues`` and
-    imports :class:`PyBaMMOracle` lazily so the parse/mapping layer stays
-    PyBaMM-free.
+    The base oracle layer is resolved in this order:
+      * ``config_dataset`` (this kwarg, or the experiment YAML's top-level
+        ``config_dataset`` field) -> the packaged ``config_oracle_{name}.yml``
+        for one of :data:`_VALID_DATASETS` (#12); OR
+      * ``cfg``'s optional top-level ``oracle_config`` field -> a custom
+        ``config_oracle_*.yml`` (e.g. a tune-oracle calibration output); OR
+      * the packaged ``config_oracle_defaults.yml``.
+
+    ``config_dataset`` and ``oracle_config`` are mutually exclusive (both select
+    the base layer) -- setting both raises. Resolves the ``parameter_set`` string
+    to a ``pybamm.ParameterValues`` and imports :class:`PyBaMMOracle` lazily so the
+    parse/mapping layer stays PyBaMM-free.
     """
     if not isinstance(cfg, dict):
         cfg = load_experiment_config(cfg)
 
-    oracle_cfg = load_oracle_config(cfg.get("oracle_config"))
+    config_dataset = config_dataset or cfg.get("config_dataset")
+    oracle_config_path = cfg.get("oracle_config")
+    if config_dataset and oracle_config_path:
+        raise ValueError(
+            "config_dataset and oracle_config both select the oracle base layer; "
+            "set only one."
+        )
+    if config_dataset:
+        oracle_cfg = _resolve_dataset_config(config_dataset)
+    else:
+        oracle_cfg = load_oracle_config(oracle_config_path)
     kwargs = oracle_kwargs_from_config(cfg, oracle_cfg)
     pset = kwargs.pop("parameter_set", None)
+
+    from battery_oracle.oracle import (
+        _SUPPORTED_CHEMISTRIES,
+        PyBaMMOracle,
+        _autoeis_ecm,
+        _randles_stub_ecm,
+    )
+    # #14: cross-layer chemistry validation — the config's declared chemistry must
+    # resolve to the same PyBaMM parameter set, so an LFP-calibrated YAML can't be
+    # silently paired with an NMC cell (mismatched degradation scales/bounds).
+    chem = kwargs.get("chemistry", "Chen2020")
+    if chem not in _SUPPORTED_CHEMISTRIES:
+        raise ValueError(
+            f"Unknown chemistry {chem!r}; choose one of {sorted(_SUPPORTED_CHEMISTRIES)}."
+        )
     if pset:
+        resolved = _SUPPORTED_CHEMISTRIES.get(chem, chem)
+        if resolved != pset:
+            raise ValueError(
+                f"Config chemistry {chem!r} (-> {resolved}) does not match "
+                f"parameter_set {pset!r}. Point the experiment at a calibration YAML "
+                f"whose chemistry matches its parameter_set."
+            )
         import pybamm  # local import — keeps the mapping layer PyBaMM-free
         kwargs["parameter_values"] = pybamm.ParameterValues(pset)
 
-    from battery_oracle.oracle import PyBaMMOracle, _autoeis_ecm, _randles_stub_ecm
     fitter = kwargs.pop("ecm_fitter", _DEFAULT_ECM_FITTER)
     kwargs["ecm_model_fn"] = _autoeis_ecm if fitter == "autoeis" else _randles_stub_ecm
+    return PyBaMMOracle(**kwargs)
+
+
+def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle":
+    """Build a :class:`PyBaMMOracle` straight from an oracle/calibration config.
+
+    Unlike :func:`build_oracle_from_config`, this needs no experiment YAML /
+    protocols list -- it is the convenient entry point for tooling that just wants
+    a calibrated oracle. ``source`` is a packaged dataset name (one of
+    :data:`_VALID_DATASETS`), a path to a ``config_oracle_*.yml``, or an already-
+    parsed dict. The three-layer precedence collapses to a single oracle-config
+    layer here (no experiment overlay).
+    """
+    if isinstance(source, dict):
+        oracle_cfg = source
+    elif isinstance(source, str) and source in _VALID_DATASETS:
+        oracle_cfg = _resolve_dataset_config(source)
+    else:
+        oracle_cfg = load_oracle_config(source)
+
+    kwargs = oracle_kwargs_from_oracle_config(oracle_cfg)
+    pset = kwargs.pop("parameter_set", None)
+
+    from battery_oracle.oracle import (
+        _SUPPORTED_CHEMISTRIES,
+        PyBaMMOracle,
+        _randles_stub_ecm,
+    )
+    chem = kwargs.get("chemistry", "Chen2020")
+    if chem not in _SUPPORTED_CHEMISTRIES:
+        raise ValueError(
+            f"Unknown chemistry {chem!r}; choose one of {sorted(_SUPPORTED_CHEMISTRIES)}."
+        )
+    if pset:
+        resolved = _SUPPORTED_CHEMISTRIES.get(chem, chem)
+        if resolved != pset:
+            raise ValueError(
+                f"Config chemistry {chem!r} (-> {resolved}) does not match "
+                f"parameter_set {pset!r}."
+            )
+        import pybamm
+        kwargs["parameter_values"] = pybamm.ParameterValues(pset)
+
+    # This layer carries an ecm.circuit-derived `circuit`; the fitter is not part
+    # of the oracle config, so default to the fast Randles stub.
+    kwargs.pop("ecm_fitter", None)
+    kwargs["ecm_model_fn"] = _randles_stub_ecm
     return PyBaMMOracle(**kwargs)
 
 
@@ -425,6 +565,8 @@ def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
         end-of-life (:class:`OracleFailure`) partway through, the loop stops and
         the history accumulated so far is returned.
     """
+    import numpy as np
+
     from battery_oracle.oracle import OracleFailure
 
     cfg = load_experiment_config(path)
@@ -435,6 +577,23 @@ def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
     for protocol in protocols_from_config(cfg):
         try:
             oracle(protocol)
-        except OracleFailure:
+        except OracleFailure as exc:
+            # Record a terminal audit row so the failure mode is preserved in the
+            # returned history (a successful step appends its own row; a failing
+            # step raises before appending). save_to_csv .get(...)-guards the ECM
+            # fields, so this row exports as an ECM-zero row carrying failure_kind.
+            fk = exc.failure_kind
+            oracle._history.append({
+                "call_idx":     len(oracle._history),
+                "model":        getattr(oracle, "_model", None),
+                "failed":       True,
+                "failure_kind": fk,
+                "fidelity":     "failed",
+                "protocol": (
+                    np.asarray(exc.protocol).copy()
+                    if exc.protocol is not None
+                    else np.asarray(protocol).copy()
+                ),
+            })
             break
     return oracle._history
