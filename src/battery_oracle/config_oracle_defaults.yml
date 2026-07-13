@@ -10,12 +10,25 @@
 # top-level `oracle_config:` field at one to use it (see that skill for the
 # calibration workflow).
 
+model:
+  type: SPMe                       # SPMe (default) | SPM | DFN -> PyBaMMOracle(model=...). Base layer; an
+                                   # experiment YAML's `model.type` overlays this (see experiment.py).
+
 cycling:
   n_cycles: 1
   parameter_set: Chen2020          # pybamm.ParameterValues("Chen2020"), 5 Ah NMC/graphite pouch cell
-  temperature_K: 298.15            # 25 degC; sets "Ambient temperature [K]" when != 298.15
+  chemistry: Chen2020              # #14: must agree with parameter_set (validated). Chen2020 | Xu2019 | Prada2013.
+                                   # Non-Chen2020 needs its own calibration YAML (bounds/preset) -- see config_oracle_{dataset}.yml.
+  temperature_K: 298.15            # 25 degC; sets "Ambient temperature [K]" when != 298.15 (isothermal)
   initial_soc: 0.80                # first-call starting SOC (keeps initial OCV inside the voltage window)
   rest_s: 1200.0                   # OCV rest (s) on each side of a cycle, before/after EIS (Jones et al. 2022)
+  # Thermal submodel (#9). "isothermal" (default) | "lumped" (Timms 2021: one ODE
+  # coupling cell temperature to the electrochemistry). Lumped surfaces T_cell_K in
+  # the state vector and shifts the degradation trajectory for non-ambient protocols.
+  thermal: isothermal
+  T_ambient_K: 298.15              # lumped-thermal ambient (K)
+  h_total_W_per_m2K: 10.0          # lumped-thermal total heat-transfer coefficient
+  use_temperature_protocol: false  # true -> opt-in 7-D protocol (slot 6 = per-cycle T_ambient_K); needs thermal: lumped
 
 solver:
   # PyBaMM solver tolerances. IDAKLUSolver (primary) ignores dt_max_s; it only
@@ -31,6 +44,14 @@ solver:
     rtol: 1.0e-2
     atol: 1.0e-5
     dt_max_s: 10.0
+  # DFN is a stiff coupled DAE: tighter IDAKLU tolerances than SPMe, and a low
+  # dt_max on its Casadi fallback tier(s) so IDA can backstep before a hard
+  # failure at the CC->CV switch instead of silently truncating. Only used when
+  # PyBaMMOracle(model="DFN"). See oracle.py:_build_native_state.
+  dfn:
+    rtol: 1.0e-6
+    atol: 1.0e-8
+    dt_max_s: 1.0
 
 # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah). Sanitises
 # protocol vectors before building the PyBaMM Experiment -- see
@@ -45,11 +66,17 @@ protocol_bounds:
   v_charge_max: 4.3         # charge safety cutoff (V) -- Jones, Stimming & Lee 2022
   v_discharge_min: 3.0      # discharge cutoff (V)
   charge_stage_max_s: 900.0 # 15 min per CC charge stage (paper limit)
+  dfn_max_crate: 1.5        # DFN-only current ceiling (C); SPMe/SPM keep c_max_mA (2C)
 
 eis:
   freq_min_hz: 0.01
   freq_max_hz: 10000.0
   n_freq_points: 60                # np.logspace(-2, 4, 60)
+  # Temperature-dependent EIS (#11), applied only when thermal: lumped. R_ct scales
+  # Arrhenius-wise (exp(E_a/R (1/T_cell - 1/T_ref))); the electrolyte/ohmic intercept
+  # scales with the smaller electrolyte activation energy. T_ref = 298.15 K.
+  E_a_J_per_mol: 30000.0           # charge-transfer arc activation energy (LiPF6-typical)
+  E_a_electrolyte_J_per_mol: 15000.0  # electrolyte/ohmic intercept activation energy
   noise_level: 0.02                # fractional amplitude; mimics ~2% potentiostat noise typical of lab EIS
   noise_model: combined            # white | flicker | combined | none
   # "combined" noise budget split between the flicker (1/f) and white terms.
@@ -70,6 +97,14 @@ eis:
   linkk:
     c: 0.85
     max_M: 50
+
+# Detrended state output (#8). Only active when __call__(detrend=True); returns
+# x_t - x_t_ref where x_t_ref is a per-protocol-group EMA. Groups are k-means
+# centroids in the 6-D protocol space, fit on the first `warmup` calls.
+detrend:
+  alpha: 0.1               # EMA decay (~10-cycle time constant)
+  n_protocol_groups: 8     # k-means k (capped at #unique warmup protocols)
+  warmup: 20               # calls before groups are fit (global-mean reference until then)
 
 ecm:
   # Equivalent-circuit structure fitted to each EIS spectrum. The ECM parameter
