@@ -245,6 +245,74 @@ def plot_alignment_summary(summary: dict, save_path=None):
     return fig
 
 
+def plot_eis_comparison(eis_data: dict | None, save_path=None):
+    """Nyquist overlay of the oracle's synthesized EIS vs. the ground-truth EIS.
+
+    For the winning calibration candidate (data from
+    :func:`battery_oracle.tune.collect_eis_comparison`): one panel per
+    representative cycle (first + last), each overlaying the real cell's spectrum
+    — reconstructed from that cycle's cached ECM — on the oracle's synthesized
+    charge-state spectrum.
+
+    Both curves are normalised by their ohmic resistance R0 (Re(Z) at the
+    high-frequency limit). The oracle's 5 Ah PyBaMM cell has a ~16x smaller
+    absolute impedance than a real coin cell, so only the R0-normalised arc shape
+    — exactly what the arc-ratio metric scores — is comparable; the absolute R0
+    (Ohm) of each curve is annotated in the legend so the scale is not lost.
+
+    Parameters
+    ----------
+    eis_data : dict or None
+        ``{"circuit", "frequencies", "panels": [{cycle_label, oracle, real}, ...]}``
+        from collect_eis_comparison. ``None`` (capacity-only cache: no EIS) renders
+        an explanatory placeholder instead of failing.
+    save_path : str or None
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    panels = (eis_data or {}).get("panels") or []
+    n = max(len(panels), 1)
+    fig, axes = plt.subplots(1, n, figsize=(3.5 * n, 3.5), layout="constrained",
+                             squeeze=False)
+    axes_flat = axes.ravel()
+
+    if not panels:
+        axes_flat[0].text(
+            0.5, 0.5,
+            "No EIS to compare\n(capacity-only calibration:\ndataset ships no EIS)",
+            ha="center", va="center", transform=axes_flat[0].transAxes, fontsize=9)
+        axes_flat[0].set_xticks([]); axes_flat[0].set_yticks([])
+        if save_path:
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        return fig
+
+    series = (
+        # key,     label,                    color,               line/marker style
+        ("real",   "Ground truth (real ECM)", SLIPSTREAM_COLORS[4],
+         dict(linestyle="-", marker="", linewidth=1.6)),
+        ("oracle", "Oracle (synthesized)",    SLIPSTREAM_COLORS[0],
+         dict(linestyle="none", marker="o", markersize=4, fillstyle="none")),
+    )
+    for ax, panel in zip(axes_flat, panels):
+        for key, label, color, style in series:
+            s = panel[key]
+            r0 = s["r_ohmic"] if s.get("r_ohmic") and abs(s["r_ohmic"]) > 1e-12 else 1.0
+            ax.plot(np.asarray(s["z_re"]) / r0, np.asarray(s["z_neg_im"]) / r0,
+                    color=color, label=f"{label}  (R0={s['r_ohmic']:.3g} Ω)", **style)
+        ax.set_title(f"Cycle {panel['cycle_label']}", fontsize=9)
+        ax.set_xlabel("Re(Z) / R0")
+        ax.set_ylabel("−Im(Z) / R0")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False, fontsize=7, loc="upper left")
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    return fig
+
+
 def plot_tune_oracle_summary(results_csv, summary_json, out_dir) -> dict[str, Path]:
     """Load a calibration run's outputs and write all three tuning plots to out_dir.
 
