@@ -158,6 +158,106 @@ def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
     assert kw["preset_constants"]["plating_kinetic_rate_constant_m_s"] == pytest.approx(1e-8)
 
 
+def test_base_oracle_yaml_emits_model():
+    """#1: model is now in the base oracle YAML layer (was only in the experiment YAML)."""
+    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
+    assert kw["model"] == "SPMe"
+
+
+def test_base_oracle_yaml_emits_dfn_solver_settings():
+    """#2: DFN solver tolerances + current ceiling map from the oracle YAML."""
+    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
+    assert kw["dfn_solver_rtol"] == pytest.approx(1e-6)
+    assert kw["dfn_solver_atol"] == pytest.approx(1e-8)
+    assert kw["dfn_solver_dt_max_s"] == pytest.approx(1.0)
+    assert kw["dfn_max_crate"] == pytest.approx(1.5)
+
+
+def test_base_oracle_yaml_emits_thermal_and_arrhenius():
+    """#9/#10/#11: thermal, temperature-protocol, and Arrhenius fields map from YAML."""
+    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
+    assert kw["thermal"] == "isothermal"
+    assert kw["T_ambient_K"] == pytest.approx(298.15)
+    assert kw["h_total_W_per_m2K"] == pytest.approx(10.0)
+    assert kw["use_temperature_protocol"] is False
+    assert kw["E_a_J_per_mol"] == pytest.approx(30e3)
+    assert kw["E_a_electrolyte_J_per_mol"] == pytest.approx(15e3)
+
+
+def test_base_oracle_yaml_emits_detrend():
+    """#8: detrend config maps from the oracle YAML."""
+    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
+    assert kw["detrend_alpha"] == pytest.approx(0.1)
+    assert kw["n_protocol_groups"] == 8
+    assert kw["detrend_warmup"] == 20
+
+
+def test_base_oracle_yaml_emits_chemistry():
+    """#14: chemistry maps from the oracle YAML (defaults to Chen2020)."""
+    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
+    assert kw["chemistry"] == "Chen2020"
+
+
+def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
+    """#14: an LFP-declared calibration YAML must not pair with an NMC parameter set."""
+    from battery_oracle.experiment import build_oracle_from_config
+    cfg = {
+        "model": {"type": "SPMe"},
+        "cycling": {"parameter_set": "Chen2020", "chemistry": "Prada2013"},
+        "degradation": {"preset": "accelerated"},
+        "eis": {}, "ecm": {},
+        "protocols": [{"C_rate_1": 100, "C_rate_2": 50, "duration_1": 1,
+                       "duration_2": 0.5, "D_rate": 100, "duration_d": 1}],
+    }
+    with pytest.raises(ValueError, match="does not match"):
+        build_oracle_from_config(cfg)
+
+
+@pytest.mark.parametrize("dataset", ["calce", "oxford", "matr"])
+def test_packaged_dataset_configs_load_and_map(dataset):
+    """#12: each packaged config_oracle_{dataset}.yml loads, maps, and declares a
+    chemistry that matches its parameter_set."""
+    from battery_oracle.experiment import (
+        _resolve_dataset_config,
+        oracle_kwargs_from_oracle_config,
+    )
+    cfg = _resolve_dataset_config(dataset)
+    kw = oracle_kwargs_from_oracle_config(cfg)
+    assert kw["chemistry"] in ("Chen2020", "Xu2019", "Prada2013")
+    assert kw["parameter_set"] == kw["chemistry"]  # must agree (validated at build)
+
+
+def test_matr_config_overrides_lfp_voltage_window():
+    """#12: MATR (LFP/Prada2013) must override the NMC 4.3 V bound to 3.65 V."""
+    from battery_oracle.experiment import (
+        _resolve_dataset_config,
+        oracle_kwargs_from_oracle_config,
+    )
+    kw = oracle_kwargs_from_oracle_config(_resolve_dataset_config("matr"))
+    assert kw["chemistry"] == "Prada2013"
+    assert kw["v_charge_max"] == pytest.approx(3.65)
+    assert kw["v_discharge_min"] == pytest.approx(2.0)
+
+
+def test_config_dataset_and_oracle_config_are_mutually_exclusive():
+    """#12: both select the base layer, so setting both must raise."""
+    from battery_oracle.experiment import build_oracle_from_config
+    cfg = {
+        "model": {"type": "SPMe"}, "cycling": {}, "degradation": {"preset": "nominal"},
+        "eis": {}, "ecm": {}, "oracle_config": "somewhere.yml",
+        "protocols": [{"C_rate_1": 100, "C_rate_2": 50, "duration_1": 1,
+                       "duration_2": 0.5, "D_rate": 100, "duration_d": 1}],
+    }
+    with pytest.raises(ValueError, match="only one"):
+        build_oracle_from_config(cfg, config_dataset="matr")
+
+
+def test_resolve_dataset_config_rejects_unknown():
+    from battery_oracle.experiment import _resolve_dataset_config
+    with pytest.raises(ValueError):
+        _resolve_dataset_config("nope")
+
+
 def test_oracle_kwargs_from_oracle_config_preset_resolution():
     oc = load_oracle_config()
     severe = oracle_kwargs_from_oracle_config(oc, preset="severe")

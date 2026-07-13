@@ -8,14 +8,21 @@ import numpy as np
 import pytest
 
 from battery_oracle.tune import (
+    CALIBRATION_MODEL,
     _eol_target_cycles,
     _eol_target_cycles_from_range,
+    collect_eis_comparison,
     compute_real_targets,
     score_candidate,
     slope_match_error,
     write_calibration_summary,
     write_oracle_config,
 )
+
+
+def test_calibration_model_is_spme():
+    """#5: calibration always runs on SPMe, independent of experiment-time model."""
+    assert CALIBRATION_MODEL == "SPMe"
 
 
 def _synthetic_cache():
@@ -47,6 +54,29 @@ def test_compute_real_targets():
     assert targets["mean_arc_ratio"] == \
         pytest.approx(np.mean([0.5, 0.5, 0.05 / 0.11, 0.05 / 0.11]), rel=1e-6)
     assert targets["r1_growth_pct"] == pytest.approx(10.0, rel=1e-6)
+    # real_soh 1.0 -> 0.99 over two cycles => 0.01 SOH loss per cycle
+    assert targets["soh_fade_per_cycle"] == pytest.approx(0.01, rel=1e-6)
+
+
+def test_compute_real_targets_capacity_only():
+    """EIS-less cache (null ECMs, per-cycle real_soh): fade target, no ECM targets."""
+    cache = _synthetic_cache()
+    for cyc in cache["cycles"]:
+        cache["data"][cyc]["ecm_charge"] = None
+        cache["data"][cyc]["ecm_discharge"] = None
+    targets = compute_real_targets(cache)
+    assert targets["mean_arc_ratio"] is None
+    assert targets["r1_growth_pct"] is None
+    assert targets["soh_fade_per_cycle"] == pytest.approx(0.01, rel=1e-6)
+
+
+def test_compute_real_targets_fade_from_capacity_mah():
+    """Fade falls back to real_capacity_mah / reference when real_soh is absent."""
+    cache = _synthetic_cache()
+    for cyc in cache["cycles"]:
+        del cache["data"][cyc]["real_soh"]
+    # 200 -> 198 mAh vs first_real_capacity_mah=200 => 0.01 SOH loss per cycle
+    assert compute_real_targets(cache)["soh_fade_per_cycle"] == pytest.approx(0.01, rel=1e-6)
 
 
 def test_score_candidate_perfect_vs_off():
@@ -59,6 +89,47 @@ def test_score_candidate_perfect_vs_off():
     s_bad = score_candidate(bad, real, preset="accelerated")
     assert np.isfinite(s_good) and np.isfinite(s_bad)
     assert s_good < s_bad
+
+
+def test_score_candidate_capacity_only():
+    """EIS-less cache: scored on the capacity-fade term alone — finite & ordered."""
+    real = {"mean_arc_ratio": None, "r1_growth_pct": None, "soh_fade_per_cycle": 0.005}
+    good = {"oracle_arc_ratio": None, "oracle_r1_growth_pct": None,
+            "oracle_soh_fade_per_cycle": 0.0051, "crate_probe_skipped": True}
+    bad = {"oracle_arc_ratio": None, "oracle_r1_growth_pct": None,
+           "oracle_soh_fade_per_cycle": 0.02, "crate_probe_skipped": True}
+    s_good = score_candidate(good, real, preset="accelerated")
+    s_bad = score_candidate(bad, real, preset="accelerated")
+    assert np.isfinite(s_good) and np.isfinite(s_bad)
+    assert s_good < s_bad
+
+
+def test_score_candidate_no_signal_is_inf():
+    """Neither ECM targets nor a measured fade rate: nothing to fit -> inf."""
+    real = {"mean_arc_ratio": None, "r1_growth_pct": None, "soh_fade_per_cycle": None}
+    cand = {"oracle_arc_ratio": None, "oracle_r1_growth_pct": None,
+            "oracle_soh_fade_per_cycle": None, "crate_probe_skipped": True}
+    assert score_candidate(cand, real, preset="accelerated") == float("inf")
+
+
+def test_score_candidate_present_target_missing_oracle_is_inf():
+    """A real target present but the oracle failed to produce it -> inf (bad cand)."""
+    real = {"mean_arc_ratio": 0.5, "r1_growth_pct": 10.0}
+    cand = {"oracle_arc_ratio": None, "oracle_r1_growth_pct": 10.0,
+            "implied_eol_cycle": 55.0, "crate_probe_skipped": True}
+    assert score_candidate(cand, real, preset="accelerated") == float("inf")
+
+
+def test_collect_eis_comparison_none_when_no_ecm():
+    """Capacity-only cache (null ECMs) -> None, short-circuiting before any oracle
+    is built (so the auto EIS plot is a graceful no-op for EIS-less datasets)."""
+    cache = _synthetic_cache()
+    for cyc in cache["cycles"]:
+        cache["data"][cyc]["ecm_charge"] = None
+        cache["data"][cyc]["ecm_discharge"] = None
+    best = {"kinetics_scale": 0.3, "sei_rate_scale": 0.1,
+            "dead_li_decay_scale": 10.0, "plating_rate_scale": 1.0}
+    assert collect_eis_comparison(cache, best, preset="accelerated") is None
 
 
 def test_slope_match_error():
@@ -91,12 +162,16 @@ def test_write_oracle_config(tmp_path):
         "implied_eol_cycle": 55.0, "crate_probe_skipped": True,
     }
     out = tmp_path / "config_oracle_test.yml"
-    write_oracle_config(out, "mydata", "accelerated", "C01", 2, best, real, [best])
+    write_oracle_config(out, "mydata", "accelerated", "C01", 2, best, real, [best],
+                        chemistry="Prada2013")
     assert out.exists()
     text = out.read_text()
     assert "protocol_scaling:" in text
     assert "kinetics_scale: 0.3" in text
     assert "_calibration:" in text
+    # #14: chemistry is emitted for both parameter_set and chemistry.
+    assert "parameter_set: Prada2013" in text
+    assert "chemistry: Prada2013" in text
 
 
 def test_write_calibration_summary(tmp_path):

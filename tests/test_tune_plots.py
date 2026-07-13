@@ -12,8 +12,50 @@ import pandas as pd
 
 from battery_oracle.tune_plots import (
     _pareto_frontier,
+    plot_eis_comparison,
     plot_tune_oracle_summary,
 )
+
+
+def _synthetic_eis_data(n_freq=40, n_panels=2):
+    """Mimic collect_eis_comparison output: a real (large-R0) + oracle (small-R0)
+    spectrum per panel, so the plot must normalise by R0 to overlay them."""
+    freq = np.logspace(-2, 4, n_freq)
+    w = 2 * np.pi * freq
+
+    def semicircle(r_ohmic, r_ct, tau):
+        # simple R0 + (R_ct || C) Nyquist arc
+        z = r_ohmic + r_ct / (1 + 1j * w * tau)
+        return z.real, -z.imag, r_ohmic
+
+    panels = []
+    for k in range(n_panels):
+        re_o, nim_o, r0_o = semicircle(0.01 * (1 + 0.1 * k), 0.005, 1e-2)   # oracle: small R0
+        re_r, nim_r, r0_r = semicircle(0.16 * (1 + 0.1 * k), 0.09, 1e-2)    # real: ~16x larger R0
+        panels.append({
+            "cycle_label": str(k),
+            "oracle": {"z_re": re_o, "z_neg_im": nim_o, "r_ohmic": r0_o},
+            "real":   {"z_re": re_r, "z_neg_im": nim_r, "r_ohmic": r0_r},
+        })
+    return {"circuit": "R1-[R2,P3]-[R4,P5]", "frequencies": freq, "panels": panels}
+
+
+def test_plot_eis_comparison_writes_png(tmp_path):
+    out = tmp_path / "oracle_tuning_eis.png"
+    fig = plot_eis_comparison(_synthetic_eis_data(), save_path=out)
+    assert out.exists() and out.stat().st_size > 0
+    # one Nyquist panel per requested cycle
+    assert len(fig.axes) == 2
+
+
+def test_plot_eis_comparison_handles_no_eis(tmp_path):
+    # capacity-only calibration: collect_eis_comparison returns None -> placeholder,
+    # not a crash.
+    out = tmp_path / "eis_none.png"
+    for payload in (None, {"panels": []}):
+        fig = plot_eis_comparison(payload, save_path=out)
+        assert out.exists()
+        assert len(fig.axes) == 1
 
 
 def _synthetic_results_df(n=8, seed=0):

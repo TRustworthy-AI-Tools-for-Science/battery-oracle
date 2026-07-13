@@ -9,10 +9,13 @@ from battery_oracle import (
     ACTION_FEATURE_NAMES,
     DEFAULT_CIRCUIT,
     ECM_PARAM_NAMES,
+    STATE_VECTOR_SCHEMA,
+    FailureKind,
     OracleFailure,
     PyBaMMOracle,
     _randles_stub_ecm,
     make_pybamm_candidates,
+    state_vector_schema,
 )
 from battery_oracle._circuit import _param_labels_from_circuit
 
@@ -174,6 +177,317 @@ def test_randles_stub_circuit_generic():
     half = out[:9]
     assert half[0] == pytest.approx(0.05, rel=0.05)          # R1
     assert half[3] / half[6] == pytest.approx(0.6 / 0.4)     # R3 / R5
+
+
+# ── Phase 0: FailureKind (#7) ──────────────────────────────────────────────
+
+def test_failure_kind_is_str_enum():
+    # str-Enum so it serialises directly to CSV/JSON and compares to its value.
+    assert FailureKind.END_OF_LIFE == "end_of_life"
+    assert FailureKind.SOLVER_DEGRADED.value == "solver_degraded"
+    names = {f.name for f in FailureKind}
+    assert {
+        "SOLVER_TRUNCATION", "SOLVER_FAILURE", "VOLTAGE_INFEASIBLE",
+        "END_OF_LIFE", "ECM_NONCONVERGENCE", "THERMAL_RUNAWAY", "SOLVER_DEGRADED",
+    } <= names
+
+
+def test_oracle_failure_carries_failure_kind():
+    exc = OracleFailure("boom", protocol=np.zeros(6), failure_kind=FailureKind.SOLVER_TRUNCATION)
+    assert exc.failure_kind is FailureKind.SOLVER_TRUNCATION
+    # Back-compat: failure_kind is optional.
+    assert OracleFailure("legacy").failure_kind is None
+
+
+def test_save_to_csv_failure_and_fidelity_columns():
+    """A terminal audit row (no ECM params) exports with failure_kind + fidelity."""
+    import tempfile
+
+    import pandas as pd
+    history = [
+        {  # a normal successful row
+            "call_idx": 0,
+            "ecm_params_charge": np.array([0.1, 1.0, 0.9]),
+            "ecm_params_discharge": np.array([0.1, 1.0, 0.9]),
+            "protocol": np.zeros(6),
+            "failure_kind": None,
+            "fidelity": "full",
+        },
+        {  # a failed audit row appended by run_experiment
+            "call_idx": 1,
+            "failed": True,
+            "failure_kind": FailureKind.END_OF_LIFE,
+            "fidelity": "failed",
+            "protocol": np.zeros(6),
+        },
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        out = PyBaMMOracle.save_to_csv(history, f"{d}/rec.csv", circuit="R1-[R2,P3]")
+        df = pd.read_csv(out)
+    assert "failure_kind" in df.columns and "fidelity" in df.columns
+    assert df["failure_kind"].iloc[0] == "" or pd.isna(df["failure_kind"].iloc[0])
+    assert df["failure_kind"].iloc[1] == "end_of_life"
+    assert df["fidelity"].iloc[1] == "failed"
+
+
+# ── Phase 4: multi-chemistry (#14) ─────────────────────────────────────────
+
+def test_chemistry_kwarg_resolves_and_validates():
+    assert PyBaMMOracle()._chemistry == "Chen2020"  # default
+    lfp = PyBaMMOracle(chemistry="Prada2013")
+    assert lfp._chemistry == "Prada2013"
+    assert float(lfp._pv["Nominal cell capacity [A.h]"]) == pytest.approx(2.3)
+    # Friendly alias resolves to the same parameter set.
+    assert float(PyBaMMOracle(chemistry="LFP")._pv["Nominal cell capacity [A.h]"]) == pytest.approx(2.3)
+    with pytest.raises(ValueError):
+        PyBaMMOracle(chemistry="bogus")
+
+
+def test_explicit_parameter_values_wins_over_chemistry():
+    import pybamm
+    pv = pybamm.ParameterValues("Chen2020")
+    o = PyBaMMOracle(chemistry="Prada2013", parameter_values=pv)
+    # chemistry recorded for provenance, but the explicit pv is used.
+    assert o._chemistry == "Prada2013"
+    assert float(o._pv["Nominal cell capacity [A.h]"]) == pytest.approx(5.0)
+
+
+# ── Phase 2: thermal / Arrhenius / temperature protocol (#9, #11, #10) ──────
+
+def test_thermal_kwarg_validation_and_wiring():
+    with pytest.raises(ValueError):
+        PyBaMMOracle(thermal="bogus")
+    iso = PyBaMMOracle()
+    assert iso._thermal == "isothermal"
+    assert "T_cell_K" not in iso.state_vector_schema  # no thermal slot when isothermal
+    lump = PyBaMMOracle(thermal="lumped", T_ambient_K=308.15, h_total_W_per_m2K=25.0)
+    assert lump._thermal == "lumped"
+    assert lump._deg_opts.get("thermal") == "lumped"
+    assert float(lump._pv["Ambient temperature [K]"]) == pytest.approx(308.15)
+    assert float(lump._pv["Total heat transfer coefficient [W.m-2.K-1]"]) == pytest.approx(25.0)
+    # Lumped adds a single trailing T_cell_K slot -> state len grows by exactly 1.
+    assert lump.state_vector_len == iso.state_vector_len + 1
+    assert "T_cell_K" in lump.state_vector_schema
+
+
+def test_arrhenius_kwargs_wire_to_attrs():
+    o = PyBaMMOracle(E_a_J_per_mol=45e3, E_a_electrolyte_J_per_mol=12e3)
+    assert o._E_a == pytest.approx(45e3)
+    assert o._E_a_el == pytest.approx(12e3)
+    assert o._T_ref_K == pytest.approx(298.15)
+
+
+def test_temperature_protocol_action_names_and_validation():
+    # Requires lumped thermal.
+    with pytest.raises(ValueError):
+        PyBaMMOracle(use_temperature_protocol=True, thermal="isothermal")
+    base = PyBaMMOracle()
+    o = PyBaMMOracle(thermal="lumped", use_temperature_protocol=True)
+    # Exactly one more action name than the 6-D default; the extra is T_ambient_K.
+    assert len(o._action_names) == len(base._action_names) + 1
+    assert o._action_names[-1] == "T_ambient_K"
+
+
+def test_make_candidates_temperature_protocol_shape():
+    base = make_pybamm_candidates(n_candidates=3)
+    temp = make_pybamm_candidates(n_candidates=3, temperature_protocol=True,
+                                  T_ambient_range=(280.0, 310.0))
+    # One extra slot vs the default vector; asserted against each other, not a literal.
+    assert temp[0].shape[0] == base[0].shape[0] + 1
+    assert temp[0][-1] == pytest.approx(280.0)
+    assert temp[-1][-1] == pytest.approx(310.0)
+
+
+# ── Phase 1: DFN solver settings + fallback (#2, #4) ───────────────────────
+
+def test_dfn_solver_kwargs_wire_to_instance_attrs():
+    o = PyBaMMOracle(model="DFN", dfn_solver_rtol=1e-7, dfn_solver_atol=1e-9,
+                     dfn_solver_dt_max_s=0.5, dfn_max_crate=1.2)
+    assert o._dfn_solver_rtol == pytest.approx(1e-7)
+    assert o._dfn_solver_atol == pytest.approx(1e-9)
+    assert o._dfn_solver_dt_max_s == pytest.approx(0.5)
+    assert o._dfn_max_crate == pytest.approx(1.2)
+
+
+def test_dfn_current_ceiling_tighter_than_spme():
+    """DFN tightens the current ceiling to _dfn_max_crate; SPMe keeps c_max_mA.
+    Ceiling is derived from the cell's own C/20 current (no hardcoded mA)."""
+    spme = PyBaMMOracle(model="SPMe")
+    dfn = PyBaMMOracle(model="DFN")
+    # SPMe: ceiling unchanged.
+    assert spme._current_ceiling_mA(spme._C_MAX_mA) == pytest.approx(spme._C_MAX_mA)
+    # DFN: ceiling = dfn_max_crate * nominal_A * 1000, derived from _c20_A.
+    nominal_A = 20.0 * dfn._c20_A
+    expected = min(dfn._C_MAX_mA, dfn._dfn_max_crate * nominal_A * 1000.0)
+    assert dfn._current_ceiling_mA(dfn._C_MAX_mA) == pytest.approx(expected)
+    assert dfn._current_ceiling_mA(dfn._C_MAX_mA) < dfn._C_MAX_mA
+
+
+@pytest.mark.slow
+def test_one_cycle_runs_dfn():
+    """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works;
+    the 3-tier fallback is only for failures)."""
+    oracle = PyBaMMOracle(model="DFN", ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle.reset()
+    try:
+        state = oracle(make_pybamm_candidates(n_candidates=1)[0])
+    except OracleFailure as exc:
+        pytest.skip(f"DFN oracle reported EOL/solver failure on the first cycle: {exc}")
+    assert len(state) == oracle.state_vector_len
+    h = oracle._history[-1]
+    assert h["model"] == "DFN"
+    # If DFN succeeded outright it's full fidelity + not degraded; if it fell back
+    # it would be reduced — either way the run completes without raising.
+    assert h["fidelity"] in ("full", "reduced")
+
+
+@pytest.mark.slow
+def test_dfn_solver_fallback_latches_to_spme():
+    """When both DFN solver tiers fail, the oracle falls back to SPMe (reduced
+    fidelity, SOLVER_DEGRADED) and latches there for subsequent calls."""
+    from battery_oracle import FailureKind
+    o = PyBaMMOracle(model="DFN", ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    o.reset()
+
+    class _Boom:
+        def solve(self, *a, **k):
+            raise RuntimeError("forced DFN solver failure")
+
+    o._solver = _Boom()
+    o._solver_emerg = _Boom()
+    proto = make_pybamm_candidates(n_candidates=1)[0]
+    try:
+        o(proto)
+    except OracleFailure as exc:
+        pytest.skip(f"SPMe fallback itself failed on this protocol: {exc}")
+    h = o._history[-1]
+    assert o._degraded_to_spme is True
+    assert h["fidelity"] == "reduced"
+    assert h["failure_kind"] == FailureKind.SOLVER_DEGRADED
+    # Latched: the next call stays on SPMe even though _solver is still broken.
+    try:
+        o(proto)
+    except OracleFailure as exc:
+        pytest.skip(f"latched SPMe step failed: {exc}")
+    assert o._history[-1]["fidelity"] == "reduced"
+
+
+# ── Phase 3: detrended state output (#8) ───────────────────────────────────
+
+def test_detrend_warmup_then_group_ema():
+    """Exercise the detrend helper directly (no PyBaMM sims): the first
+    `detrend_warmup` calls use the global mean; afterwards k-means groups drive a
+    per-group EMA. NaN state slots (σ under the stub) stay NaN in the detrended
+    vector. reset() clears all accumulators."""
+    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, detrend_warmup=5, n_protocol_groups=3)
+    o.reset()
+    protos = [np.array([100., 50., 1., .5, 100., 1.]),
+              np.array([140., 70., 1., .5, 100., 1.])]
+    warmups, groups = [], []
+    for i in range(12):
+        state = np.array([0.1 + 0.001 * i, 1.0, 0.9, np.nan, np.nan, np.nan])
+        o._history.append({"call_idx": i})  # stand-in for the real per-call row
+        det, warm, grp = o._detrend_state(state, protos[i % 2])
+        warmups.append(warm)
+        groups.append(grp)
+        assert np.isnan(det[3:]).all()  # NaN σ slots propagate
+    # First 5 calls are warmup (global-mean reference, group -1); then grouped.
+    assert warmups[:5] == [True] * 5
+    assert warmups[5] is False and groups[5] >= 0
+    assert o._detrend_centroids is not None
+    # 2 unique protocols -> at most 2 groups even though n_protocol_groups=3.
+    assert o._detrend_centroids.shape[0] == 2
+    o.reset()
+    assert o._detrend_centroids is None
+    assert o._detrend_global_sum is None
+    assert o._detrend_group_ema == {}
+
+
+def test_detrend_config_wires_to_attrs():
+    o = PyBaMMOracle(detrend_alpha=0.2, n_protocol_groups=4, detrend_warmup=10)
+    assert o._detrend_alpha == pytest.approx(0.2)
+    assert o._n_protocol_groups == 4
+    assert o._detrend_warmup == 10
+
+
+# ── Phase 0: STATE_VECTOR_SCHEMA + ECM σ (#6) ──────────────────────────────
+
+def test_state_vector_schema_is_derived():
+    # Default circuit has 7 params -> 4 blocks of 7 = 28, all derived (no literals).
+    n = len(_param_labels_from_circuit(DEFAULT_CIRCUIT))
+    sch = state_vector_schema(n)
+    assert list(sch) == ["means_charge", "means_discharge", "std_charge", "std_discharge"]
+    assert sch["means_charge"] == (0, n)
+    assert sch["std_discharge"] == (3 * n, 4 * n)
+    assert STATE_VECTOR_SCHEMA == sch
+    # has_t_cell registers a single trailing scalar slot.
+    sch_t = state_vector_schema(n, has_t_cell=True)
+    assert sch_t["T_cell_K"] == (4 * n, 4 * n + 1)
+
+
+def test_state_vector_len_tracks_circuit():
+    o = PyBaMMOracle(circuit="R1-[R2,P3]")  # 4 params
+    assert o.state_vector_len == 4 * len(o._ecm_param_names)
+    assert o.state_vector_schema["std_discharge"] == (
+        3 * len(o._ecm_param_names), 4 * len(o._ecm_param_names),
+    )
+
+
+@pytest.mark.slow
+def test_returned_state_matches_schema_and_std_is_nan_for_stub():
+    """Under the Randles stub the returned width equals state_vector_len and
+    the σ slots are NaN (no AutoEIS posterior). Asserts against derived length."""
+    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle.reset()
+    try:
+        state = oracle(make_pybamm_candidates(n_candidates=1)[0])
+    except OracleFailure as exc:
+        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
+    assert state.shape == (oracle.state_vector_len,)
+    lo, hi = oracle.state_vector_schema["std_charge"]
+    lo2, hi2 = oracle.state_vector_schema["std_discharge"]
+    assert np.isnan(state[lo:hi]).all()
+    assert np.isnan(state[lo2:hi2]).all()
+    # Means are finite.
+    assert np.isfinite(state[: oracle.state_vector_schema["means_discharge"][1]]).all()
+    h = oracle._history[-1]
+    assert h["failure_kind"] is None and h["fidelity"] == "full"
+    assert "ecm_std_charge" in h and "ecm_std_discharge" in h
+
+
+@pytest.mark.slow
+def test_detrend_true_returns_detrended_and_keeps_both_in_history():
+    """__call__(detrend=True) returns x_t - x_t_ref; history keeps raw + detrended."""
+    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    o.reset()
+    try:
+        det = o(make_pybamm_candidates(n_candidates=1)[0], detrend=True)
+    except OracleFailure as exc:
+        pytest.skip(f"oracle failed on first cycle: {exc}")
+    h = o._history[-1]
+    assert len(det) == o.state_vector_len
+    assert "state_raw" in h and "state_detrended" in h
+    assert np.allclose(det, h["state_detrended"], equal_nan=True)
+    assert h["detrend_warmup"] is True  # first call is always warmup
+
+
+@pytest.mark.slow
+def test_lumped_thermal_populates_t_cell():
+    """A lumped-thermal cycle surfaces T_cell_K in history + the state vector,
+    and the state width equals the schema (schema-derived, no magic number)."""
+    o = PyBaMMOracle(thermal="lumped", T_ambient_K=308.15,
+                     ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    o.reset()
+    try:
+        state = o(make_pybamm_candidates(n_candidates=1)[0])
+    except OracleFailure as exc:
+        pytest.skip(f"lumped-thermal cycle failed: {exc}")
+    assert len(state) == o.state_vector_len
+    lo, hi = o.state_vector_schema["T_cell_K"]
+    t_cell = o._history[-1]["T_cell_K"]
+    assert state[lo] == pytest.approx(t_cell)
+    # Cell self-heats to at or above ambient.
+    assert t_cell >= 308.15 - 1.0
 
 
 @pytest.mark.slow
