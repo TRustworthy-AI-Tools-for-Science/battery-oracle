@@ -1412,8 +1412,9 @@ def main(argv=None) -> None:
                 print("EIS comparison plot skipped (no ground-truth EIS in cache; "
                       "capacity-only calibration).")
             else:
-                from battery_oracle.tune_plots import plot_eis_comparison
                 import matplotlib.pyplot as plt
+
+                from battery_oracle.tune_plots import plot_eis_comparison
                 plots_dir.mkdir(parents=True, exist_ok=True)
                 eis_path = plots_dir / "oracle_tuning_eis.png"
                 plt.close(plot_eis_comparison(eis_data, save_path=eis_path))
