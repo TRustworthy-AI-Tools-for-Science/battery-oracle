@@ -1,9 +1,0 @@
-# Per-dataset calibration config for CALCE (NMC/graphite, Chen2020 parameter set).
-#
-# This file is loaded by battery_oracle.experiment._resolve_dataset_config("calce")
-# and overlays config_oracle_defaults.yml. Only fields that differ from the defaults
-# need to appear here.  See config_oracle_defaults.yml for all available knobs.
-
-cycling:
-  parameter_set: Chen2020          # LG M50, NMC811/graphite, 5 Ah
-  chemistry: Chen2020              # must agree with parameter_set (validated at build)
