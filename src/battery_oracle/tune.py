@@ -925,7 +925,8 @@ def _parallel_worker(study_name: str, storage_url: str, n_trials_worker: int,
 
 
 def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler,
-                               seed, ranges, cfg, warm_start_ks, warm_start_srs):
+                               seed, ranges, cfg, warm_start_ks, warm_start_srs,
+                               show_progress_bar=False):
     """Process-parallel calibration: N worker processes over a shared Optuna RDB.
 
     Threads are unsafe here (see :func:`_parallel_worker`); each worker is a
@@ -957,6 +958,25 @@ def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler
     log.info("Starting process-parallel Optuna BO [%d worker process(es), n_trials=%d, "
              "sampler=%s, preset=%s]", n_workers, n_trials, sampler, cfg["preset"])
     ctx = multiprocessing.get_context("spawn")
+    # A single trial-level progress bar (opt-in). Workers commit each finished trial
+    # to the shared RDB, so poll the study's finished-trial count rather than the
+    # per-worker futures (which would tick only n_workers times). tqdm(disable=...)
+    # makes this a no-op when the bar is off.
+    from optuna.trial import TrialState
+    from tqdm.auto import tqdm as _tqdm
+    _done_states = (TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL)
+    pbar = _tqdm(total=n_trials, desc="Calibrating (parallel)",
+                 disable=not show_progress_bar, leave=True)
+
+    def _sync_bar(seen):
+        try:
+            n = len(study.get_trials(deepcopy=False, states=_done_states))
+        except Exception:
+            return seen
+        if n > seen:
+            pbar.update(n - seen)
+        return n
+
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers,
                                                     mp_context=ctx) as ex:
@@ -965,12 +985,18 @@ def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler
                           seed + i + 1, sampler, ranges, cache, cfg)
                 for i in range(n_workers) if counts[i] > 0
             ]
-            for fut in concurrent.futures.as_completed(futures):
+            seen = 0
+            while not all(f.done() for f in futures):
+                time.sleep(0.5)
+                seen = _sync_bar(seen)
+            for fut in futures:
                 fut.result()   # re-raise any worker exception in the parent
+            _sync_bar(seen)
         results = [dict(t.user_attrs["result"])
                    for t in study.get_trials(deepcopy=False)
                    if "result" in t.user_attrs]
     finally:
+        pbar.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not results:
@@ -1016,6 +1042,7 @@ def calibrate_oracle(
     warm_start_srs: list[float] | None = None,
     circuit: str | None = None,
     chemistry: str = "Chen2020",
+    show_progress_bar: bool = False,
 ) -> dict[str, Any]:
     """Run the Optuna BO over (kinetics, sei_rate, dead_li_decay, plating)_scale.
 
@@ -1064,7 +1091,8 @@ def calibrate_oracle(
         return _calibrate_oracle_parallel(
             cache, real_targets, n_trials=n_trials, n_jobs=n_jobs, sampler=sampler,
             seed=seed, ranges=ranges, cfg=cfg,
-            warm_start_ks=warm_start_ks, warm_start_srs=warm_start_srs)
+            warm_start_ks=warm_start_ks, warm_start_srs=warm_start_srs,
+            show_progress_bar=show_progress_bar)
 
     # ── Sequential (single-process) path: identical search, full per-trial logs ──
     results: list[dict] = []
@@ -1119,7 +1147,8 @@ def calibrate_oracle(
 
     log.info("Starting Optuna BO [sampler=%s, n_trials=%d, n_jobs=1, preset=%s]",
              sampler, n_trials, preset)
-    study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=False)
+    study.optimize(objective, n_trials=n_trials, n_jobs=1,
+                   show_progress_bar=show_progress_bar)
 
     scored = sorted(
         [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope))
