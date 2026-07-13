@@ -4,6 +4,8 @@ The full calibrate_oracle loop drives PyBaMM and is exercised end-to-end via the
 battery_forecast jones2022 adapter; here we test the dataset-free scoring,
 target-extraction, and config-writing helpers.
 """
+import math
+
 import numpy as np
 import pytest
 
@@ -11,6 +13,10 @@ from battery_oracle.tune import (
     CALIBRATION_MODEL,
     _eol_target_cycles,
     _eol_target_cycles_from_range,
+    _native,
+    _parallel_worker,
+    _split_trials,
+    calibrate_oracle,
     collect_eis_comparison,
     compute_real_targets,
     score_candidate,
@@ -118,6 +124,84 @@ def test_score_candidate_present_target_missing_oracle_is_inf():
     cand = {"oracle_arc_ratio": None, "oracle_r1_growth_pct": 10.0,
             "implied_eol_cycle": 55.0, "crate_probe_skipped": True}
     assert score_candidate(cand, real, preset="accelerated") == float("inf")
+
+
+# ── Process-parallel calibration engine (thread-safety fix) ────────────────
+
+def _stub_candidate_result(cache, ks, srs, dds, prs, preset, capacity_check,
+                           circuit=None, chemistry="Chen2020"):
+    """Cheap stand-in for run_oracle_candidate (no PyBaMM): arc-ratio tracks ks so
+    scores vary; deliberately returns numpy types to exercise the _native sanitiser."""
+    return {
+        "kinetics_scale": ks, "sei_rate_scale": srs,
+        "dead_li_decay_scale": dds, "plating_rate_scale": prs,
+        "oracle_arc_ratio": np.float64(0.5 + ks),
+        "oracle_r1_growth_pct": np.float64(10.0),
+        "oracle_soh_fade_per_cycle": None,
+        "oracle_failure": False, "n_cycles_completed": 2,
+        "implied_eol_cycle": np.float64(55.0),
+    }
+
+
+_STUB_CFG = {
+    "preset": "accelerated", "circuit": "R1-[R2,P3]-[R4,P5]", "chemistry": "Chen2020",
+    "capacity_check": True, "skip_crate_probe": True, "crate_probe_cycles": 4,
+    "crate_probe_low_c": 1.0, "crate_probe_high_c": 8.0, "skip_crate2_slope": True,
+    "crate2_probe_cycles": 5, "crate2_levels": (0.5, 1.0), "crate_sensitivity_min": 3.0,
+    "real_crate2_slope": None, "real_targets": {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
+}
+_STUB_RANGES = {"ks_min": 0.1, "ks_max": 0.5, "srs_min": 0.01, "srs_max": 1.0,
+                "dds_min": 0.1, "dds_max": 1000.0, "prs_min": 0.01, "prs_max": 10.0}
+
+
+def test_split_trials_balances_and_sums():
+    assert _split_trials(35, 6) == [6, 6, 6, 6, 6, 5]
+    assert sum(_split_trials(35, 6)) == 35
+    counts = _split_trials(3, 8)
+    assert sum(counts) == 3 and counts[:3] == [1, 1, 1]
+
+
+def test_native_sanitizes_numpy_for_json():
+    out = _native({"a": np.float64(1.5), "b": np.int64(3), "c": np.array([1.0, 2.0]),
+                   "d": None, "e": True, "f": {"g": np.float32(0.25)}})
+    assert out == {"a": 1.5, "b": 3, "c": [1.0, 2.0], "d": None, "e": True, "f": {"g": 0.25}}
+    import json
+    json.dumps(out)  # must round-trip through Optuna's JSON-encoded user_attr storage
+
+
+def test_parallel_worker_stores_results_in_shared_study(tmp_path, monkeypatch):
+    """A worker persists each trial's result via user_attr — the only channel back
+    to the parent across processes. Exercised in-process with a stubbed oracle (no
+    PyBaMM, no real spawn) to validate the objective + collection contract."""
+    import optuna
+    monkeypatch.setattr("battery_oracle.tune.run_oracle_candidate", _stub_candidate_result)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    storage_url = f"sqlite:///{tmp_path / 'study.db'}"
+    optuna.create_study(study_name="wtest", storage=storage_url, direction="minimize",
+                        sampler=optuna.samplers.TPESampler(seed=1, n_startup_trials=8))
+
+    _parallel_worker("wtest", storage_url, 4, 1, "tpe", _STUB_RANGES, {}, _STUB_CFG)
+
+    study = optuna.load_study(study_name="wtest", storage=storage_url)
+    results = [t.user_attrs["result"] for t in study.get_trials(deepcopy=False)
+               if "result" in t.user_attrs]
+    assert len(results) == 4                                       # every trial recorded
+    assert all(r["score"] is not None for r in results)           # all finite -> not pruned
+    assert all(isinstance(r["oracle_arc_ratio"], float) for r in results)  # _native applied
+    assert all("trial_number" in r for r in results)
+
+
+def test_calibrate_oracle_sequential_path(monkeypatch):
+    """n_jobs=1 stays on the in-memory sequential path and drives the shared
+    _evaluate_candidate correctly (stubbed oracle: fast, no PyBaMM)."""
+    monkeypatch.setattr("battery_oracle.tune.run_oracle_candidate", _stub_candidate_result)
+    out = calibrate_oracle({"circuit": "R1-[R2,P3]-[R4,P5]"},
+                           {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
+                           n_trials=3, n_jobs=1, skip_crate_probe=True,
+                           skip_crate2_slope=True, seed=1)
+    assert math.isfinite(out["best_score"])
+    assert len(out["results"]) == 3
+    assert out["best"]["score"] is not None
 
 
 def test_collect_eis_comparison_none_when_no_ecm():

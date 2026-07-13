@@ -43,11 +43,16 @@ Cache schema (JSON-serialisable)
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import itertools
 import json
 import logging
 import math
+import multiprocessing
+import shutil
+import tempfile
 import time
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -797,6 +802,178 @@ def calibrate_drift(
 # Bayesian-optimisation driver
 # ---------------------------------------------------------------------------
 
+def _make_sampler(sampler: str, seed: int):
+    """TPE (default) or GP Optuna sampler. Shared by the sequential and parallel
+    drivers so both search the space the same way."""
+    import optuna
+    if sampler == "gp":
+        return optuna.samplers.GPSampler(seed=seed)
+    return optuna.samplers.TPESampler(seed=seed, n_startup_trials=8)
+
+
+def _split_trials(n_trials: int, n_workers: int) -> list[int]:
+    """Divide *n_trials* across *n_workers* as evenly as possible (sums to n_trials)."""
+    base, extra = divmod(max(n_trials, 0), max(n_workers, 1))
+    return [base + (1 if i < extra else 0) for i in range(n_workers)]
+
+
+def _native(obj):
+    """Recursively convert numpy scalars/arrays to JSON-serialisable Python types.
+
+    Parallel trial results travel back to the parent through Optuna
+    ``set_user_attr`` (JSON-encoded in the RDB storage), which rejects numpy types.
+    """
+    if isinstance(obj, dict):
+        return {k: _native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_native(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def _suggest_scales(trial, ranges: dict) -> tuple[float, float, float, float]:
+    """The four log-space scale suggestions — identical in both drivers."""
+    return (
+        trial.suggest_float("kinetics_scale",      ranges["ks_min"],  ranges["ks_max"],  log=True),
+        trial.suggest_float("sei_rate_scale",      ranges["srs_min"], ranges["srs_max"], log=True),
+        trial.suggest_float("dead_li_decay_scale", ranges["dds_min"], ranges["dds_max"], log=True),
+        trial.suggest_float("plating_rate_scale",  ranges["prs_min"], ranges["prs_max"], log=True),
+    )
+
+
+def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: float,
+                        cfg: dict) -> tuple[dict, float]:
+    """Replay one candidate through the oracle (+ optional probes) and score it.
+
+    Single source of truth for a trial's evaluation, shared by the sequential
+    driver and the parallel workers so both produce identical results/scores.
+    ``cfg`` bundles the (picklable) run configuration built in :func:`calibrate_oracle`.
+    """
+    t0 = time.time()
+    result = run_oracle_candidate(cache, ks, srs, dds, prs, cfg["preset"],
+                                  cfg["capacity_check"], circuit=cfg["circuit"],
+                                  chemistry=cfg["chemistry"])
+    if cfg["skip_crate_probe"]:
+        result["crate_probe_skipped"] = True
+        result["crate_sensitivity_ratio"] = None
+    else:
+        result.update(run_crate_sensitivity_probe(
+            cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
+            probe_cycles=cfg["crate_probe_cycles"], low_c_mult=cfg["crate_probe_low_c"],
+            high_c_mult=cfg["crate_probe_high_c"], circuit=cfg["circuit"],
+            chemistry=cfg["chemistry"]))
+        result["crate_probe_skipped"] = False
+    if not cfg["skip_crate2_slope"]:
+        result.update(run_crate2_slope_probe(
+            cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
+            probe_cycles=cfg["crate2_probe_cycles"], c2_levels_mult=tuple(cfg["crate2_levels"]),
+            circuit=cfg["circuit"], chemistry=cfg["chemistry"]))
+    result["runtime_s"] = round(time.time() - t0, 1)
+    score = score_candidate(result, cfg["real_targets"], cfg["preset"],
+                            cfg["crate_sensitivity_min"], cfg["real_crate2_slope"])
+    result["score"] = score if math.isfinite(score) else None
+    return result, score
+
+
+def _parallel_worker(study_name: str, storage_url: str, n_trials_worker: int,
+                     seed: int, sampler: str, ranges: dict, cache: dict,
+                     cfg: dict) -> None:
+    """One worker PROCESS: load the shared study and run ``n_trials_worker`` trials.
+
+    Runs in a spawned subprocess so AutoEIS's numpyro/JAX global + tracing state is
+    process-local and never shared across concurrent trials — the reason this
+    engine parallelises by process, not thread. (Threaded ``n_jobs`` silently
+    corrupted ~1/5 of ECM fits into the Randles-stub fallback via numpyro
+    param-store collisions and JAX tracer escapes.) A subprocess can't append to
+    the parent's list, so each trial hands its result back through the ``result``
+    user-attr in the shared RDB.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    storage = optuna.storages.RDBStorage(
+        storage_url, engine_kwargs={"connect_args": {"timeout": 60}})
+    study = optuna.load_study(study_name=study_name, storage=storage,
+                              sampler=_make_sampler(sampler, seed))
+
+    def objective(trial: "optuna.Trial") -> float:
+        ks, srs, dds, prs = _suggest_scales(trial, ranges)
+        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, cfg)
+        result["trial_number"] = trial.number
+        trial.set_user_attr("result", _native(result))
+        if not math.isfinite(score):
+            raise optuna.TrialPruned()
+        return score
+
+    study.optimize(objective, n_trials=n_trials_worker, n_jobs=1, show_progress_bar=False)
+
+
+def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler,
+                               seed, ranges, cfg, warm_start_ks, warm_start_srs):
+    """Process-parallel calibration: N worker processes over a shared Optuna RDB.
+
+    Threads are unsafe here (see :func:`_parallel_worker`); each worker is a
+    separate spawned process with its own interpreter and JAX state, so concurrent
+    trials cannot collide. Trial *order* across workers is non-deterministic
+    (inherent to parallel BO), but every fit is race-free and comes from the same
+    AutoEIS fitter as the real targets.
+    """
+    import optuna
+
+    n_workers = max(1, min(n_jobs, n_trials))
+    counts = _split_trials(n_trials, n_workers)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="botune_"))
+    storage_url = f"sqlite:///{tmp_dir / 'study.db'}"
+    study_name = f"tune_{uuid.uuid4().hex[:8]}"
+    storage = optuna.storages.RDBStorage(
+        storage_url, engine_kwargs={"connect_args": {"timeout": 60}})
+    study = optuna.create_study(study_name=study_name, storage=storage,
+                                direction="minimize", sampler=_make_sampler(sampler, seed))
+
+    if warm_start_ks and warm_start_srs:
+        warm_pairs = list(itertools.product(warm_start_ks, warm_start_srs))
+        log.info("Warm-starting BO with %d grid point(s): ks=%s  srs=%s",
+                 len(warm_pairs), warm_start_ks, warm_start_srs)
+        for ks_init, srs_init in warm_pairs:
+            study.enqueue_trial({"kinetics_scale": ks_init, "sei_rate_scale": srs_init,
+                                 "dead_li_decay_scale": 1.0, "plating_rate_scale": 1.0})
+
+    log.info("Starting process-parallel Optuna BO [%d worker process(es), n_trials=%d, "
+             "sampler=%s, preset=%s]", n_workers, n_trials, sampler, cfg["preset"])
+    ctx = multiprocessing.get_context("spawn")
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers,
+                                                    mp_context=ctx) as ex:
+            futures = [
+                ex.submit(_parallel_worker, study_name, storage_url, counts[i],
+                          seed + i + 1, sampler, ranges, cache, cfg)
+                for i in range(n_workers) if counts[i] > 0
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()   # re-raise any worker exception in the parent
+        results = [dict(t.user_attrs["result"])
+                   for t in study.get_trials(deepcopy=False)
+                   if "result" in t.user_attrs]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if not results:
+        raise RuntimeError(
+            "Process-parallel calibration produced no scored trials (every candidate "
+            "failed or was pruned). Re-run with n_jobs=1 to see per-trial logs.")
+    scored = sorted(
+        [(r, score_candidate(r, real_targets, cfg["preset"],
+                             cfg["crate_sensitivity_min"], cfg["real_crate2_slope"]))
+         for r in results],
+        key=lambda x: x[1])
+    best, best_score = scored[0]
+    log.info("Process-parallel BO done: %d trials collected, best score %.3f",
+             len(results), best_score)
+    return {"best": best, "best_score": best_score, "results": results, "scored": scored}
+
+
 def calibrate_oracle(
     cache: dict,
     real_targets: dict,
@@ -836,56 +1013,53 @@ def calibrate_oracle(
     (``config_oracle_defaults.yml`` ``ecm.circuit``) — pass ``cache.get("circuit")``
     when the cache was featurized with a specific circuit.
 
-    ``n_jobs`` runs trials concurrently via Optuna's threading backend
-    (``study.optimize(n_jobs=...)``). Each trial builds its own PyBaMMOracle
-    instance with no shared mutable state, so this is memory-safe; whether it is
-    faster depends on PyBaMM's solver releasing the GIL during its C++ compute —
-    benchmark with a short ``n_trials`` run before trusting it for a full
-    calibration. Default 1 (sequential).
+    ``n_jobs`` > 1 runs trials in parallel **processes** (not threads): each worker
+    is a spawned subprocess with its own interpreter, coordinating through a shared
+    temporary Optuna RDB. Threads are unsafe because AutoEIS's numpyro/JAX inference
+    keeps global + tracing state that races across threads — under the old thread
+    backend ~1 in 5 ECM fits silently fell back to the Randles stub (numpyro
+    param-store collisions, JAX tracer escapes), biasing the score and breaking
+    reproducibility. Each process worker gets its own JAX state, so concurrent
+    trials cannot collide; the trade-offs are per-worker JAX/PyBaMM import warmup
+    and non-deterministic trial *order* (inherent to any parallel BO). ``n_jobs=1``
+    (default) uses the fast in-memory single-process path with full per-trial logs.
     """
     import optuna
 
     circuit = _resolve_circuit(circuit or cache.get("circuit"))
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Everything a trial needs to evaluate + score a candidate, bundled so it is
+    # picklable and used verbatim by both the sequential objective and the parallel
+    # workers (keeps the two drivers from diverging).
+    cfg = {
+        "preset": preset, "circuit": circuit, "chemistry": chemistry,
+        "capacity_check": capacity_check,
+        "skip_crate_probe": skip_crate_probe, "crate_probe_cycles": crate_probe_cycles,
+        "crate_probe_low_c": crate_probe_low_c, "crate_probe_high_c": crate_probe_high_c,
+        "skip_crate2_slope": skip_crate2_slope, "crate2_probe_cycles": crate2_probe_cycles,
+        "crate2_levels": tuple(crate2_levels), "crate_sensitivity_min": crate_sensitivity_min,
+        "real_crate2_slope": real_crate2_slope, "real_targets": real_targets,
+    }
+    ranges = {"ks_min": ks_min, "ks_max": ks_max, "srs_min": srs_min, "srs_max": srs_max,
+              "dds_min": dds_min, "dds_max": dds_max, "prs_min": prs_min, "prs_max": prs_max}
+
+    if n_jobs and n_jobs > 1:
+        return _calibrate_oracle_parallel(
+            cache, real_targets, n_trials=n_trials, n_jobs=n_jobs, sampler=sampler,
+            seed=seed, ranges=ranges, cfg=cfg,
+            warm_start_ks=warm_start_ks, warm_start_srs=warm_start_srs)
+
+    # ── Sequential (single-process) path: identical search, full per-trial logs ──
     results: list[dict] = []
 
     def objective(trial: "optuna.Trial") -> float:
-        ks  = trial.suggest_float("kinetics_scale",      ks_min,  ks_max,  log=True)
-        srs = trial.suggest_float("sei_rate_scale",      srs_min, srs_max, log=True)
-        dds = trial.suggest_float("dead_li_decay_scale", dds_min, dds_max, log=True)
-        prs = trial.suggest_float("plating_rate_scale",  prs_min, prs_max, log=True)
+        ks, srs, dds, prs = _suggest_scales(trial, ranges)
         log.info(
             "── Trial %d/%d: ks=%.4f  srs=%.4f  dds=%.4f  prs=%.4f ──",
             trial.number + 1, n_trials, ks, srs, dds, prs,
         )
-        t0 = time.time()
-        result = run_oracle_candidate(cache, ks, srs, dds, prs, preset, capacity_check,
-                                      circuit=circuit, chemistry=chemistry)
-        if skip_crate_probe:
-            result["crate_probe_skipped"] = True
-            result["crate_sensitivity_ratio"] = None
-        else:
-            probe = run_crate_sensitivity_probe(
-                cache, ks, srs, dds, prs, preset, capacity_check,
-                probe_cycles=crate_probe_cycles,
-                low_c_mult=crate_probe_low_c, high_c_mult=crate_probe_high_c,
-                circuit=circuit, chemistry=chemistry,
-            )
-            result.update(probe)
-            result["crate_probe_skipped"] = False
-        if not skip_crate2_slope:
-            slope_probe = run_crate2_slope_probe(
-                cache, ks, srs, dds, prs, preset, capacity_check,
-                probe_cycles=crate2_probe_cycles,
-                c2_levels_mult=tuple(crate2_levels),
-                circuit=circuit, chemistry=chemistry,
-            )
-            result.update(slope_probe)
-        result["runtime_s"] = round(time.time() - t0, 1)
-        score = score_candidate(
-            result, real_targets, preset, crate_sensitivity_min, real_crate2_slope,
-        )
-        result["score"] = score if math.isfinite(score) else None
+        result, score = _evaluate_candidate(cache, ks, srs, dds, prs, cfg)
         result["trial_number"] = trial.number
         results.append(result)
         ratio = result.get("crate_sensitivity_ratio")
@@ -912,12 +1086,7 @@ def calibrate_oracle(
             raise optuna.TrialPruned()
         return score
 
-    opt_sampler = (
-        optuna.samplers.GPSampler(seed=seed)
-        if sampler == "gp"
-        else optuna.samplers.TPESampler(seed=seed, n_startup_trials=8)
-    )
-    study = optuna.create_study(direction="minimize", sampler=opt_sampler)
+    study = optuna.create_study(direction="minimize", sampler=_make_sampler(sampler, seed))
 
     # Warm-start: enqueue grid points from warm_start_ks / warm_start_srs
     if warm_start_ks and warm_start_srs:
@@ -932,9 +1101,9 @@ def calibrate_oracle(
                 "plating_rate_scale":  1.0,
             })
 
-    log.info("Starting Optuna BO [sampler=%s, n_trials=%d, n_jobs=%d, preset=%s]",
-             sampler, n_trials, n_jobs, preset)
-    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
+    log.info("Starting Optuna BO [sampler=%s, n_trials=%d, n_jobs=1, preset=%s]",
+             sampler, n_trials, preset)
+    study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=False)
 
     scored = sorted(
         [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope))
@@ -1311,8 +1480,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
                    choices=["nominal", "accelerated", "severe"])
     p.add_argument("--n-trials", type=int, default=35)
     p.add_argument("--n-jobs", type=int, default=1,
-                   help="Trials to run concurrently via Optuna's threading backend. "
-                        "See calibrate_oracle's docstring before trusting >1.")
+                   help="Parallel trials. >1 runs worker PROCESSES (not threads) over "
+                        "a shared Optuna store, since AutoEIS's numpyro/JAX inference "
+                        "is not thread-safe. Non-deterministic trial order; per-worker "
+                        "JAX/PyBaMM warmup. Default 1 (sequential, full per-trial logs).")
     p.add_argument("--summary-json", type=Path, default=None,
                    help="Optional path for the machine-readable calibration summary "
                         "JSON (consumed by battery-oracle-tune-plot).")
