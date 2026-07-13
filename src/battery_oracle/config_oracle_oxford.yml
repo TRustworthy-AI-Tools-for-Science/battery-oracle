@@ -1,0 +1,37 @@
+# Oxford Battery Degradation Dataset oracle calibration — PLACEHOLDER.
+#
+# Overrides config_oracle_defaults.yml for the Oxford dataset: Kokam 740 mAh
+# NMC/graphite pouch cells, 1C charge/discharge, 40 degC, fit against the
+# capacity-fade curve. Chen2020 (NMC811) is used as an NMC-class proxy.
+#
+# To calibrate:
+#   battery-oracle-tune --cache oxford.json --chemistry Chen2020 \
+#     --preset nominal --output-config src/battery_oracle/config_oracle_oxford.yml
+# Oxford ships capacity/cycling only (no EIS) — capacity-fade calibration only.
+
+cycling:
+  parameter_set: Chen2020
+  chemistry: Chen2020
+  temperature_K: 313.15            # 40 degC operating temperature
+
+degradation:
+  preset: nominal                  # slow fade at 40 degC; SEI-dominated
+  eol_capacity_fraction: 0.80
+  capacity_check: true
+
+protocol_scaling:
+  real_cell_capacity_mah_legacy_default: 740.0   # Kokam 740 mAh
+  kinetics_scale: 1.0
+  sei_rate_scale: 1.0
+  dead_li_decay_scale: 1.0
+  plating_rate_scale: 1.0
+
+_calibration:
+  status: "PLACEHOLDER — not yet calibrated (requires Oxford download + tune run)"
+  dataset: oxford
+  cells_used: "Kokam 740 mAh, 1C charge/discharge, 40 degC"
+  chemistry_note: "Chen2020 used as an NMC-class proxy for the Kokam NMC/graphite cell."
+  kinetics_scale:
+    status: "not calibrated — Oxford has no EIS; kinetics left at chemistry default"
+  capacity_fade:
+    status: "to be fit against the Oxford capacity-fade curve"

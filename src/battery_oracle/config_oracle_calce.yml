@@ -1,0 +1,39 @@
+# CALCE (CS2) oracle calibration — PLACEHOLDER (not yet calibrated).
+#
+# Overrides config_oracle_defaults.yml for the CALCE CS2 dataset (calce.umd.edu):
+# prismatic LCO/graphite cells, 1C CC-CV charge / 0.5C discharge, cycles 1-100.
+# CS2 is LCO/graphite; there is no LCO parameter set in PyBaMM's bundled sets, so
+# Chen2020 (NMC811) is used as an NMC-class proxy — a documented fidelity limit.
+#
+# The scales below are the chemistry DEFAULTS (uncalibrated). To calibrate:
+#   1. Download CALCE CS2 data; build a tune cache JSON (see the #12 adapter docs).
+#   2. battery-oracle-tune --cache calce.json --chemistry Chen2020 \
+#        --preset accelerated --output-config src/battery_oracle/config_oracle_calce.yml
+# NOTE: CALCE ships capacity/cycling only (no EIS), so a real tune calibrates
+# capacity-fade + EOL and leaves kinetics_scale at its default (see _calibration).
+
+cycling:
+  parameter_set: Chen2020
+  chemistry: Chen2020
+  temperature_K: 298.15
+
+degradation:
+  preset: accelerated
+  eol_capacity_fraction: 0.80
+  capacity_check: true
+
+protocol_scaling:
+  kinetics_scale: 1.0
+  sei_rate_scale: 1.0
+  dead_li_decay_scale: 1.0
+  plating_rate_scale: 1.0
+
+_calibration:
+  status: "PLACEHOLDER — not yet calibrated (requires CALCE download + tune run)"
+  dataset: calce
+  cells_used: "CS2 (1C CC-CV charge, 0.5C discharge, cycles 1-100)"
+  chemistry_note: "Chen2020 used as an NMC-class proxy for LCO/graphite CS2 cells."
+  kinetics_scale:
+    status: "not calibrated — CALCE has no EIS; kinetics left at chemistry default"
+  capacity_fade:
+    status: "to be fit against CS2 capacity-fade curve (cycles 1-100)"

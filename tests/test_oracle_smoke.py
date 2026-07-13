@@ -372,44 +372,6 @@ def test_dfn_solver_fallback_latches_to_spme():
     assert o._history[-1]["fidelity"] == "reduced"
 
 
-# ── Phase 3: detrended state output (#8) ───────────────────────────────────
-
-def test_detrend_warmup_then_group_ema():
-    """Exercise the detrend helper directly (no PyBaMM sims): the first
-    `detrend_warmup` calls use the global mean; afterwards k-means groups drive a
-    per-group EMA. NaN state slots (σ under the stub) stay NaN in the detrended
-    vector. reset() clears all accumulators."""
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, detrend_warmup=5, n_protocol_groups=3)
-    o.reset()
-    protos = [np.array([100., 50., 1., .5, 100., 1.]),
-              np.array([140., 70., 1., .5, 100., 1.])]
-    warmups, groups = [], []
-    for i in range(12):
-        state = np.array([0.1 + 0.001 * i, 1.0, 0.9, np.nan, np.nan, np.nan])
-        o._history.append({"call_idx": i})  # stand-in for the real per-call row
-        det, warm, grp = o._detrend_state(state, protos[i % 2])
-        warmups.append(warm)
-        groups.append(grp)
-        assert np.isnan(det[3:]).all()  # NaN σ slots propagate
-    # First 5 calls are warmup (global-mean reference, group -1); then grouped.
-    assert warmups[:5] == [True] * 5
-    assert warmups[5] is False and groups[5] >= 0
-    assert o._detrend_centroids is not None
-    # 2 unique protocols -> at most 2 groups even though n_protocol_groups=3.
-    assert o._detrend_centroids.shape[0] == 2
-    o.reset()
-    assert o._detrend_centroids is None
-    assert o._detrend_global_sum is None
-    assert o._detrend_group_ema == {}
-
-
-def test_detrend_config_wires_to_attrs():
-    o = PyBaMMOracle(detrend_alpha=0.2, n_protocol_groups=4, detrend_warmup=10)
-    assert o._detrend_alpha == pytest.approx(0.2)
-    assert o._n_protocol_groups == 4
-    assert o._detrend_warmup == 10
-
-
 # ── Phase 0: STATE_VECTOR_SCHEMA + ECM σ (#6) ──────────────────────────────
 
 def test_state_vector_schema_is_derived():
@@ -456,19 +418,20 @@ def test_returned_state_matches_schema_and_std_is_nan_for_stub():
 
 
 @pytest.mark.slow
-def test_detrend_true_returns_detrended_and_keeps_both_in_history():
-    """__call__(detrend=True) returns x_t - x_t_ref; history keeps raw + detrended."""
+def test_call_stores_raw_state_in_history():
+    """__call__ returns the raw state and keeps a copy in history under
+    'state_raw' — per-regime detrending now lives in traits_audit.RegimeDetrender,
+    fed by a digital-twin orchestrator from this raw per-cycle state history."""
     o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
     o.reset()
     try:
-        det = o(make_pybamm_candidates(n_candidates=1)[0], detrend=True)
+        state = o(make_pybamm_candidates(n_candidates=1)[0])
     except OracleFailure as exc:
         pytest.skip(f"oracle failed on first cycle: {exc}")
     h = o._history[-1]
-    assert len(det) == o.state_vector_len
-    assert "state_raw" in h and "state_detrended" in h
-    assert np.allclose(det, h["state_detrended"], equal_nan=True)
-    assert h["detrend_warmup"] is True  # first call is always warmup
+    assert len(state) == o.state_vector_len
+    assert "state_raw" in h
+    assert np.allclose(state, h["state_raw"], equal_nan=True)
 
 
 @pytest.mark.slow

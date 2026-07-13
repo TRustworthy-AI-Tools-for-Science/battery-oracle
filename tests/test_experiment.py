@@ -184,14 +184,6 @@ def test_base_oracle_yaml_emits_thermal_and_arrhenius():
     assert kw["E_a_electrolyte_J_per_mol"] == pytest.approx(15e3)
 
 
-def test_base_oracle_yaml_emits_detrend():
-    """#8: detrend config maps from the oracle YAML."""
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["detrend_alpha"] == pytest.approx(0.1)
-    assert kw["n_protocol_groups"] == 8
-    assert kw["detrend_warmup"] == 20
-
-
 def test_base_oracle_yaml_emits_chemistry():
     """#14: chemistry maps from the oracle YAML (defaults to Chen2020)."""
     kw = oracle_kwargs_from_oracle_config(load_oracle_config())

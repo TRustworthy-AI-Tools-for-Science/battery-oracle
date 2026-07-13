@@ -996,14 +996,6 @@ class PyBaMMOracle:
         ecm_rescale_target_r0: float | None = 0.1334,
         autoeis_num_warmup: int = 500,
         autoeis_num_samples: int = 200,
-        # -- Detrended state output (#8) --
-        # detrend=True on __call__ returns x_t - x_t_ref, where x_t_ref is a
-        # per-protocol-group exponential moving average (alpha ~= 10-cycle time
-        # constant). Groups are k-means centroids in the 6-D protocol space, fit
-        # on the first `detrend_warmup` calls; before that, the global mean is used.
-        detrend_alpha: float = 0.1,
-        n_protocol_groups: int = 8,
-        detrend_warmup: int = 20,
     ) -> None:
         self._pb = _pb
         # ECM circuit fitted to every spectrum + the protocol/action feature
@@ -1189,17 +1181,6 @@ class PyBaMMOracle:
         )
         self._autoeis_num_warmup = int(autoeis_num_warmup)
         self._autoeis_num_samples = int(autoeis_num_samples)
-        # Detrend (#8) config + accumulators (accumulators also cleared by reset()).
-        self._detrend_alpha = float(detrend_alpha)
-        self._n_protocol_groups = int(n_protocol_groups)
-        self._detrend_warmup = int(detrend_warmup)
-        self._detrend_protocols: list[np.ndarray] = []
-        self._detrend_states: list[np.ndarray] = []
-        self._detrend_centroids: np.ndarray | None = None
-        self._detrend_whiten_std: np.ndarray | None = None
-        self._detrend_group_ema: dict[int, np.ndarray] = {}
-        self._detrend_global_sum: np.ndarray | None = None
-        self._detrend_global_count: int = 0
         try:
             self._c20_A = float(self._pv["Nominal cell capacity [A.h]"]) / 20.0
         except Exception:
@@ -1329,78 +1310,6 @@ class PyBaMMOracle:
             self._crack_sei_R_base = 0.0
             self._dead_li_to_R     = 0.0
 
-    def _fit_detrend_groups(self) -> None:
-        """Fit k-means protocol-group centroids on the buffered warmup protocols
-        (scipy.cluster.vq; whitened so mA/hour/K scales don't dominate) and seed
-        each group's EMA with the mean warmup state of its members. Frozen after
-        warmup; later protocols snap to the nearest centroid. Deterministic (seed).
-        """
-        from scipy.cluster.vq import kmeans2
-        protos = np.asarray(self._detrend_protocols, dtype=float)
-        if protos.shape[0] < 1:
-            return
-        std = protos.std(axis=0)
-        std[std < 1e-12] = 1.0            # avoid divide-by-zero on constant dims
-        self._detrend_whiten_std = std
-        w = protos / std
-        n_unique = len(np.unique(w, axis=0))
-        k = max(1, min(self._n_protocol_groups, n_unique))
-        centroids, labels = kmeans2(w, k, seed=0, minit="++", missing="warn")
-        self._detrend_centroids = np.asarray(centroids, dtype=float)
-        states = np.array([np.nan_to_num(s) for s in self._detrend_states])
-        global_mean = self._detrend_global_sum / max(self._detrend_global_count, 1)
-        for g in range(k):
-            mask = labels == g
-            self._detrend_group_ema[g] = (
-                states[mask].mean(axis=0) if mask.any() else global_mean
-            )
-
-    def _detrend_group(self, proto6: np.ndarray) -> int:
-        """Nearest protocol-group centroid for a 6-D protocol (whitened space)."""
-        from scipy.cluster.vq import vq
-        if self._detrend_centroids is None:
-            return -1
-        w = (proto6 / self._detrend_whiten_std)[None, :]
-        code, _ = vq(w, self._detrend_centroids)
-        return int(code[0])
-
-    def _detrend_state(self, state: np.ndarray, protocol: np.ndarray) -> tuple[np.ndarray, bool, int]:
-        """Return (detrended_state, is_warmup, group).
-
-        ``x_t_ref`` is the per-protocol-group EMA (decay ``detrend_alpha``); during
-        the first ``detrend_warmup`` calls it is the global mean of observed states.
-        NaN state slots (e.g. σ under the Randles stub) propagate as NaN in the
-        detrended vector — a downstream DMDc drops/imputes them. Call index is
-        ``len(self._history)`` (this call's row is already appended).
-        """
-        proto6 = np.asarray(protocol[:6], dtype=float)
-        safe = np.nan_to_num(state)
-        if self._detrend_global_sum is None or self._detrend_global_sum.shape != state.shape:
-            self._detrend_global_sum = np.zeros_like(state, dtype=float)
-            self._detrend_global_count = 0
-        self._detrend_global_sum = self._detrend_global_sum + safe
-        self._detrend_global_count += 1
-        # Buffer protocols/states only until the (one-time) k-means fit; afterwards
-        # they are dead weight, so stop growing them.
-        if self._detrend_centroids is None:
-            self._detrend_protocols.append(proto6)
-            self._detrend_states.append(safe)
-
-        n_calls = len(self._history)  # this call's row already appended above
-        global_mean = self._detrend_global_sum / max(self._detrend_global_count, 1)
-        if n_calls <= self._detrend_warmup:
-            if n_calls == self._detrend_warmup:
-                self._fit_detrend_groups()
-            return state - global_mean, True, -1
-
-        if self._detrend_centroids is None:      # <20 calls happened before groups fit
-            self._fit_detrend_groups()
-        group = self._detrend_group(proto6)
-        prev = self._detrend_group_ema.get(group, global_mean)
-        a = self._detrend_alpha
-        self._detrend_group_ema[group] = a * safe + (1.0 - a) * np.nan_to_num(prev)
-        return state - prev, False, group
-
     def _refresh_state_schema(self) -> None:
         """Recompute the returned-state layout from the circuit + active flags.
 
@@ -1485,14 +1394,6 @@ class PyBaMMOracle:
         self._degraded_to_spme = False
         self._spme_fallback_model = None
         self._spme_fallback_solver = None
-        # Detrend (#8) accumulators.
-        self._detrend_protocols = []
-        self._detrend_states = []
-        self._detrend_centroids = None
-        self._detrend_whiten_std = None
-        self._detrend_group_ema = {}
-        self._detrend_global_sum = None
-        self._detrend_global_count = 0
         self._build_native_state()
 
     # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah) --
@@ -1596,15 +1497,16 @@ class PyBaMMOracle:
         cycles = [steps] * self.n_cycles
         if self.capacity_check:
             cycles = [steps + self._cap_check_steps()] * self.n_cycles
-        # Log the sanitized step strings (not just the raw protocol) so a crash
-        # in the native solver — which leaves no Python traceback through this
-        # function — still shows exactly what currents/durations were fed in.
-        # log.info is suppressed here: oracle.py has no explicit handler/level,
-        # so its effective level falls back to logging.lastResort (WARNING+).
-        # Use warning so this diagnostic actually reaches stderr before any crash.
-        log.warning("[PyBaMMOracle] call %d: raw_protocol=%s steps=%s",
-                     len(self._history), np.array2string(np.asarray(protocol), precision=4),
-                     steps)
+        # Per-call trace of the sanitized step strings (not just the raw protocol):
+        # if the native solver crashes — leaving no Python traceback through this
+        # function — this shows exactly what currents/durations were fed in just
+        # before the crash. Emitted at DEBUG so it stays silent by default: a
+        # per-call WARNING floods notebooks and any library consumer (and, under
+        # process-parallel tuning, every worker). Opt back in for crash debugging
+        # with logging.getLogger("battery_oracle.oracle").setLevel(logging.DEBUG).
+        log.debug("[PyBaMMOracle] call %d: raw_protocol=%s steps=%s",
+                  len(self._history), np.array2string(np.asarray(protocol), precision=4),
+                  steps)
         return pb.Experiment(cycles)
 
     def _is_truncated(self, sol, experiment) -> bool:
@@ -1724,7 +1626,7 @@ class PyBaMMOracle:
         # Emergency (looser Casadi) succeeded — record the degrade, keep base fidelity.
         return sol, base_fid, FailureKind.SOLVER_DEGRADED
 
-    def __call__(self, protocol: np.ndarray, detrend: bool = False) -> np.ndarray:
+    def __call__(self, protocol: np.ndarray) -> np.ndarray:
         # Per-call fidelity/degradation status, recorded into this call's history
         # row. Reset to full fidelity every call; the DFN solver fallback (#4)
         # downgrades these when it drops to a looser solver or the SPMe fallback.
@@ -2196,18 +2098,11 @@ class PyBaMMOracle:
             "ecm_variables_discharge": _ecm_diag_dis.get("_raw_variables", []),
         })
 
-        # Detrended state (#8): per-protocol-group EMA reference. Always computed
-        # (cheap) so `detrend` can be toggled per call; both raw and detrended are
-        # kept in history so save_to_csv/DMDc can pick either. detrend_warmup flags
-        # the first `detrend_warmup` steps (global-mean reference, before k-means).
-        detrended, warmup, group = self._detrend_state(state, protocol)
-        self._history[-1].update({
-            "state_raw":       state.copy(),
-            "state_detrended": detrended.copy(),
-            "detrend_warmup":  warmup,
-            "detrend_group":   group,
-        })
-        return detrended if detrend else state
+        # Raw state, kept in history for downstream consumers (e.g. a
+        # digital-twin orchestrator building an augmented-state trajectory
+        # for traits_audit.RegimeDetrender / DMDc — see battery-forecast).
+        self._history[-1]["state_raw"] = state.copy()
+        return state
 
     # ── CSV export ───────────────────────────────────────────────────────────
 
@@ -2391,7 +2286,7 @@ class PyBaMMOracle:
                             # array-valued state blocks (keep the diagnostics CSV scalar)
                             "ecm_params_charge", "ecm_params_discharge",
                             "ecm_std_charge", "ecm_std_discharge",
-                            "state_raw", "state_detrended", "drt_peaks",
+                            "state_raw", "drt_peaks",
                         )
                     }
                     proto = np.asarray(h.get("protocol", []))
