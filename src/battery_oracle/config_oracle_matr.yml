@@ -1,0 +1,17 @@
+# Per-dataset calibration config for MATR/CHADA (LFP, Prada2013 parameter set).
+#
+# This file is loaded by battery_oracle.experiment._resolve_dataset_config("matr")
+# and overlays config_oracle_defaults.yml. Only fields that differ from the defaults
+# need to appear here.  See config_oracle_defaults.yml for all available knobs.
+#
+# LFP (A123 ANR26650M1-B) uses a ~2.0–3.65 V window, which is incompatible with
+# the default NMC 3.0–4.3 V bounds. v_charge_max and v_discharge_min are overridden
+# here accordingly.
+
+cycling:
+  parameter_set: Prada2013         # A123 LFP, 2.3 Ah
+  chemistry: Prada2013             # must agree with parameter_set (validated at build)
+
+protocol_bounds:
+  v_charge_max: 3.65               # LFP upper cutoff (V) — replaces NMC default 4.3 V
+  v_discharge_min: 2.0             # LFP lower cutoff (V) — replaces NMC default 3.0 V
