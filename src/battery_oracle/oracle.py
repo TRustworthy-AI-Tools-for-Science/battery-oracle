@@ -88,6 +88,15 @@ except ImportError:
     _ae_utils = None
     _AUTOEIS_AVAILABLE = False
 
+# AutoEIS's numpyro/JAX inference keeps global (param-store) and tracing state that
+# is NOT thread-safe: two threads fitting concurrently collide with "all sites must
+# have unique names" / JAX tracer-escape errors, silently degrading a fit to the
+# Randles stub. The tune engine now parallelises by process (each has its own JAX
+# state), but this module-level lock defends any in-process threaded caller (e.g. a
+# threaded active-learning loop) by serialising the inference call. Within a single
+# process it is uncontended, so it costs nothing on the common path.
+_AUTOEIS_INFERENCE_LOCK = threading.Lock()
+
 # Monkeypatch autoeis.utils.initialize_priors to fix excessively wide prior —
 # same fix as inference.py's training-path patch (see that module for the
 # full bug writeup). Without this, _autoeis_ecm's admittance terms (P0w/P1w/
@@ -421,12 +430,16 @@ def _autoeis_ecm(
     _raw_samples: dict | None = None
     _variables: list[str] = []
     try:
-        results = _autoeis.perform_bayesian_inference(
-            circuit, frequencies, Z,
-            p0=p0,
-            num_warmup=num_warmup, num_samples=num_samples,
-            progress_bar=False, parallel=False,
-        )
+        # Serialise the numpyro/JAX inference: its global param-store + tracing
+        # state is not thread-safe (see _AUTOEIS_INFERENCE_LOCK). Uncontended in the
+        # single-threaded-per-process tune workers; guards any threaded caller.
+        with _AUTOEIS_INFERENCE_LOCK:
+            results = _autoeis.perform_bayesian_inference(
+                circuit, frequencies, Z,
+                p0=p0,
+                num_warmup=num_warmup, num_samples=num_samples,
+                progress_bar=False, parallel=False,
+            )
         _raw_samples = results[0].samples
         _variables = list(results[0].variables)
         # Restore resistances to the oracle's native impedance scale. Admittances
