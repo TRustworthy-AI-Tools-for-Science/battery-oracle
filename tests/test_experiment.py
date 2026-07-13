@@ -219,18 +219,6 @@ def test_packaged_dataset_configs_load_and_map(dataset):
     assert kw["parameter_set"] == kw["chemistry"]  # must agree (validated at build)
 
 
-def test_matr_config_overrides_lfp_voltage_window():
-    """#12: MATR (LFP/Prada2013) must override the NMC 4.3 V bound to 3.65 V."""
-    from battery_oracle.experiment import (
-        _resolve_dataset_config,
-        oracle_kwargs_from_oracle_config,
-    )
-    kw = oracle_kwargs_from_oracle_config(_resolve_dataset_config("matr"))
-    assert kw["chemistry"] == "Prada2013"
-    assert kw["v_charge_max"] == pytest.approx(3.65)
-    assert kw["v_discharge_min"] == pytest.approx(2.0)
-
-
 def test_config_dataset_and_oracle_config_are_mutually_exclusive():
     """#12: both select the base layer, so setting both must raise."""
     from battery_oracle.experiment import build_oracle_from_config

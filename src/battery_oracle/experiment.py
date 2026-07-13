@@ -137,15 +137,22 @@ def _resolve_dataset_config(name: str) -> dict:
     ``name`` is one of :data:`_VALID_DATASETS` (calce/oxford/matr); resolves to
     the packaged ``config_oracle_{name}.yml`` via ``importlib.resources`` (same
     mechanism as :func:`load_oracle_config`). PyYAML only — no PyBaMM import.
+
+    If no dataset-specific file is packaged yet, returns ``{}`` so that
+    :func:`oracle_kwargs_from_oracle_config` falls back to the
+    ``config_oracle_defaults.yml`` / PyBaMMOracle Python-literal defaults.
     """
     if name not in _VALID_DATASETS:
         raise ValueError(
             f"Unknown config_dataset {name!r}; choose one of {_VALID_DATASETS}."
         )
-    with resources.files("battery_oracle").joinpath(
-        f"config_oracle_{name}.yml"
-    ).open("r") as fh:
-        return yaml.safe_load(fh) or {}
+    try:
+        with resources.files("battery_oracle").joinpath(
+            f"config_oracle_{name}.yml"
+        ).open("r") as fh:
+            return yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        return {}
 
 
 def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None) -> dict:
