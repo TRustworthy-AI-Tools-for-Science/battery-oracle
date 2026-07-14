@@ -198,6 +198,9 @@ def test_sanitisation_warns_once_then_dedupes(caplog):
     DEBUG-level repeat) -- see PyBaMMOracle._warn_clamps."""
     o = PyBaMMOracle()
     bad = np.array([999_999.0, 250.0, 0.25, 0.25, 500.0, 1.0])  # C1 wildly out of bounds
+    # Clear any constructor-time warnings (e.g. autoeis-not-installed) so only
+    # the _protocol_to_experiment sanitisation warnings are counted below.
+    caplog.clear()
 
     with caplog.at_level(logging.DEBUG, logger="battery_oracle.oracle"):
         o._protocol_to_experiment(bad)
