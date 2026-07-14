@@ -79,6 +79,10 @@ eis:
   E_a_electrolyte_J_per_mol: 15000.0  # electrolyte/ohmic intercept activation energy
   noise_level: 0.02                # fractional amplitude; mimics ~2% potentiostat noise typical of lab EIS
   noise_model: combined            # white | flicker | combined | none
+  # Seeds the synthetic EIS noise generator (white/flicker/relaxation-drift
+  # terms) and, when the default AutoEIS ecm fitter is used, its MCMC sampler
+  # too -- see PyBaMMOracle(seed=...). null (default) leaves both unseeded.
+  seed: null
   # "combined" noise budget split between the flicker (1/f) and white terms.
   noise_combined_flicker_frac: 0.75
   noise_combined_white_frac: 0.25
