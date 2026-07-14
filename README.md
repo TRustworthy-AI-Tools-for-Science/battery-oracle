@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Built with PyBaMM](https://img.shields.io/badge/built%20with-PyBaMM-orange)](https://www.pybamm.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle)
+[![PyPI](https://img.shields.io/pypi/v/battery-oracle)](https://pypi.org/project/battery-oracle/)
 
 A standalone PyBaMM/SPMe battery oracle. Given a 6-D charge/discharge protocol
 it runs a PyBaMM single-particle-with-electrolyte (SPMe) simulation, synthesises
@@ -20,19 +20,19 @@ digital twin.
 
 ## Install
 
-Managed with [uv](https://docs.astral.sh/uv/):
+```bash
+pip install battery-oracle                    # core (PyBaMM + Randles-stub ECM)
+pip install "battery-oracle[autoeis,tune]"     # + Bayesian ECM fitting + Optuna calibration
+```
+
+For development (editable install, all extras), managed with
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync                          # core (PyBaMM + Randles-stub ECM)
 uv sync --extra autoeis          # + Bayesian ECM fitting (AutoEIS)
 uv sync --extra tune             # + Optuna calibration engine
 uv sync --extra drt              # + DRT peaks (hybrid-drt)
-```
-
-or with pip:
-
-```bash
-pip install "battery-oracle[autoeis,tune] @ git+https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle.git"
 ```
 
 ### Extras
@@ -47,17 +47,38 @@ pip install "battery-oracle[autoeis,tune] @ git+https://github.com/TRustworthy-A
 ## Usage
 
 ```python
-from battery_oracle import PyBaMMOracle, make_pybamm_candidates
+from battery_oracle import PyBaMMOracle, Protocol
 
-oracle = PyBaMMOracle(degradation_preset="accelerated")
-oracle.reset()
-for protocol in make_pybamm_candidates():      # 6-D protocol grid
-    oracle(protocol)                           # runs SPMe → EIS → ECM
-    print(oracle._history[-1]["end_soh"])
+oracle = PyBaMMOracle(degradation_preset="accelerated")  # ready to call immediately
+
+protocol = Protocol(
+    charge_current_1_mA=1000.0, charge_current_2_mA=500.0,
+    charge_duration_1_h=0.25, charge_duration_2_h=0.25,
+    discharge_current_mA=1000.0, discharge_duration_h=1.0,
+)
+result = oracle.run_cycle(protocol)   # runs SPMe → EIS → ECM
+print(result.soh)
+```
+
+`oracle.run_cycle(...)` returns a `CycleResult` with named fields (`soh`,
+`soc_charge`, `soc_discharge`, `capacity_ah`, `eis_charge`/`eis_discharge`,
+`ecm_charge`/`ecm_discharge`, `protocol_applied`, ...) instead of a bare array.
+The original array-in/array-out contract (`oracle(protocol) -> np.ndarray`,
+also accepting a raw `np.ndarray`/sequence) is unchanged and still supported —
+it's what a downstream active-learning/DMDc loop consumes:
+
+```python
+from battery_oracle import make_pybamm_candidates
+
+for u in make_pybamm_candidates():   # 6-D protocol grid, as plain arrays
+    state = oracle(u)                # -> np.ndarray, unchanged contract
 ```
 
 The ECM circuit is configurable (`PyBaMMOracle(circuit="R1-[R2,P3]-[R4,P5]", ...)`);
-it defaults to `battery_oracle.DEFAULT_CIRCUIT`.
+it defaults to `battery_oracle.DEFAULT_CIRCUIT`. A fully-configured oracle can
+also be built directly from a calibration YAML with
+`PyBaMMOracle.from_config()` (packaged defaults), `.from_config("calce")`
+(a packaged per-dataset calibration), or `.from_config("my_cell.yml")`.
 
 The reduced-order model is selectable with `model="SPMe"` (default), `"SPM"`, or
 `"DFN"` — see the [model docs](https://trustworthy-ai-tools-for-science.github.io/battery-oracle/models.html)
@@ -70,8 +91,10 @@ degradation, EIS, ECM, and one or more 6-D protocols) that the package can execu
 
 ```python
 from battery_oracle import run_experiment
-history = run_experiment("config_experiment_defaults.yml")
+history = run_experiment()   # runs the packaged config_experiment_defaults.yml
 ```
+
+Pass a path (`run_experiment("my_experiment.yml")`) to run a custom protocol file.
 
 ## Documentation
 
@@ -106,6 +129,27 @@ battery-oracle-tune --cache real_ecm.json --output-config config_oracle_mycell.y
 
 Building the cache from a specific dataset (e.g. jones2022) is the caller's job;
 see the `battery_forecast` jones2022 adapter for an example.
+
+## Physics scope
+
+Be aware of what the oracle does and doesn't model before trusting it beyond a
+demonstration/AL-loop role:
+
+- The shipped degradation presets (`nominal`/`accelerated`/`severe`) are
+  calibrated against the **Chen2020 (LG M50, NMC811/graphite) parameter set**
+  running **SPMe**. Other chemistries (`Xu2019`, `Prada2013`/LFP) and other
+  models (`SPM`, `DFN`) run, but with an uncalibrated degradation trajectory —
+  pair them with their own calibration YAML (see `config_oracle_matr.yml` for
+  an LFP example) rather than trusting the default preset's cycle-to-EOL count.
+- **Particle cracking / active-material-loss (LAM) submodels are currently
+  disabled in every preset.** This works around an upstream PyBaMM regression
+  in the particle-mechanics ("swelling and cracking") submodel — see the
+  comment in `_build_degradation_config` (`src/battery_oracle/oracle.py`) for
+  the full writeup. Capacity fade in the shipped presets comes from SEI growth
+  and lithium plating only; mechanical-stress-driven fade is not represented
+  (an optional, explicitly-disabled-by-default `dod_lam_scale` term
+  approximates depth-of-discharge-driven LAM as a stand-in — see its
+  docstring in `PyBaMMOracle.__init__` before enabling it).
 
 ## License
 
