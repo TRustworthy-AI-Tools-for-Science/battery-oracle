@@ -1072,6 +1072,8 @@ class PyBaMMOracle:
         solver itself has its own, separate (unseeded) internal stochasticity.
         Default ``None`` (unseeded, ``np.random.default_rng()``).
 
+    Notes
+    -----
     Every kwarg not documented above (solver tolerances, protocol
     current/voltage/duration bounds, the first-call ``initial_soc``, SOC/LAM
     clip bounds, the combined-noise split, linKK validation params, the
