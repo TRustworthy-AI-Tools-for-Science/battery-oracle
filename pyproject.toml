@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "battery-oracle"
-version = "0.3.0"
+version = "0.4.0"
 description = "Standalone PyBaMM/SPMe battery oracle (simulator) + EIS + ECM fitting, with an Optuna calibration engine."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,13 +12,20 @@ license = { text = "MIT" }
 authors = [
     { name = "Ashley Dale", email = "ashley.dale@utoronto.ca" },
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "numpy>=2.0.0",
     "pandas",
     "scipy>=1.10.0",
     "matplotlib",
     "impedance",
-    "pybamm>=26.4.3",
+    "pybamm>=26.4.3,<27",
     "pyyaml",
 ]
 
@@ -30,10 +37,10 @@ autoeis = [
     "mpire>=2.10.0",
 ]
 # Distribution-of-relaxation-times peaks (get_drt_impedance). Lazy-imported; DRT
-# peaks are simply omitted when absent.
+# peaks are simply omitted when absent. The DRT libraries themselves are not on
+# PyPI, so they must be installed manually:
+#   pip install "hybrid-drt @ git+https://github.com/jdhuang-csm/hybrid-drt.git" "Mittag-Leffler @ git+https://github.com/jdhuang-csm/mittag-leffler.git"
 drt = [
-    "hybrid-drt @ git+https://github.com/jdhuang-csm/hybrid-drt.git",
-    "Mittag-Leffler @ git+https://github.com/jdhuang-csm/mittag-leffler.git",
     "tqdm",
 ]
 # Oracle calibration engine (battery_oracle.tune / battery-oracle-tune CLI).
@@ -74,9 +81,6 @@ dev = [
 [tool.uv.sources]
 hybrid-drt     = { git = "https://github.com/jdhuang-csm/hybrid-drt.git" }
 "Mittag-Leffler" = { git = "https://github.com/jdhuang-csm/mittag-leffler.git" }
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/battery_oracle"]

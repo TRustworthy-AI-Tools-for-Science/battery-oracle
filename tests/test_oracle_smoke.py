@@ -13,8 +13,8 @@ from battery_oracle import (
     FailureKind,
     OracleFailure,
     PyBaMMOracle,
-    _randles_stub_ecm,
     make_pybamm_candidates,
+    randles_stub_ecm,
     state_vector_schema,
 )
 from battery_oracle._circuit import _param_labels_from_circuit
@@ -63,15 +63,15 @@ def test_model_kwarg_rejects_unknown():
 @pytest.mark.slow
 def test_one_cycle_runs_spm():
     """Run a single SPM cycle (new model kwarg) with the Randles stub."""
-    oracle = PyBaMMOracle(model="SPM", ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle = PyBaMMOracle(model="SPM", ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     protocol = make_pybamm_candidates(n_candidates=1)[0]
     try:
         oracle(protocol)
     except OracleFailure as exc:
         pytest.skip(f"SPM oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert len(oracle._history) == 1
-    assert oracle._history[-1]["model"] == "SPM"
+    assert len(oracle.history) == 1
+    assert oracle.history[-1]["model"] == "SPM"
 
 
 def test_build_degradation_config_default_matches_module_dict():
@@ -161,7 +161,7 @@ def test_randles_stub_shape():
     freq = np.logspace(-2, 4, 30)
     # Simple synthetic spectrum: ohmic + one decaying arc
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
-    out = _randles_stub_ecm(freq, Z.real, Z.imag)
+    out = randles_stub_ecm(freq, Z.real, Z.imag)
     assert out.shape == (14,)   # 7-param DEFAULT_CIRCUIT half, duplicated chg/dis
     assert np.all(np.isfinite(out))
 
@@ -170,7 +170,7 @@ def test_randles_stub_circuit_generic():
     """The stub derives its layout from the circuit — legacy 9-param still works."""
     freq = np.logspace(-2, 4, 30)
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
-    out = _randles_stub_ecm(freq, Z.real, Z.imag, circuit="R1-P2-[R3,P4]-[R5,P6]")
+    out = randles_stub_ecm(freq, Z.real, Z.imag, circuit="R1-P2-[R3,P4]-[R5,P6]")
     assert out.shape == (18,)
     assert np.all(np.isfinite(out))
     # Ohmic R lands in slot 0 (HF intercept); the two arc Rs split the LF rise 0.6/0.4
@@ -327,14 +327,14 @@ def test_dfn_current_ceiling_tighter_than_spme():
 def test_one_cycle_runs_dfn():
     """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works;
     the 3-tier fallback is only for failures)."""
-    oracle = PyBaMMOracle(model="DFN", ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
         state = oracle(make_pybamm_candidates(n_candidates=1)[0])
     except OracleFailure as exc:
         pytest.skip(f"DFN oracle reported EOL/solver failure on the first cycle: {exc}")
     assert len(state) == oracle.state_vector_len
-    h = oracle._history[-1]
+    h = oracle.history[-1]
     assert h["model"] == "DFN"
     # If DFN succeeded outright it's full fidelity + not degraded; if it fell back
     # it would be reduced — either way the run completes without raising.
@@ -346,7 +346,7 @@ def test_dfn_solver_fallback_latches_to_spme():
     """When both DFN solver tiers fail, the oracle falls back to SPMe (reduced
     fidelity, SOLVER_DEGRADED) and latches there for subsequent calls."""
     from battery_oracle import FailureKind
-    o = PyBaMMOracle(model="DFN", ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    o = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
 
     class _Boom:
@@ -360,7 +360,7 @@ def test_dfn_solver_fallback_latches_to_spme():
         o(proto)
     except OracleFailure as exc:
         pytest.skip(f"SPMe fallback itself failed on this protocol: {exc}")
-    h = o._history[-1]
+    h = o.history[-1]
     assert o._degraded_to_spme is True
     assert h["fidelity"] == "reduced"
     assert h["failure_kind"] == FailureKind.SOLVER_DEGRADED
@@ -369,7 +369,7 @@ def test_dfn_solver_fallback_latches_to_spme():
         o(proto)
     except OracleFailure as exc:
         pytest.skip(f"latched SPMe step failed: {exc}")
-    assert o._history[-1]["fidelity"] == "reduced"
+    assert o.history[-1]["fidelity"] == "reduced"
 
 
 # ── Phase 0: STATE_VECTOR_SCHEMA + ECM σ (#6) ──────────────────────────────
@@ -399,7 +399,7 @@ def test_state_vector_len_tracks_circuit():
 def test_returned_state_matches_schema_and_std_is_nan_for_stub():
     """Under the Randles stub the returned width equals state_vector_len and
     the σ slots are NaN (no AutoEIS posterior). Asserts against derived length."""
-    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
         state = oracle(make_pybamm_candidates(n_candidates=1)[0])
@@ -412,7 +412,7 @@ def test_returned_state_matches_schema_and_std_is_nan_for_stub():
     assert np.isnan(state[lo2:hi2]).all()
     # Means are finite.
     assert np.isfinite(state[: oracle.state_vector_schema["means_discharge"][1]]).all()
-    h = oracle._history[-1]
+    h = oracle.history[-1]
     assert h["failure_kind"] is None and h["fidelity"] == "full"
     assert "ecm_std_charge" in h and "ecm_std_discharge" in h
 
@@ -422,13 +422,13 @@ def test_call_stores_raw_state_in_history():
     """__call__ returns the raw state and keeps a copy in history under
     'state_raw' — per-regime detrending now lives in traits_audit.RegimeDetrender,
     fed by a digital-twin orchestrator from this raw per-cycle state history."""
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
     try:
         state = o(make_pybamm_candidates(n_candidates=1)[0])
     except OracleFailure as exc:
         pytest.skip(f"oracle failed on first cycle: {exc}")
-    h = o._history[-1]
+    h = o.history[-1]
     assert len(state) == o.state_vector_len
     assert "state_raw" in h
     assert np.allclose(state, h["state_raw"], equal_nan=True)
@@ -439,7 +439,7 @@ def test_lumped_thermal_populates_t_cell():
     """A lumped-thermal cycle surfaces T_cell_K in history + the state vector,
     and the state width equals the schema (schema-derived, no magic number)."""
     o = PyBaMMOracle(thermal="lumped", T_ambient_K=308.15,
-                     ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+                     ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
     try:
         state = o(make_pybamm_candidates(n_candidates=1)[0])
@@ -447,7 +447,7 @@ def test_lumped_thermal_populates_t_cell():
         pytest.skip(f"lumped-thermal cycle failed: {exc}")
     assert len(state) == o.state_vector_len
     lo, hi = o.state_vector_schema["T_cell_K"]
-    t_cell = o._history[-1]["T_cell_K"]
+    t_cell = o.history[-1]["T_cell_K"]
     assert state[lo] == pytest.approx(t_cell)
     # Cell self-heats to at or above ambient.
     assert t_cell >= 308.15 - 1.0
@@ -457,7 +457,7 @@ def test_lumped_thermal_populates_t_cell():
 def test_one_cycle_runs():
     """Run a single SPMe cycle with the Randles stub and check the history entry."""
     oracle = PyBaMMOracle(
-        ecm_model_fn=_randles_stub_ecm,
+        ecm_model_fn=randles_stub_ecm,
         degradation_preset="accelerated",
         capacity_check=False,
     )
@@ -467,8 +467,8 @@ def test_one_cycle_runs():
         oracle(protocol)
     except OracleFailure as exc:
         pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert len(oracle._history) == 1
-    h = oracle._history[-1]
+    assert len(oracle.history) == 1
+    h = oracle.history[-1]
     assert "end_soh" in h
     assert h["ecm_params_charge"] is not None
     assert len(h["ecm_params_charge"]) == len(oracle._ecm_param_names)
@@ -478,13 +478,13 @@ def test_one_cycle_runs():
 def test_save_to_csv(tmp_path):
     """save_to_csv is a @staticmethod (called as PyBaMMOracle.save_to_csv(...))."""
     import pandas as pd
-    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, capacity_check=False)
+    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
         oracle(make_pybamm_candidates(n_candidates=1)[0])
     except OracleFailure as exc:
         pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-    out = PyBaMMOracle.save_to_csv(oracle._history, tmp_path / "rec.csv", cell_id="C01")
+    out = PyBaMMOracle.save_to_csv(oracle.history, tmp_path / "rec.csv", cell_id="C01")
     df = pd.read_csv(out)
     assert len(df) == 1
     assert df["circuit"].iloc[0] == DEFAULT_CIRCUIT

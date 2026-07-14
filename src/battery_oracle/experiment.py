@@ -17,7 +17,7 @@ PyBaMM-free and unit-testable in isolation:
 Example
 -------
     from battery_oracle import run_experiment
-    history = run_experiment("config_experiment_defaults.yml")
+    history = run_experiment()  # runs the packaged config_experiment_defaults.yml
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ import numpy as np
 import yaml
 
 from battery_oracle._circuit import DEFAULT_CIRCUIT
+from battery_oracle.protocol import PROTOCOL_FIELD_NAMES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from battery_oracle.oracle import PyBaMMOracle
@@ -41,11 +42,21 @@ _ORACLE_CONFIG_NAME = "config_oracle_defaults.yml"
 # still derived from the string, so nothing downstream hard-codes an element count.
 _FALLBACK_ECM_CIRCUIT = DEFAULT_CIRCUIT
 
-# 6-D protocol field order — matches PyBaMMOracle / ACTION_FEATURE_NAMES:
-#   [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]
-_PROTOCOL_FIELDS = (
-    "C_rate_1_mA", "C_rate_2_mA", "dur_1_h", "dur_2_h", "D_rate_mA", "dur_d_h",
-)
+# 6-D protocol field order in the experiment-YAML's field-name spelling. The
+# ORDER is not redefined here -- it is derived by iterating
+# battery_oracle.protocol.PROTOCOL_FIELD_NAMES (itself locked to
+# _circuit.ACTION_FEATURE_NAMES by an assertion in protocol.py), so there is
+# exactly one place the 6-D slot order is decided; this dict only supplies the
+# YAML's own field-name spelling for each canonical slot.
+_YAML_FIELD_NAME_BY_SLOT = {
+    "charge_current_1_mA":  "C_rate_1_mA",
+    "charge_current_2_mA":  "C_rate_2_mA",
+    "charge_duration_1_h":  "dur_1_h",
+    "charge_duration_2_h":  "dur_2_h",
+    "discharge_current_mA": "D_rate_mA",
+    "discharge_duration_h": "dur_d_h",
+}
+_PROTOCOL_FIELDS = tuple(_YAML_FIELD_NAME_BY_SLOT[slot] for slot in PROTOCOL_FIELD_NAMES)
 _VALID_MODELS = ("SPMe", "SPM", "DFN")
 _VALID_PRESETS = ("nominal", "accelerated", "severe")
 # Packaged per-dataset calibration configs (#12), selectable via config_dataset=.
@@ -138,9 +149,13 @@ def _resolve_dataset_config(name: str) -> dict:
     the packaged ``config_oracle_{name}.yml`` via ``importlib.resources`` (same
     mechanism as :func:`load_oracle_config`). PyYAML only — no PyBaMM import.
 
-    If no dataset-specific file is packaged yet, returns ``{}`` so that
-    :func:`oracle_kwargs_from_oracle_config` falls back to the
-    ``config_oracle_defaults.yml`` / PyBaMMOracle Python-literal defaults.
+    Raises
+    ------
+    FileNotFoundError
+        If ``name`` is valid but the calibration YAML for it isn't shipped in
+        this release — fails loudly rather than silently falling back to
+        defaults, since a caller requesting a specific dataset's calibration
+        should not silently get the generic defaults instead.
     """
     if name not in _VALID_DATASETS:
         raise ValueError(
@@ -152,7 +167,11 @@ def _resolve_dataset_config(name: str) -> dict:
         ).open("r") as fh:
             return yaml.safe_load(fh) or {}
     except FileNotFoundError:
-        return {}
+        raise FileNotFoundError(
+            f"calibration config 'config_oracle_{name}.yml' is not shipped in this "
+            "release; omit config_dataset to use the packaged defaults, or pass a "
+            "custom oracle_config path"
+        ) from None
 
 
 def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None) -> dict:
@@ -233,6 +252,7 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "frequencies": np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq),
         "eis_noise_level": float(eis.get("noise_level", 0.02)),
         "eis_noise_model": eis.get("noise_model", "combined"),
+        "seed": int(eis["seed"]) if eis.get("seed") is not None else None,
         "E_a_J_per_mol": float(eis.get("E_a_J_per_mol", 30e3)),
         "E_a_electrolyte_J_per_mol": float(eis.get("E_a_electrolyte_J_per_mol", 15e3)),
         "eis_drift_scale": float(eis.get("drift_scale", 0.0)),
@@ -408,6 +428,8 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     kwargs["frequencies"] = np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq)
     kwargs["eis_noise_level"] = float(eis.get("noise_level", kwargs["eis_noise_level"]))
     kwargs["eis_noise_model"] = eis.get("noise_model", kwargs["eis_noise_model"])
+    _seed = eis.get("seed", kwargs["seed"])
+    kwargs["seed"] = int(_seed) if _seed is not None else None
     kwargs["E_a_J_per_mol"] = float(eis.get("E_a_J_per_mol", kwargs["E_a_J_per_mol"]))
     kwargs["E_a_electrolyte_J_per_mol"] = float(
         eis.get("E_a_electrolyte_J_per_mol", kwargs["E_a_electrolyte_J_per_mol"])
@@ -549,13 +571,15 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     return PyBaMMOracle(**kwargs)
 
 
-def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
+def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> list[dict]:
     """Load a config, build the oracle, and run every protocol in order.
 
     Parameters
     ----------
-    path : str or Path
-        Path to the experiment YAML.
+    path : str, Path, or None, optional
+        Path to the experiment YAML. ``None`` (default) loads the packaged
+        ``config_experiment_defaults.yml`` via :func:`load_experiment_config`,
+        so the function runs a valid default experiment with no external file.
     reset : bool
         If ``True`` (default) call :meth:`PyBaMMOracle.reset` before the first
         protocol to start from a fresh cell.
@@ -563,7 +587,7 @@ def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
     Returns
     -------
     list of dict
-        The oracle history (``oracle._history``).  If the oracle reaches
+        The oracle history (``oracle.history``).  If the oracle reaches
         end-of-life (:class:`OracleFailure`) partway through, the loop stops and
         the history accumulated so far is returned.
     """
@@ -585,8 +609,8 @@ def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
             # step raises before appending). save_to_csv .get(...)-guards the ECM
             # fields, so this row exports as an ECM-zero row carrying failure_kind.
             fk = exc.failure_kind
-            oracle._history.append({
-                "call_idx":     len(oracle._history),
+            oracle.history.append({
+                "call_idx":     len(oracle.history),
                 "model":        getattr(oracle, "_model", None),
                 "failed":       True,
                 "failure_kind": fk,
@@ -598,4 +622,4 @@ def run_experiment(path: str | Path, *, reset: bool = True) -> list[dict]:
                 ),
             })
             break
-    return oracle._history
+    return oracle.history

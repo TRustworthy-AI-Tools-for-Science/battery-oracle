@@ -3,19 +3,22 @@
 Public
 ------
 OracleFailure           — raised when simulation fails; caller should end the AL loop
-PyBaMMOracle            — stateful battery oracle (SPMe → EIS → ECM)
+PyBaMMOracle            — stateful battery oracle (SPMe → EIS → ECM); see ``run_cycle``
+CycleResult             — named, schema-aware result of one ``PyBaMMOracle.run_cycle`` call
 make_pybamm_candidates  — build a 6-D protocol candidate grid for the CLI
+randles_stub_ecm        — fast analytic Randles fallback (no AutoEIS required)
+autoeis_ecm             — ECM fit via AutoEIS Bayesian inference; falls back to Randles stub
 
-Internal
---------
-_randles_stub_ecm  — fast analytic Randles fallback (no AutoEIS required)
-_autoeis_ecm       — ECM fit via AutoEIS Bayesian inference; falls back to Randles stub
+See also ``battery_oracle.protocol.Protocol`` (the named protocol-vector counterpart).
 """
 from __future__ import annotations
 
 import copy
 import logging
 import threading
+import types
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -55,29 +58,9 @@ from battery_oracle._eis.noise import (
     add_white_noise as _add_white_noise,
 )
 from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
+from battery_oracle.protocol import PROTOCOL_FIELD_NAMES, Protocol
 
 log = logging.getLogger(__name__)
-
-# Force mpire (used by AutoEIS) to spawn worker processes instead of forking.
-# On Linux the default is fork, which copies the parent's SUNDIALS/CasADi JIT
-# state to children at the same virtual addresses.  When the child touches
-# those addresses after the OS copy-on-write triggers, it segfaults — and the
-# shared-memory corruption can propagate back, killing the parent too.  Spawn
-# starts a fresh interpreter with no inherited native JIT state.
-# Must run before AutoEIS is imported, as mpire is pulled in at autoeis import.
-try:
-    import mpire as _mpire
-    _orig_wp_init = _mpire.WorkerPool.__init__
-    def _spawn_wp_init(self, *args, **kwargs):
-        kwargs.setdefault('start_method', 'spawn')
-        _orig_wp_init(self, *args, **kwargs)
-    _mpire.WorkerPool.__init__ = _spawn_wp_init
-    # Note: _orig_wp_init must stay defined at module scope — _spawn_wp_init
-    # looks it up via global lookup (not a closure, since it's defined here
-    # at module level, not nested in an enclosing function), so deleting it
-    # breaks the patched __init__ with NameError as soon as it's called.
-except Exception:
-    pass
 
 try:
     import autoeis as _autoeis
@@ -97,15 +80,50 @@ except ImportError:
 # process it is uncontended, so it costs nothing on the common path.
 _AUTOEIS_INFERENCE_LOCK = threading.Lock()
 
-# Monkeypatch autoeis.utils.initialize_priors to fix excessively wide prior —
-# same fix as inference.py's training-path patch (see that module for the
-# full bug writeup). Without this, _autoeis_ecm's admittance terms (P0w/P1w/
-# P2w below) draw from a ±12-decade log-normal and routinely converge 10-500x
-# away from the training distribution; this patch was previously applied to
-# the training featurization path only, never to the oracle's own AutoEIS
-# call, which is the root cause of that mismatch (see
-# project_oracle_p2_prior_mismatch memory / oracle-p2-prior-mismatch-fix plan).
-if _AUTOEIS_AVAILABLE:
+_AUTOEIS_PATCHED = False
+
+
+def _init_autoeis_patches() -> None:
+    """Apply the mpire/AutoEIS monkeypatches, once, on first AutoEIS use.
+
+    Deferred out of module import (previously these ran at ``import
+    battery_oracle`` time) so importing the package no longer mutates
+    third-party libraries as a side effect. Called from :func:`_autoeis_ecm`
+    before any AutoEIS use; a no-op if already patched or AutoEIS isn't
+    installed.
+    """
+    global _AUTOEIS_PATCHED
+    if _AUTOEIS_PATCHED or not _AUTOEIS_AVAILABLE:
+        return
+
+    # Force mpire (used by AutoEIS) to spawn worker processes instead of forking.
+    # On Linux the default is fork, which copies the parent's SUNDIALS/CasADi JIT
+    # state to children at the same virtual addresses.  When the child touches
+    # those addresses after the OS copy-on-write triggers, it segfaults — and the
+    # shared-memory corruption can propagate back, killing the parent too.  Spawn
+    # starts a fresh interpreter with no inherited native JIT state.
+    # Must run before AutoEIS is used, as mpire is pulled in at autoeis import.
+    try:
+        import mpire as _mpire
+        _orig_wp_init = _mpire.WorkerPool.__init__
+        def _spawn_wp_init(self, *args, **kwargs):
+            kwargs.setdefault('start_method', 'spawn')
+            _orig_wp_init(self, *args, **kwargs)
+        _mpire.WorkerPool.__init__ = _spawn_wp_init
+        # Note: _orig_wp_init must stay reachable — _spawn_wp_init looks it up
+        # via closure over this function's locals, so it must not be
+        # garbage-collected while the patched __init__ can still be called.
+    except Exception:
+        pass
+
+    # Monkeypatch autoeis.utils.initialize_priors to fix excessively wide prior —
+    # same fix as inference.py's training-path patch (see that module for the
+    # full bug writeup). Without this, _autoeis_ecm's admittance terms (P0w/P1w/
+    # P2w below) draw from a ±12-decade log-normal and routinely converge 10-500x
+    # away from the training distribution; this patch was previously applied to
+    # the training featurization path only, never to the oracle's own AutoEIS
+    # call, which is the root cause of that mismatch (see
+    # project_oracle_p2_prior_mismatch memory / oracle-p2-prior-mismatch-fix plan).
     def _corrected_initialize_priors(p0):
         priors = {}
         variables = [k for k in p0.keys() if _ae_utils.parser.validate_parameter(k, raises=False)]
@@ -120,6 +138,8 @@ if _AUTOEIS_AVAILABLE:
         return priors
 
     _ae_utils.initialize_priors = _corrected_initialize_priors
+
+    _AUTOEIS_PATCHED = True
 
 # The oracle fits the SAME AutoEIS circuit as the rest of the pipeline
 # (``battmap._DEFAULT_CIRCUIT``, from config/datasets.yaml) and returns its
@@ -358,6 +378,7 @@ def _autoeis_ecm(
     rescale_target_r0: float | None = _ECM_RESCALE_TARGET_R0,
     num_warmup: int = 500,
     num_samples: int = 200,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Fit ECM parameters to an EIS spectrum using AutoEIS Bayesian inference.
 
@@ -376,6 +397,13 @@ def _autoeis_ecm(
     constants (mirroring config_oracle_defaults.yml's ``ecm`` section);
     ``PyBaMMOracle`` passes its own (YAML-overridable) values here.
 
+    ``seed`` is forwarded to ``autoeis.perform_bayesian_inference``'s own
+    ``seed`` kwarg (its NumPyro/JAX MCMC sampler *does* accept one, despite
+    this module's noise-only ``PyBaMMOracle(seed=...)`` docs elsewhere
+    describing AutoEIS as unseeded — ``PyBaMMOracle`` draws a fresh int from
+    its noise RNG for each fit so the two stay in the same reproducible
+    stream). ``None`` (default) leaves the sampler unseeded.
+
     Falls back to :func:`_randles_stub_ecm` if AutoEIS inference fails.
     """
     if not _AUTOEIS_AVAILABLE:
@@ -383,6 +411,7 @@ def _autoeis_ecm(
             "autoeis is required for _autoeis_ecm. "
             "Install it or use _randles_stub_ecm as the ecm_model_fn."
         )
+    _init_autoeis_patches()
 
     circuit = circuit or _PROJECT_CIRCUIT
     cpe_w_seed = cpe_w_seed or _CPE_W_SEED
@@ -438,6 +467,7 @@ def _autoeis_ecm(
                 circuit, frequencies, Z,
                 p0=p0,
                 num_warmup=num_warmup, num_samples=num_samples,
+                seed=seed,
                 progress_bar=False, parallel=False,
             )
         _raw_samples = results[0].samples
@@ -500,6 +530,14 @@ def _autoeis_ecm(
         )
         return out, samples_out, _variables
     return out
+
+
+# Public aliases (A3.6: __all__ hygiene — no exported name should start with
+# an underscore). The underscore names remain the canonical definitions (used
+# throughout this module and in comparisons like ``self.ecm_model_fn is
+# _autoeis_ecm``); these are the names re-exported from the package root.
+randles_stub_ecm = _randles_stub_ecm
+autoeis_ecm = _autoeis_ecm
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +854,118 @@ def _build_degradation_config(
 
 
 # ---------------------------------------------------------------------------
+# CycleResult
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CycleResult:
+    """Named, schema-aware result of one :meth:`PyBaMMOracle.run_cycle` call.
+
+    ``PyBaMMOracle.__call__`` (the hard array-in/array-out compatibility
+    contract consumed by the downstream AL/DMDc loop) returns only
+    :attr:`state`; ``run_cycle`` returns the full ``CycleResult`` so a novice
+    caller doesn't have to reach into the private ``oracle._history`` list
+    (see :attr:`PyBaMMOracle.history`) to get the SOH, SOC, EIS spectra, or
+    fitted ECM parameters behind a given state vector.
+
+    Parameters
+    ----------
+    state : np.ndarray
+        The same vector ``PyBaMMOracle.__call__`` returns for this cycle
+        (``[means_charge | means_discharge | std_charge | std_discharge |
+        T_cell_K?]`` -- see :attr:`schema`).
+    schema : dict
+        The oracle's ``state_vector_schema`` at the time of this call (``{block
+        name: (lo, hi)}``); pass a block name to :meth:`block` to slice ``state``.
+    soh : float
+        State of health (1.0 = fresh cell) at the end of this cycle.
+    soc_charge, soc_discharge : float
+        Fractional state of charge read after the post-charge / post-discharge
+        rest.
+    capacity_ah : float
+        Measured or voltage-limited discharge capacity for this cycle, in Ah.
+    fidelity : str
+        ``"full"`` (primary solver/model succeeded) or ``"reduced"`` (a
+        solver/model fallback fired -- see ``FailureKind.SOLVER_DEGRADED``).
+    failure_kind : FailureKind or None
+        Non-fatal degradation classification recorded for this cycle, if any.
+        ``None`` for a full-fidelity cycle. (A *fatal* failure raises
+        :class:`OracleFailure` instead of returning a ``CycleResult``.)
+    protocol : np.ndarray
+        The protocol vector exactly as received by ``run_cycle`` (before
+        sanitisation).
+    protocol_applied : Protocol
+        The sanitised protocol actually simulated -- see
+        ``PyBaMMOracle._protocol_to_experiment`` and the loud-sanitisation
+        warning it emits when a value was clamped.
+    eis_charge, eis_discharge : tuple of (np.ndarray, np.ndarray)
+        ``(frequencies_hz, Z)`` for the post-charge / post-discharge
+        synthesised EIS spectrum; ``Z`` is complex (``Z.real``/``Z.imag`` in Ohm).
+    ecm_charge, ecm_discharge : dict of str to float
+        Fitted ECM parameter means for this cycle, keyed by the circuit's
+        AutoEIS parameter label (e.g. ``"R1"``, ``"P3w"``, ``"P3n"``).
+    ecm_std_charge, ecm_std_discharge : dict of str to float
+        Per-parameter AutoEIS posterior standard deviation, same keys as
+        :attr:`ecm_charge`/:attr:`ecm_discharge`. All-NaN values when AutoEIS
+        was unavailable and the Randles stub fitted instead.
+    raw : Mapping
+        The full per-cycle history row (read-only view; the same dict
+        appended to ``oracle.history``), for diagnostics not otherwise
+        surfaced above.
+
+    Examples
+    --------
+    >>> result = oracle.run_cycle(protocol)
+    >>> result.soh
+    0.97...
+    >>> np.asarray(result).shape == (oracle.state_vector_len,)
+    True
+    >>> result.block("means_charge").shape
+    (7,)
+    """
+
+    state: np.ndarray
+    schema: dict
+    soh: float
+    soc_charge: float
+    soc_discharge: float
+    capacity_ah: float
+    fidelity: str
+    failure_kind: "FailureKind | None"
+    protocol: np.ndarray
+    protocol_applied: Protocol
+    eis_charge: tuple
+    eis_discharge: tuple
+    ecm_charge: dict
+    ecm_discharge: dict
+    ecm_std_charge: dict
+    ecm_std_discharge: dict
+    raw: Mapping = field(default_factory=dict)
+
+    def __array__(self, dtype=None) -> np.ndarray:
+        """Allow ``np.asarray(result)`` to yield :attr:`state` directly."""
+        return np.asarray(self.state, dtype=dtype)
+
+    def block(self, name: str) -> np.ndarray:
+        """Slice :attr:`state` by schema block name (e.g. ``"means_charge"``).
+
+        Parameters
+        ----------
+        name : str
+            A key of :attr:`schema` (``"means_charge"``, ``"means_discharge"``,
+            ``"std_charge"``, ``"std_discharge"``, and ``"T_cell_K"`` when the
+            oracle uses lumped thermal).
+
+        Returns
+        -------
+        np.ndarray
+            ``state[lo:hi]`` for the block's ``(lo, hi)`` schema range.
+        """
+        lo, hi = self.schema[name]
+        return self.state[lo:hi]
+
+
+# ---------------------------------------------------------------------------
 # PyBaMMOracle
 # ---------------------------------------------------------------------------
 
@@ -824,8 +974,10 @@ class PyBaMMOracle:
 
     The oracle is **stateful**: each call runs ``n_cycles`` charge/discharge
     cycles starting from the cell state left by the previous call, so
-    degradation accumulates across active learning iterations.  Call
-    :meth:`reset` between experiments to start with a fresh cell.
+    degradation accumulates across active learning iterations. The
+    constructor already builds a fresh cell, so a new ``PyBaMMOracle(...)``
+    is ready to call immediately — :meth:`reset` is only needed to *reuse*
+    this instance for a new run starting from a fresh cell.
 
     If the PyBaMM simulation fails (even after an emergency retry with tighter
     solver settings), :class:`OracleFailure` is raised.  The caller should
@@ -865,6 +1017,13 @@ class PyBaMMOracle:
         EIS frequencies in Hz (default: 60 log-spaced from 0.01 to 10 000 Hz).
     parameter_values : pybamm.ParameterValues, optional
         PyBaMM parameter set (default: Chen2020).
+    chemistry : str
+        Cell chemistry — ``"Chen2020"`` (LG M50, NMC811/graphite, default),
+        ``"Xu2019"`` (NMC532), or ``"Prada2013"`` (A123 LFP); friendly aliases
+        ``"LGM50"``/``"NMC532"``/``"LFP"`` also accepted. Ignored if an
+        explicit ``parameter_values`` is passed. A non-default chemistry needs
+        its own calibration (degradation preset, voltage window) — see
+        :meth:`from_config` with a matching ``config_oracle_*.yml``.
     model : str
         Reduced-order PyBaMM model — ``"SPMe"`` (default, single particle with
         electrolyte), ``"SPM"`` (single particle, no electrolyte overpotential),
@@ -876,24 +1035,66 @@ class PyBaMMOracle:
         different cycle count under SPM or DFN.
     degradation_preset : str
         Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
-        or ``"severe"``.  See :func:`_build_degradation_config`.
+        or ``"severe"``.  See :func:`_build_degradation_config`. Calibrated for
+        SPMe; particle-cracking/LAM submodels are currently disabled in every
+        preset (see the comment in :func:`_build_degradation_config` — an
+        upstream PyBaMM regression workaround, not a design choice).
+    thermal : str
+        Thermal submodel — ``"isothermal"`` (default, cell held at
+        ``temperature_K``) or ``"lumped"`` (Timms 2021 lumped thermal ODE;
+        couples cell temperature to SEI/plating/electrolyte-conductivity
+        rates and surfaces ``T_cell_K`` in the state vector). See
+        ``T_ambient_K``/``h_total_W_per_m2K``.
     eol_capacity_fraction : float
         SOH threshold below which :class:`OracleFailure` is raised (default 0.80).
     capacity_check : bool
         If ``True``, append a C/20 reference discharge after each cycle to
         measure usable capacity directly.  Slower but more accurate.
     temperature_K : float
-        Ambient temperature in Kelvin (default 298.15 K = 25 °C).  Sets the
-        PyBaMM ``"Ambient temperature [K]"`` parameter.
+        Ambient temperature in Kelvin (default 298.15 K = 25 °C) when
+        ``thermal="isothermal"``.  Sets the PyBaMM ``"Ambient temperature [K]"``
+        parameter.
+    use_temperature_protocol : bool
+        If ``True`` (requires ``thermal="lumped"``), accept a 7-D protocol
+        vector whose slot 6 overrides the ambient temperature for that cycle
+        (see :class:`battery_oracle.protocol.Protocol`'s ``T_ambient_K`` field).
+        Default ``False`` (6-D protocols only).
+    eis_noise_level : float
+        Relative noise amplitude added to synthesised EIS spectra (default
+        0.02). See ``eis_noise_model`` for the noise mixture.
+    seed : int, optional
+        Seeds the synthetic EIS noise generator (``_eis/noise.py``'s white/
+        flicker/relaxation-drift terms). When the default ``ecm_model_fn``
+        (:func:`_autoeis_ecm`) is used, each fit also draws a fresh int seed
+        from this same RNG stream and forwards it to AutoEIS's
+        ``perform_bayesian_inference(..., seed=...)``, so a fixed ``seed``
+        reproduces both the EIS noise *and* the AutoEIS MCMC fit. The PyBaMM
+        solver itself has its own, separate (unseeded) internal stochasticity.
+        Default ``None`` (unseeded, ``np.random.default_rng()``).
 
     Every kwarg not documented above (solver tolerances, protocol
     current/voltage/duration bounds, the first-call ``initial_soc``, SOC/LAM
     clip bounds, the combined-noise split, linKK validation params, the
     degradation preset's numeric physics constants, and the ECM CPE fit
     seeds/AutoEIS sampler settings) is a lower-level constant documented in
-    ``config_oracle_defaults.yml`` — its default here matches that file's
-    documented value, and ``experiment.build_oracle_from_config`` overrides it
-    from the YAML (packaged or a user-supplied ``config_oracle_*.yml``).
+    ``config_oracle_defaults.yml``, grouped as:
+
+    * ``solver_*`` / ``dfn_solver_*`` / ``emergency_solver_*`` — solver tolerances
+      (YAML section ``solver``).
+    * ``c_min_mA`` / ``c_max_mA`` / ``dur_min_s`` / ``dur_max_s`` / ``v_charge_max`` /
+      ``v_discharge_min`` / ... — protocol sanitisation bounds (YAML ``protocol_bounds``).
+    * ``eis_*`` / ``noise_combined_*`` / ``linkk_*`` — EIS synthesis + validation
+      (YAML ``eis``).
+    * ``ecm_*`` / ``cpe_*`` / ``autoeis_*`` — ECM fit seeds and AutoEIS sampler
+      settings (YAML ``ecm``).
+    * ``*_scale`` (``kinetics_scale``, ``sei_rate_scale``, ``dead_li_decay_scale``,
+      ``plating_rate_scale``, ...) — degradation calibration scales (YAML
+      ``degradation`` / ``protocol_scaling``).
+
+    Each kwarg's default here matches ``config_oracle_defaults.yml``'s documented
+    value. Rather than passing these individually, prefer :meth:`from_config`
+    (or ``experiment.build_oracle_from_config``) to build a fully-configured
+    oracle from that YAML (packaged or a user-supplied ``config_oracle_*.yml``).
     """
 
     # Steps appended when capacity_check=True (must match _cap_check_steps()).
@@ -935,6 +1136,9 @@ class PyBaMMOracle:
         eis_drift_scale: float = 0.0,
         eis_drift_tau_s: float = 600.0,
         eis_drift_n_periods: float = 4.0,
+        # Seedable randomness (#A4): seeds the synthetic EIS noise generator only
+        # (see the docstring's `seed` entry for what this does/does not cover).
+        seed: int | None = None,
         real_cell_capacity_mah: float = 200.0,
         kinetics_scale: float = 1.0,
         sei_rate_scale: float = 1.0,
@@ -1023,7 +1227,20 @@ class PyBaMMOracle:
         # CR2032 config's 10 s charged-state value is potentiostat switching
         # overhead, not a protocol rest.) See _protocol_to_experiment.
         self._rest_s = float(rest_s)
-        self.ecm_model_fn = ecm_model_fn or _autoeis_ecm
+        if ecm_model_fn is not None:
+            self.ecm_model_fn = ecm_model_fn
+        elif _AUTOEIS_AVAILABLE:
+            self.ecm_model_fn = _autoeis_ecm
+        else:
+            # Bare install (no [autoeis] extra): fall back to the analytic
+            # Randles stub rather than raising on the first cycle. Posterior-std
+            # slots in the state vector are NaN under the stub.
+            log.warning(
+                "autoeis is not installed; ECM fits use the analytic Randles stub "
+                "(posterior-std state slots will be NaN). Install "
+                "battery-oracle[autoeis] for Bayesian ECM fitting."
+            )
+            self.ecm_model_fn = _randles_stub_ecm
         self.n_cycles = n_cycles
         # Real-cell-specific protocol scaling: jones2022 cells vary in actual
         # measured capacity (e.g. PJ121 ~42 mAh, not the ~200 mAh assumed by the
@@ -1133,6 +1350,12 @@ class PyBaMMOracle:
         self._eis_drift_scale = float(eis_drift_scale)
         self._eis_drift_tau_s = float(eis_drift_tau_s)
         self._eis_drift_n_periods = float(eis_drift_n_periods)
+        # Seedable randomness (#A4): covers only the synthetic EIS noise terms
+        # (_eis/noise.py); PyBaMM solver and AutoEIS MCMC are unaffected. Stored
+        # separately from self._rng so reset() can re-derive a fresh generator
+        # from the same seed for reproducible reset->run sequences.
+        self._seed = seed
+        self._rng = np.random.default_rng(seed)
 
         # Solver tolerances (see _build_native_state).
         self._solver_rtol = float(solver_rtol)
@@ -1254,6 +1477,13 @@ class PyBaMMOracle:
         # Per-call fidelity status (reset each __call__; downgraded by Phase-1 fallback).
         self._last_failure_kind: FailureKind | None = None
         self._last_fidelity: str = "full"
+        # Most recent CycleResult (None until the first successful run_cycle()).
+        self._last_result: CycleResult | None = None
+        # Clamp *signatures* (field + reason, not exact values) already warned
+        # about at WARNING level, so a policy that repeatedly sends the same
+        # out-of-range protocol doesn't spam every cycle in an AL loop — see
+        # _warn_clamps / _protocol_to_experiment.
+        self._warned_clamp_signatures: set[str] = set()
         # DFN solver fallback (#4): once the DFN->SPMe fallback fires, the oracle
         # latches to SPMe (reduced fidelity) for the rest of the run — it cannot
         # warm-start DFN back from an SPMe solution (see the SPMe/DFN
@@ -1310,6 +1540,45 @@ class PyBaMMOracle:
             self._crack_sei_R_base = 0.0
             self._dead_li_to_R     = 0.0
 
+    @classmethod
+    def from_config(cls, source: "str | Path | dict | None" = None) -> "PyBaMMOracle":
+        """Build a calibrated oracle from an oracle-config YAML (recommended entry point).
+
+        The friendliest way to get a working, calibrated ``PyBaMMOracle``
+        without hand-picking kwargs: delegates to
+        :func:`battery_oracle.experiment.build_oracle_from_oracle_config`,
+        which resolves ``source`` and maps every ``config_oracle_*.yml``
+        field to the matching constructor kwarg (falling back to this
+        class's own defaults for anything the YAML omits).
+
+        Parameters
+        ----------
+        source : str, Path, dict, or None, optional
+            * ``None`` (default) — the packaged ``config_oracle_defaults.yml``.
+            * One of the packaged per-dataset calibration names (``"calce"``,
+              ``"oxford"``, ``"matr"``).
+            * A path to a custom ``config_oracle_*.yml`` (e.g. a
+              ``tune.write_oracle_config`` output).
+            * An already-parsed config ``dict``.
+
+        Returns
+        -------
+        PyBaMMOracle
+
+        Examples
+        --------
+        >>> oracle = PyBaMMOracle.from_config()          # packaged defaults
+        >>> oracle = PyBaMMOracle.from_config("calce")    # packaged calibration
+        >>> oracle = PyBaMMOracle.from_config("my_cell.yml")  # custom YAML
+        """
+        from battery_oracle.experiment import build_oracle_from_oracle_config
+
+        # build_oracle_from_oracle_config's `source: str | Path | dict` falls
+        # through to load_oracle_config(source) for anything that isn't a dict
+        # or a recognised dataset name -- and load_oracle_config(None) loads the
+        # packaged config_oracle_defaults.yml -- so None is passed through as-is.
+        return build_oracle_from_oracle_config(source)
+
     def _refresh_state_schema(self) -> None:
         """Recompute the returned-state layout from the circuit + active flags.
 
@@ -1327,6 +1596,27 @@ class PyBaMMOracle:
     def state_vector_len(self) -> int:
         """Length of the vector returned by ``__call__`` — derived, never a literal."""
         return max(hi for _, hi in self.state_vector_schema.values())
+
+    @property
+    def history(self) -> list[dict]:
+        """Append-only per-cycle diagnostic log.
+
+        One dict per successful :meth:`run_cycle` call (in call order),
+        carrying every field ``CycleResult`` surfaces plus lower-level
+        diagnostics (raw EIS arrays, AutoEIS posterior samples, cumulative
+        degradation bookkeeping) not promoted to named ``CycleResult``
+        fields. Cleared by :meth:`reset`. Prefer :attr:`last_result` /
+        :meth:`run_cycle`'s return value for the common case — this is for
+        diagnostics across the whole run (``save_to_csv``, ``plot_diagnostics``).
+        """
+        return self._history
+
+    @property
+    def last_result(self) -> "CycleResult | None":
+        """The :class:`CycleResult` from the most recent successful ``run_cycle``
+        call (or ``__call__``, which delegates to it); ``None`` before the
+        first call or immediately after :meth:`reset`."""
+        return self._last_result
 
     def _build_native_state(self) -> None:
         """(Re)create the cycling model and the primary/emergency IDAKLUSolvers.
@@ -1379,7 +1669,21 @@ class PyBaMMOracle:
         )
 
     def reset(self) -> None:
-        """Reset accumulated cell state so the next call starts with a fresh cell."""
+        """Reset accumulated cell state so the next call starts with a fresh cell.
+
+        The constructor already builds a fresh cell (``_build_native_state``
+        runs at the end of ``__init__``), so ``reset()`` is **not** required
+        after construction — a brand-new ``PyBaMMOracle(...)`` is ready to
+        call immediately. It exists to *reuse* an existing instance for a new
+        run (e.g. a new active-learning policy/seed) without paying the cost
+        of rebuilding the PyBaMM model/solvers from scratch: it clears
+        ``history``, accumulated degradation state, and cached fidelity/
+        fallback status, then rebuilds the native model. It also re-seeds the
+        EIS noise generator from the original ``seed`` kwarg, so a
+        ``reset()``-then-run sequence reproduces the same noise realisation
+        as a fresh instance.
+        """
+        self._rng = np.random.default_rng(self._seed)
         self._prev_solution = None
         self._history = []
         self._last_Z  = None
@@ -1391,6 +1695,8 @@ class PyBaMMOracle:
         self._cumulative_dod_throughput_ah = 0.0
         self._last_failure_kind = None
         self._last_fidelity = "full"
+        self._last_result = None
+        self._warned_clamp_signatures = set()
         self._degraded_to_spme = False
         self._spme_fallback_model = None
         self._spme_fallback_solver = None
@@ -1421,10 +1727,27 @@ class PyBaMMOracle:
     _CAP_SCALE = 5_000.0 / 200.0  # legacy default, kept for reference/back-compat
 
     def _sanitise_current(self, val_mA: float, default_mA: float,
-                          lo: float, hi: float) -> float:
-        """Return a finite, physically bounded current in Amperes."""
-        v = float(default_mA if not np.isfinite(val_mA) else val_mA)
-        return float(np.clip(v, lo, hi)) / 1000.0
+                          lo: float, hi: float, *,
+                          label: str | None = None,
+                          clamps: list | None = None) -> float:
+        """Return a finite, physically bounded current in Amperes.
+
+        When ``label``/``clamps`` are supplied, any value actually changed by
+        NaN->default substitution or the ``[lo, hi]`` clip is recorded onto
+        ``clamps`` as ``(signature, message)`` for :meth:`_warn_clamps`
+        (loud sanitisation, see the class docstring).
+        """
+        used_default = not np.isfinite(val_mA)
+        v = float(default_mA if used_default else val_mA)
+        out = float(np.clip(v, lo, hi))
+        if clamps is not None and label is not None:
+            if used_default:
+                clamps.append((f"{label}:nan_default",
+                                f"{label} NaN→{default_mA:.0f} mA (default)"))
+            elif out != v:
+                clamps.append((f"{label}:bounds",
+                                f"{label} {v:.0f}→{out:.0f} mA (bounds [{lo:.0f}, {hi:.0f}])"))
+        return out / 1000.0
 
     def _current_ceiling_mA(self, base_hi: float) -> float:
         """Model-aware upper current bound (in the 5 Ah PyBaMM frame, mA).
@@ -1438,10 +1761,49 @@ class PyBaMMOracle:
             return min(base_hi, dfn_hi_mA)
         return base_hi
 
-    def _sanitise_duration(self, val_h: float, default_h: float) -> float:
-        """Return a finite, physically bounded duration in seconds."""
-        v = float(default_h if not np.isfinite(val_h) else val_h)
-        return float(np.clip(v * 3600.0, self._DUR_MIN_s, self._DUR_MAX_s))
+    def _sanitise_duration(self, val_h: float, default_h: float, *,
+                           label: str | None = None,
+                           clamps: list | None = None) -> float:
+        """Return a finite, physically bounded duration in seconds.
+
+        See :meth:`_sanitise_current` for the ``label``/``clamps`` contract.
+        """
+        used_default = not np.isfinite(val_h)
+        v = float(default_h if used_default else val_h)
+        v_s = v * 3600.0
+        out = float(np.clip(v_s, self._DUR_MIN_s, self._DUR_MAX_s))
+        if clamps is not None and label is not None:
+            if used_default:
+                clamps.append((f"{label}:nan_default",
+                                f"{label} NaN→{default_h:.3f} h (default)"))
+            elif out != v_s:
+                clamps.append((f"{label}:bounds",
+                                f"{label} {v_s:.0f}→{out:.0f} s (bounds "
+                                f"[{self._DUR_MIN_s:.0f}, {self._DUR_MAX_s:.0f}])"))
+        return out
+
+    def _warn_clamps(self, clamps: list[tuple[str, str]]) -> None:
+        """Emit ONE ``log.warning`` per oracle call summarising protocol
+        sanitisation that actually changed a value (bounds clips, NaN->default
+        substitution, the charge-stage caps, the discharge floor).
+
+        Deduplicated by clamp *signature* (field + reason, not exact values)
+        via ``self._warned_clamp_signatures``: the first time a given
+        signature is seen it is logged at WARNING; every later call whose
+        clamps are all already-seen signatures logs the same summary at DEBUG
+        instead, so a policy that repeatedly sends the same out-of-range
+        protocol doesn't spam every cycle of an active-learning loop.
+        """
+        if not clamps:
+            return
+        signatures = [sig for sig, _ in clamps]
+        is_new = [sig not in self._warned_clamp_signatures for sig in signatures]
+        self._warned_clamp_signatures.update(signatures)
+        summary = "; ".join(msg for _, msg in clamps)
+        if any(is_new):
+            log.warning("[PyBaMMOracle] protocol sanitised: %s", summary)
+        else:
+            log.debug("[PyBaMMOracle] protocol sanitised (repeat): %s", summary)
 
     def _cap_check_steps(self) -> tuple[str, ...]:
         """Four-step C/20 capacity check appended after regular cycling.
@@ -1461,23 +1823,81 @@ class PyBaMMOracle:
         )
 
     def _protocol_to_experiment(self, protocol: np.ndarray):
+        """Build the PyBaMM ``Experiment`` for one call, sanitising as needed.
+
+        Returns
+        -------
+        experiment : pybamm.Experiment
+        protocol_applied : Protocol
+            The sanitised protocol actually simulated (post scaling/clamping),
+            in the real-cell mA/h frame — see :class:`CycleResult.protocol_applied`.
+
+        Raises
+        ------
+        ValueError
+            If ``protocol`` is not length 6, or length 7 without
+            ``use_temperature_protocol=True`` — previously this silently
+            sliced ``protocol[:6]``.
+        """
         pb = self._pb
+        n = len(protocol)
+        if not (n == 6 or (n == 7 and self._use_temperature_protocol)):
+            raise ValueError(
+                f"protocol must have length {len(PROTOCOL_FIELD_NAMES)} (the core "
+                f"protocol), or {len(PROTOCOL_FIELD_NAMES) + 1} when this oracle was "
+                f"constructed with use_temperature_protocol=True (currently "
+                f"{self._use_temperature_protocol}); got length {n}."
+            )
         # Slots 0-5 are the electrochemical protocol; an optional slot 6 (#10) is
         # the per-cycle ambient temperature, consumed in __call__, not here.
         C1_mA, C2_mA, dur1_h, dur2_h, D_mA, dur_d_h = protocol[:6]
         s = self._cap_scale
         c_hi  = self._current_ceiling_mA(self._C_MAX_mA)
         c2_hi = self._current_ceiling_mA(self._C2_MAX_mA)
-        C1    = self._sanitise_current(C1_mA * s, 500.0, self._C_MIN_mA,  c_hi)
-        C2    = self._sanitise_current(C2_mA * s, 250.0, self._C2_MIN_mA, c2_hi)
-        D     = self._sanitise_current(D_mA  * s, 500.0, self._C_MIN_mA,  c_hi)
+
+        clamps: list[tuple[str, str]] = []
+        C1    = self._sanitise_current(C1_mA * s, 500.0, self._C_MIN_mA,  c_hi,
+                                        label="C1", clamps=clamps)
+        C2    = self._sanitise_current(C2_mA * s, 250.0, self._C2_MIN_mA, c2_hi,
+                                        label="C2", clamps=clamps)
+        D     = self._sanitise_current(D_mA  * s, 500.0, self._C_MIN_mA,  c_hi,
+                                        label="D", clamps=clamps)
         # Discharge is governed by the 3.0 V cutoff (Jones 2022): use a generous
         # timeout (>= time to reach 3.0 V even at ~1C) rather than the real
-        # duration, so the cell actually fully discharges. No 2 h floor.
-        dur_d = max(self._sanitise_duration(dur_d_h, 1.0), 3_600.0)
+        # duration, so the cell actually fully discharges. No 2 h floor. The
+        # 3600 s (1 h) floor below is INTENTIONAL, not a bug: it exists so the
+        # discharge step always has time to reach v_discharge_min rather than
+        # being cut off early by a too-short requested duration.
+        dur_d_pre = self._sanitise_duration(dur_d_h, 1.0, label="dur_d", clamps=clamps)
+        dur_d = max(dur_d_pre, 3_600.0)
+        if dur_d != dur_d_pre:
+            clamps.append(("dur_d:discharge_floor",
+                            f"dur_d {dur_d_pre:.0f}→{dur_d:.0f} s "
+                            "(1 h discharge floor, intentional)"))
         # Two-stage CC charge: each stage capped at 15 min (paper limit).
-        dur1  = min(self._sanitise_duration(dur1_h, 0.25), self._CHARGE_STAGE_MAX_s)
-        dur2  = min(self._sanitise_duration(dur2_h, 0.25), self._CHARGE_STAGE_MAX_s)
+        dur1_pre = self._sanitise_duration(dur1_h, 0.25, label="dur1", clamps=clamps)
+        dur1 = min(dur1_pre, self._CHARGE_STAGE_MAX_s)
+        if dur1 != dur1_pre:
+            clamps.append(("dur1:stage_cap",
+                            f"dur1 {dur1_pre:.0f}→{dur1:.0f} s (charge-stage cap)"))
+        dur2_pre = self._sanitise_duration(dur2_h, 0.25, label="dur2", clamps=clamps)
+        dur2 = min(dur2_pre, self._CHARGE_STAGE_MAX_s)
+        if dur2 != dur2_pre:
+            clamps.append(("dur2:stage_cap",
+                            f"dur2 {dur2_pre:.0f}→{dur2:.0f} s (charge-stage cap)"))
+
+        self._warn_clamps(clamps)
+
+        protocol_applied = Protocol(
+            charge_current_1_mA=C1 * 1000.0,
+            charge_current_2_mA=C2 * 1000.0,
+            charge_duration_1_h=dur1 / 3600.0,
+            charge_duration_2_h=dur2 / 3600.0,
+            discharge_current_mA=D * 1000.0,
+            discharge_duration_h=dur_d / 3600.0,
+            T_ambient_K=(float(protocol[6]) if n == 7 else None),
+        )
+
         vc, vd, rest = self._V_CHARGE_MAX, self._V_DISCHARGE_MIN, self._rest_s
         # Faithful jones2022 cycle (Jones, Stimming & Lee 2022, Nat. Commun.
         # 13:4806, Methods). Discharge-first order (cyclically equivalent to the
@@ -1507,7 +1927,7 @@ class PyBaMMOracle:
         log.debug("[PyBaMMOracle] call %d: raw_protocol=%s steps=%s",
                   len(self._history), np.array2string(np.asarray(protocol), precision=4),
                   steps)
-        return pb.Experiment(cycles)
+        return pb.Experiment(cycles), protocol_applied
 
     def _is_truncated(self, sol, experiment) -> bool:
         """True if PyBaMM silently dropped steps from the cycle(s) this call added.
@@ -1626,13 +2046,52 @@ class PyBaMMOracle:
         # Emergency (looser Casadi) succeeded — record the degrade, keep base fidelity.
         return sol, base_fid, FailureKind.SOLVER_DEGRADED
 
-    def __call__(self, protocol: np.ndarray) -> np.ndarray:
+    def __call__(self, protocol: "Protocol | np.ndarray | Sequence[float]") -> np.ndarray:
+        """Run one cycle and return the raw state vector.
+
+        This is the hard compatibility contract consumed by the downstream
+        active-learning/DMDc loop: array (or :class:`Protocol`) in, array out
+        — unchanged behaviour, equivalent to ``self.run_cycle(protocol).state``.
+        Prefer :meth:`run_cycle` for named access to SOH, SOC, EIS spectra, and
+        fitted ECM parameters instead of reaching into :attr:`history`.
+        """
+        return self.run_cycle(protocol).state
+
+    def run_cycle(self, protocol: "Protocol | np.ndarray | Sequence[float]") -> "CycleResult":
+        """Run one charge/discharge cycle and return the full :class:`CycleResult`.
+
+        Parameters
+        ----------
+        protocol : Protocol, np.ndarray, or sequence of float
+            The charge/discharge protocol for this cycle. A :class:`Protocol`
+            instance is converted via :meth:`Protocol.to_array`; a bare array
+            or sequence is used as-is (length 6, or 7 with ``T_ambient_K`` in
+            slot 6 when this oracle was built with
+            ``use_temperature_protocol=True``).
+
+        Returns
+        -------
+        CycleResult
+
+        Raises
+        ------
+        ValueError
+            If the protocol vector has the wrong length.
+        OracleFailure
+            If the PyBaMM simulation fails outright, or the cell reaches
+            end-of-life (SOH below ``eol_capacity_fraction``). The oracle
+            state is **not** reset — see the class docstring.
+        """
+        protocol = (
+            protocol.to_array() if isinstance(protocol, Protocol)
+            else np.asarray(protocol, dtype=float)
+        )
         # Per-call fidelity/degradation status, recorded into this call's history
         # row. Reset to full fidelity every call; the DFN solver fallback (#4)
         # downgrades these when it drops to a looser solver or the SPMe fallback.
         self._last_failure_kind = None
         self._last_fidelity = "full"
-        experiment = self._protocol_to_experiment(protocol)
+        experiment, protocol_applied = self._protocol_to_experiment(protocol)
         # On the first call (no prior solution), start at 80 % SOC so the initial
         # OCV (~3.9–4.0 V) sits safely inside the experiment voltage window.
         _first_call = self._prev_solution is None
@@ -1648,6 +2107,9 @@ class PyBaMMOracle:
             self._pv["Ambient temperature [K]"] = self._T_ambient_K
             if _first_call:
                 self._pv["Initial temperature [K]"] = self._T_ambient_K
+            # Keep protocol_applied's T_ambient_K in sync with the clamp above
+            # (frozen dataclass, so replace rather than mutate).
+            protocol_applied = replace(protocol_applied, T_ambient_K=self._T_ambient_K)
 
         # Lock protects _prev_solution so sequential state accumulation is safe
         # even if callers inadvertently share this oracle across threads.
@@ -1815,12 +2277,18 @@ class PyBaMMOracle:
             if self._eis_noise_level > 0.0 and self._eis_noise_model != "none":
                 nl = self._eis_noise_level
                 if self._eis_noise_model == "white":
-                    Z = _add_white_noise(Z, nl)
+                    Z = _add_white_noise(Z, nl, rng=self._rng)
                 elif self._eis_noise_model == "flicker":
-                    Z = _add_flicker_noise(self.frequencies, Z, nl)
+                    Z = _add_flicker_noise(self.frequencies, Z, nl, rng=self._rng)
                 else:  # "combined": split budget across flicker and white terms
-                    Z = _add_flicker_noise(self.frequencies, Z, noise_level=nl * self._noise_combined_flicker_frac)
-                    Z = _add_white_noise(Z, noise_level=nl * self._noise_combined_white_frac)
+                    Z = _add_flicker_noise(
+                        self.frequencies, Z,
+                        noise_level=nl * self._noise_combined_flicker_frac,
+                        rng=self._rng,
+                    )
+                    Z = _add_white_noise(
+                        Z, noise_level=nl * self._noise_combined_white_frac, rng=self._rng
+                    )
             # Non-stationarity drift: EIS measured while the OCP still relaxes
             # (Hallemans et al. 2023, Eqs 40/43). Coupled to self._rest_s, so it
             # vanishes for well-rested cells; disabled at scale 0.0.
@@ -1829,6 +2297,7 @@ class PyBaMMOracle:
                     self.frequencies, Z, self._rest_s, self._eis_drift_scale,
                     tau_relax_s=self._eis_drift_tau_s,
                     n_periods=self._eis_drift_n_periods,
+                    rng=self._rng,
                 )
             return Z
 
@@ -1966,6 +2435,9 @@ class PyBaMMOracle:
             "model":              self._model,
             "chemistry":          self._chemistry,
             "protocol":           np.asarray(protocol).copy(),
+            # Post-sanitisation protocol actually simulated (A3.5) — see
+            # _protocol_to_experiment and CycleResult.protocol_applied.
+            "protocol_applied":   protocol_applied,
             # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
             # here, never raised. Successful full-fidelity steps carry None/"full".
             "failure_kind":       self._last_failure_kind,
@@ -2025,6 +2497,11 @@ class PyBaMMOracle:
 
         def _fit_half(Z: np.ndarray, _diag: dict) -> np.ndarray:
             if self.ecm_model_fn is _autoeis_ecm:
+                # Draw a fresh int seed from the oracle's noise RNG for AutoEIS's
+                # sampler (autoeis.perform_bayesian_inference's own `seed` kwarg),
+                # so both the EIS noise and the MCMC fit are reproducible from the
+                # same PyBaMMOracle(seed=...) under a single deterministic stream.
+                _autoeis_seed = int(self._rng.integers(0, 2**31 - 1))
                 full, raw_samples, raw_variables = _autoeis_ecm(
                     self.frequencies, Z.real, Z.imag,
                     circuit=self._circuit, _diag=_diag, return_samples=True,
@@ -2032,6 +2509,7 @@ class PyBaMMOracle:
                     cpe_w_default=self._cpe_w_default, cpe_n_default=self._cpe_n_default,
                     rescale_target_r0=self._ecm_rescale_target_r0,
                     num_warmup=self._autoeis_num_warmup, num_samples=self._autoeis_num_samples,
+                    seed=_autoeis_seed,
                 )
                 _diag["_raw_samples"] = raw_samples
                 _diag["_raw_variables"] = raw_variables
@@ -2102,7 +2580,28 @@ class PyBaMMOracle:
         # digital-twin orchestrator building an augmented-state trajectory
         # for traits_audit.RegimeDetrender / DMDc — see battery-forecast).
         self._history[-1]["state_raw"] = state.copy()
-        return state
+
+        result = CycleResult(
+            state=state,
+            schema=self.state_vector_schema,
+            soh=soh,
+            soc_charge=soc_charge,
+            soc_discharge=soc_discharge,
+            capacity_ah=cap_ah,
+            fidelity=self._last_fidelity,
+            failure_kind=self._last_failure_kind,
+            protocol=np.asarray(protocol).copy(),
+            protocol_applied=protocol_applied,
+            eis_charge=(self.frequencies, Z_charge.copy()),
+            eis_discharge=(self.frequencies, Z_discharge.copy()),
+            ecm_charge=dict(zip(self._ecm_param_names, params_charge.tolist())),
+            ecm_discharge=dict(zip(self._ecm_param_names, params_discharge.tolist())),
+            ecm_std_charge=dict(zip(self._ecm_param_names, std_charge.tolist())),
+            ecm_std_discharge=dict(zip(self._ecm_param_names, std_discharge.tolist())),
+            raw=types.MappingProxyType(self._history[-1]),
+        )
+        self._last_result = result
+        return result
 
     # ── CSV export ───────────────────────────────────────────────────────────
 

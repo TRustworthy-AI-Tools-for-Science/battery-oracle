@@ -206,17 +206,13 @@ def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
 
 
 @pytest.mark.parametrize("dataset", ["calce", "oxford", "matr"])
-def test_packaged_dataset_configs_load_and_map(dataset):
-    """#12: each packaged config_oracle_{dataset}.yml loads, maps, and declares a
-    chemistry that matches its parameter_set."""
-    from battery_oracle.experiment import (
-        _resolve_dataset_config,
-        oracle_kwargs_from_oracle_config,
-    )
-    cfg = _resolve_dataset_config(dataset)
-    kw = oracle_kwargs_from_oracle_config(cfg)
-    assert kw["chemistry"] in ("Chen2020", "Xu2019", "Prada2013")
-    assert kw["parameter_set"] == kw["chemistry"]  # must agree (validated at build)
+def test_resolve_dataset_config_raises_when_unshipped(dataset):
+    """#12: none of the per-dataset calibration YAMLs are shipped yet (Tier 2,
+    still on the TODO list) -- resolving a valid dataset name must fail loudly
+    with an informative FileNotFoundError, not silently fall back to defaults."""
+    from battery_oracle.experiment import _resolve_dataset_config
+    with pytest.raises(FileNotFoundError, match="not shipped in this release"):
+        _resolve_dataset_config(dataset)
 
 
 def test_config_dataset_and_oracle_config_are_mutually_exclusive():

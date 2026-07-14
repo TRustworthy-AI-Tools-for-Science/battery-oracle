@@ -14,18 +14,41 @@ from __future__ import annotations
 import numpy as np
 
 
-def add_white_noise(signals, noise_level):
+def add_white_noise(signals, noise_level, rng: np.random.Generator | None = None):
+    """Add i.i.d. Gaussian noise scaled by ``noise_level * |signals|``.
+
+    Parameters
+    ----------
+    rng : numpy.random.Generator, optional
+        Source of randomness. Defaults to a fresh ``np.random.default_rng()``
+        (unseeded) if not given — pass a seeded generator for reproducible
+        output.
+    """
+    rng = rng if rng is not None else np.random.default_rng()
     mag = noise_level * np.abs(signals)
-    return signals + np.random.normal(0, mag) + 1j * np.random.normal(0, mag)
+    return signals + rng.normal(0, mag) + 1j * rng.normal(0, mag)
 
 
-def add_flicker_noise(frequencies, signals, noise_level=0.05):
+def add_flicker_noise(
+    frequencies, signals, noise_level=0.05, rng: np.random.Generator | None = None
+):
+    """Add 1/f-scaled Gaussian noise to the impedance spectrum.
+
+    Parameters
+    ----------
+    rng : numpy.random.Generator, optional
+        Source of randomness. Defaults to a fresh ``np.random.default_rng()``
+        (unseeded) if not given — pass a seeded generator for reproducible
+        output.
+    """
+    rng = rng if rng is not None else np.random.default_rng()
     amp = noise_level * np.abs(signals) / np.sqrt(np.asarray(frequencies))
-    return signals + np.random.normal(scale=amp) + 1j * np.random.normal(scale=amp)
+    return signals + rng.normal(scale=amp) + 1j * rng.normal(scale=amp)
 
 
 def add_relaxation_drift(frequencies, signals, rest_s, drift_scale,
-                         tau_relax_s=600.0, n_periods=4, i_amp=1.0):
+                         tau_relax_s=600.0, n_periods=4, i_amp=1.0,
+                         rng: np.random.Generator | None = None):
     """Non-stationarity drift from measuring EIS while the OCP is still relaxing.
 
     Direct discrete realisation of Hallemans, Howey, Widanage et al. (2023),
@@ -73,7 +96,12 @@ def add_relaxation_drift(frequencies, signals, rest_s, drift_scale,
         Number of periods measured per frequency (sets each window ``Tm``).
     i_amp : float
         Excitation current amplitude ``Im`` used in the ``Z = Vm/Im`` extraction.
+    rng : numpy.random.Generator, optional
+        Source of randomness. Defaults to a fresh ``np.random.default_rng()``
+        (unseeded) if not given — pass a seeded generator for reproducible
+        output.
     """
+    rng = rng if rng is not None else np.random.default_rng()
     f = np.asarray(frequencies, dtype=float)
     signals = np.asarray(signals, dtype=complex)
     if drift_scale == 0.0 or np.exp(-rest_s / tau_relax_s) < 1e-12:
@@ -82,7 +110,7 @@ def add_relaxation_drift(frequencies, signals, rest_s, drift_scale,
     T = n_periods / f                                 # measurement window per frequency
     t_start = np.zeros_like(f)
     t_start[order] = np.concatenate([[0.0], np.cumsum(T[order])[:-1]])  # sweep-time of each freq
-    dV = drift_scale * np.random.normal()             # OCP relaxation depth (varies cycle-to-cycle)
+    dV = drift_scale * rng.normal()          # OCP relaxation depth (varies cycle-to-cycle)
     dZ = np.zeros_like(signals, dtype=complex)
     for k in range(len(f)):
         tt = np.linspace(t_start[k], t_start[k] + T[k], 256)
