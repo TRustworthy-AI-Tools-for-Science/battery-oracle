@@ -1093,10 +1093,11 @@ class PyBaMMOracle:
       ``plating_rate_scale``, ...) — degradation calibration scales (YAML
       ``degradation`` / ``protocol_scaling``).
 
-    Each kwarg's default here matches ``config_oracle_defaults.yml``'s documented
-    value. Rather than passing these individually, prefer :meth:`from_config`
-    (or ``experiment.build_oracle_from_config``) to build a fully-configured
-    oracle from that YAML (packaged or a user-supplied ``config_oracle_*.yml``).
+    * Each kwarg's default here matches ``config_oracle_defaults.yml``'s
+      documented value. Rather than passing these individually, prefer
+      :meth:`from_config` (or ``experiment.build_oracle_from_config``) to build
+      a fully-configured oracle from that YAML (packaged or a user-supplied
+      ``config_oracle_*.yml``).
     """
 
     # Steps appended when capacity_check=True (must match _cap_check_steps()).
