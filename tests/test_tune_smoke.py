@@ -174,7 +174,7 @@ def test_parallel_worker_stores_results_in_shared_study(tmp_path, monkeypatch):
     """A worker persists each trial's result via user_attr — the only channel back
     to the parent across processes. Exercised in-process with a stubbed oracle (no
     PyBaMM, no real spawn) to validate the objective + collection contract."""
-    import optuna
+    optuna = pytest.importorskip("optuna")
     monkeypatch.setattr("battery_oracle.tune.run_oracle_candidate", _stub_candidate_result)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     storage_url = f"sqlite:///{tmp_path / 'study.db'}"
@@ -195,6 +195,7 @@ def test_parallel_worker_stores_results_in_shared_study(tmp_path, monkeypatch):
 def test_calibrate_oracle_sequential_path(monkeypatch):
     """n_jobs=1 stays on the in-memory sequential path and drives the shared
     _evaluate_candidate correctly (stubbed oracle: fast, no PyBaMM)."""
+    pytest.importorskip("optuna")
     monkeypatch.setattr("battery_oracle.tune.run_oracle_candidate", _stub_candidate_result)
     out = calibrate_oracle({"circuit": "R1-[R2,P3]-[R4,P5]"},
                            {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
