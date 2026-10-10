@@ -129,7 +129,9 @@ def test_score_candidate_present_target_missing_oracle_is_inf():
 # ── Process-parallel calibration engine (thread-safety fix) ────────────────
 
 def _stub_candidate_result(cache, ks, srs, dds, prs, preset, capacity_check,
-                           circuit=None, chemistry="Chen2020", dod_lam_scale=0.0):
+                           circuit=None, chemistry="Chen2020", dod_lam_scale=0.0,
+                           oracle_kwargs=None, protocol_key="protocol", ecm_stub=False,
+                           calibration_model="SPMe"):
     """Cheap stand-in for run_oracle_candidate (no PyBaMM): arc-ratio tracks ks so
     scores vary; deliberately returns numpy types to exercise the _native sanitiser."""
     return {
