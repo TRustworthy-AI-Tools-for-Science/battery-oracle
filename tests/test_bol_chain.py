@@ -226,3 +226,91 @@ def test_literature_bounds_and_derived_microstructure():
     _, q_p = electrode_capacities_ah(p)
     assert np.isclose(q_p, 1.8 * 0.042)
     assert np.isclose(float(p["Positive electrode thickness [m]"]), 0.8 * float(pv["Positive electrode thickness [m]"]))
+
+
+def test_ocv_balance_recovers_a_known_balance():
+    """Rest voltages generated from a known balance with the set's own OCPs are mapped
+    back to that balance (two-step stage A)."""
+    from battery_oracle.bol_chain import _ocp_evaluators, ocv_balance
+
+    pv = _pv()
+    un, up = _ocp_evaluators(pv, 298.15)
+    x0, y0, qn, qp = 0.70, 0.55, 0.050, 0.100
+    qs = np.array([0.0, 0.01, 0.02, 0.03, 0.035, 0.015, 0.0, 0.025, 0.005])
+    t = np.arange(qs.size) * 2000.0
+    # a single group whose current knots move exactly the charges qs between rests
+    tk, ik = [0.0], [0.0]
+    for k in range(1, qs.size):
+        dq = qs[k] - qs[k - 1]
+        t0 = t[k - 1] + 100.0
+        tk += [t0, t0 + 0.05, t0 + 600.05, t0 + 600.1]
+        ik += [0.0, dq * 3600.0 / 600.0, dq * 3600.0 / 600.0, 0.0]
+    tk.append(t[-1] + 1000.0); ik.append(0.0)
+    rec_t = np.concatenate([np.linspace(t[k - 1] + 700.2, t[k] + 99.0, 5) for k in range(1, qs.size)])
+    v = []
+    for tt in rec_t:
+        k = int(np.searchsorted(t, tt - 99.0)) - 0
+        q = qs[min(k, qs.size - 1)] if tt > t[0] + 700 else 0.0
+        v.append(up(y0 + q / qp) - un(x0 - q / qn))
+    data = {"groups": [{"name": "000", "duration_s": t[-1] + 1000.0, "gap_before": None}],
+            "current": [{"group": 0, "t": np.array(tk), "I": np.array(ik)}],
+            "records": [{"group": 0, "t": rec_t, "V": np.array(v), "kind": "cycling", "label": "syn"}],
+            "initial_voltage": up(y0) - un(x0)}
+    b = ocv_balance(data, pv)
+    assert b["rmse_mV"] < 1.0, b
+    # rest points over a partial window need not pin the balance: the truth must lie
+    # inside the reported near-optimal range (identifiability is reported, not assumed)
+    lo, hi = b["np_ratio_near_range"]
+    assert lo - 0.02 <= qn / qp <= hi + 0.02, b
+
+
+def test_ocv_balance_constrained_stays_in_literature():
+    """With the measured capacity, the balance stays inside the literature limits even
+    when the rest voltages alone prefer a graphite smaller than the cell (PJ248 with
+    Ai2020); the unconstrained fit is reported beside it."""
+    from battery_oracle.bol_chain import (GRAPHITE_USABLE, LI_FRACTION, LITERATURE_BOUNDS, NP_PRACTICAL_BOUNDS,
+                                          Q_P_RATIO, _ocp_evaluators, ocv_balance)
+
+    pv = _pv()
+    un, up = _ocp_evaluators(pv, 298.15)
+    q_meas = 0.042
+    x0, y0, qn, qp = 0.95, 0.50, 0.040, 0.110          # unphysical truth: practical N:P 0.89, Q_p ratio 2.6
+    qs = np.array([0.0, 0.01, 0.02, 0.03, 0.035, 0.015, 0.0])
+    t = np.arange(qs.size) * 2000.0
+    tk, ik = [0.0], [0.0]
+    for k in range(1, qs.size):
+        dq = qs[k] - qs[k - 1]
+        t0 = t[k - 1] + 100.0
+        tk += [t0, t0 + 0.05, t0 + 600.05, t0 + 600.1]
+        ik += [0.0, dq * 3600.0 / 600.0, dq * 3600.0 / 600.0, 0.0]
+    tk.append(t[-1] + 1000.0); ik.append(0.0)
+    rec_t = np.concatenate([np.linspace(t[k - 1] + 700.2, t[k] + 99.0, 5) for k in range(1, qs.size)])
+    v = [up(y0 + (qs[min(int(np.searchsorted(t, tt - 99.0)), qs.size - 1)] if tt > t[0] + 700 else 0.0) / qp)
+         - un(x0 - (qs[min(int(np.searchsorted(t, tt - 99.0)), qs.size - 1)] if tt > t[0] + 700 else 0.0) / qn)
+         for tt in rec_t]
+    data = {"groups": [{"name": "000", "duration_s": t[-1] + 1000.0, "gap_before": None}],
+            "current": [{"group": 0, "t": np.array(tk), "I": np.array(ik)}],
+            "records": [{"group": 0, "t": rec_t, "V": np.array(v), "kind": "cycling", "label": "syn"}],
+            "initial_voltage": up(y0) - un(x0), "cell_capacity_mah": 1000 * q_meas}
+    b = ocv_balance(data, pv)
+    assert b["constrained"] and "unconstrained" in b
+    tol = 1e-6
+    lo, hi = LITERATURE_BOUNDS[Q_P_RATIO]
+    assert lo - tol <= b["Q_p_Ah"] / q_meas <= hi + tol, b
+    lo, hi = NP_PRACTICAL_BOUNDS
+    assert lo - tol <= GRAPHITE_USABLE * b["Q_n_Ah"] / q_meas <= hi + tol, b
+    lo, hi = LITERATURE_BOUNDS[LI_FRACTION]
+    assert lo - 0.01 <= b["li_fraction"] <= hi + 0.01, b
+    assert b["rmse_mV"] >= b["unconstrained"]["rmse_mV"] - 1e-6
+
+
+def test_np_ratio_sets_the_negative_active_fraction():
+    from battery_oracle.bol_chain import (EPS_N, NEG_THICKNESS_RATIO, NP_RATIO, POROSITY_N, THICKNESS_SCALE,
+                                          candidate_values, electrode_capacities_ah)
+
+    pv = _pv()
+    p = candidate_values(pv, {NP_RATIO: 0.6, NEG_THICKNESS_RATIO: 0.9, THICKNESS_SCALE: 1.1}, 3.96, 0.042)
+    q_n, q_p = electrode_capacities_ah(p)
+    assert np.isclose(q_n / q_p, 0.6)
+    assert np.isclose(float(p["Negative electrode thickness [m]"]), 0.9 * float(p["Positive electrode thickness [m]"]))
+    assert np.isclose(float(p[EPS_N]) + float(p[POROSITY_N]), 1 - (1 - float(pv[EPS_N]) - float(pv[POROSITY_N])))
