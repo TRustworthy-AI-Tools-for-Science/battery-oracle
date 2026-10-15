@@ -29,6 +29,22 @@ cycling:
   T_ambient_K: 298.15              # lumped-thermal ambient (K)
   h_total_W_per_m2K: 10.0          # lumped-thermal total heat-transfer coefficient
   use_temperature_protocol: false  # true -> opt-in 7-D protocol (slot 6 = per-cycle T_ambient_K); needs thermal: lumped
+  # Discharge termination. "cutoff": every discharge runs to v_discharge_min with a
+  # >= 1 h timeout (the jones2022 protocol: discharge until 3.0 V). "protocol": the
+  # discharge runs for the protocol's own duration (or until v_discharge_min), for
+  # time-limited protocols.
+  discharge_mode: cutoff
+
+# Beginning-of-life (BOL) fit, applied after the degradation preset (battery_oracle.params).
+# parameter_scales: {PyBaMM parameter name: multiplier}; works for numeric and functional
+#   parameters (e.g. exchange-current density). Composes with protocol_scaling.kinetics_scale.
+# parameter_overrides: {PyBaMM parameter name: absolute value}.
+# contact_resistance_ohm: series contact resistance in the 5 Ah PyBaMM frame; null = off.
+# Written by battery_oracle.bol_fit (battery-forecast: tune_oracle --fit-bol / --bol-only).
+bol:
+  parameter_scales: {}
+  parameter_overrides: {}
+  contact_resistance_ohm: null
 
 solver:
   # PyBaMM solver tolerances. IDAKLUSolver (primary) ignores dt_max_s; it only

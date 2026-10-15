@@ -207,6 +207,7 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     c2_stress = degradation.get("c2_stress", {}) or {}
     preset_constants_all = degradation.get("preset_constants", {}) or {}
     protocol_scaling = oracle_cfg.get("protocol_scaling", {}) or {}
+    bol = oracle_cfg.get("bol", {}) or {}
 
     resolved_preset = preset or degradation.get("preset", "accelerated")
     rescale_r0 = ecm.get("rescale_target_r0", 0.1334)
@@ -233,6 +234,15 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "T_ambient_K": float(cycling.get("T_ambient_K", 298.15)),
         "h_total_W_per_m2K": float(cycling.get("h_total_W_per_m2K", 10.0)),
         "use_temperature_protocol": bool(cycling.get("use_temperature_protocol", False)),
+        "discharge_mode": cycling.get("discharge_mode", "cutoff"),
+
+        # Beginning-of-life fit (see battery_oracle.params).
+        "parameter_scales": dict(bol.get("parameter_scales") or {}),
+        "parameter_overrides": dict(bol.get("parameter_overrides") or {}),
+        "contact_resistance_ohm": (
+            float(bol["contact_resistance_ohm"])
+            if bol.get("contact_resistance_ohm") is not None else None
+        ),
 
         "degradation_preset": resolved_preset,
         "eol_capacity_fraction": float(degradation.get("eol_capacity_fraction", 0.80)),
@@ -249,7 +259,9 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "dead_li_decay_scale": float(protocol_scaling.get("dead_li_decay_scale", 1.0)),
         "plating_rate_scale": float(protocol_scaling.get("plating_rate_scale", 1.0)),
 
-        "frequencies": np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq),
+        # an explicit grid (e.g. the instrument's measured frequencies) wins over min/max/n
+        "frequencies": (np.asarray(eis["frequencies_hz"], float) if eis.get("frequencies_hz")
+                        else np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq)),
         "eis_noise_level": float(eis.get("noise_level", 0.02)),
         "eis_noise_model": eis.get("noise_model", "combined"),
         "seed": int(eis["seed"]) if eis.get("seed") is not None else None,
@@ -258,6 +270,7 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "eis_drift_scale": float(eis.get("drift_scale", 0.0)),
         "eis_drift_tau_s": float(eis.get("drift_tau_s", 600.0)),
         "eis_drift_n_periods": float(eis.get("drift_n_periods", 4.0)),
+        "eis_mode": eis.get("mode", "equilibrium"),
         "noise_combined_flicker_frac": float(eis.get("noise_combined_flicker_frac", 0.75)),
         "noise_combined_white_frac": float(eis.get("noise_combined_white_frac", 0.25)),
         "soc_clip_min": float(eis.get("soc_clip_min", 0.05)),
@@ -425,7 +438,9 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     freq_min = float(eis.get("freq_min_hz", oracle_cfg.get("eis", {}).get("freq_min_hz", 0.01)))
     freq_max = float(eis.get("freq_max_hz", oracle_cfg.get("eis", {}).get("freq_max_hz", 10000.0)))
     n_freq = int(eis.get("n_freq_points", oracle_cfg.get("eis", {}).get("n_freq_points", 60)))
-    kwargs["frequencies"] = np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq)
+    _grid = eis.get("frequencies_hz", oracle_cfg.get("eis", {}).get("frequencies_hz"))
+    kwargs["frequencies"] = (np.asarray(_grid, float) if _grid
+                             else np.logspace(np.log10(freq_min), np.log10(freq_max), n_freq))
     kwargs["eis_noise_level"] = float(eis.get("noise_level", kwargs["eis_noise_level"]))
     kwargs["eis_noise_model"] = eis.get("noise_model", kwargs["eis_noise_model"])
     _seed = eis.get("seed", kwargs["seed"])
@@ -437,6 +452,7 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     kwargs["eis_drift_scale"] = float(eis.get("drift_scale", kwargs["eis_drift_scale"]))
     kwargs["eis_drift_tau_s"] = float(eis.get("drift_tau_s", kwargs["eis_drift_tau_s"]))
     kwargs["eis_drift_n_periods"] = float(eis.get("drift_n_periods", kwargs["eis_drift_n_periods"]))
+    kwargs["eis_mode"] = eis.get("mode", kwargs.get("eis_mode", "equilibrium"))
 
     # Carried as a string (like parameter_set); build_oracle_from_config
     # resolves it to the ecm_model_fn callable, keeping this layer PyBaMM-free.
@@ -516,8 +532,10 @@ def build_oracle_from_config(
                 f"parameter_set {pset!r}. Point the experiment at a calibration YAML "
                 f"whose chemistry matches its parameter_set."
             )
-        import pybamm  # local import — keeps the mapping layer PyBaMM-free
-        kwargs["parameter_values"] = pybamm.ParameterValues(pset)
+        # local import — keeps the mapping layer PyBaMM-free; custom sets such as
+        # "LiR2032" resolve through battery_oracle.parameter_sets.
+        from battery_oracle.parameter_sets import resolve_parameter_values
+        kwargs["parameter_values"] = resolve_parameter_values(pset)
 
     fitter = kwargs.pop("ecm_fitter", _DEFAULT_ECM_FITTER)
     kwargs["ecm_model_fn"] = _autoeis_ecm if fitter == "autoeis" else _randles_stub_ecm
@@ -561,8 +579,8 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
                 f"Config chemistry {chem!r} (-> {resolved}) does not match "
                 f"parameter_set {pset!r}."
             )
-        import pybamm
-        kwargs["parameter_values"] = pybamm.ParameterValues(pset)
+        from battery_oracle.parameter_sets import resolve_parameter_values
+        kwargs["parameter_values"] = resolve_parameter_values(pset)
 
     # This layer carries an ecm.circuit-derived `circuit`; the fitter is not part
     # of the oracle config, so default to the fast Randles stub.

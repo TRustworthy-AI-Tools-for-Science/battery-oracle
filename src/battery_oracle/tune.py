@@ -65,15 +65,16 @@ from battery_oracle._circuit import (
 )
 from battery_oracle._eis.kk import linkk_residuals
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
-from battery_oracle.oracle import OracleFailure, PyBaMMOracle
+from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
 
 log = logging.getLogger(__name__)
 
-# Calibration always runs on SPMe, regardless of the experiment-time model
-# (DFN is reserved for the final fidelity check of shortlisted protocols — it is
-# far too slow for the hundreds of oracle calls a calibration sweep makes, #5).
-# Pinned explicitly here so a future change to PyBaMMOracle's default `model`
-# can't silently pull DFN into the calibration inner loop.
+# Default calibration model: SPMe, regardless of the experiment-time model (#5:
+# DFN is far slower for the hundreds of oracle calls a sweep makes). Pinned here
+# so a change to PyBaMMOracle's default `model` can't silently change it. A
+# caller that simulates the experiment with DFN should calibrate with DFN too
+# (``calibrate_oracle(calibration_model="DFN")``) so fitted and simulated models
+# agree -- the jones2022 LiR2032 pipeline does.
 CALIBRATION_MODEL = "SPMe"
 
 
@@ -253,6 +254,166 @@ def compute_real_targets(cache: dict, circuit: str | None = None) -> dict[str, f
 
 
 # ---------------------------------------------------------------------------
+# Step-shape targets: does the oracle cycle like the real cell?
+# ---------------------------------------------------------------------------
+#
+# The ECM targets above say nothing about how the cell *cycles*: how much charge
+# a step moves before it hits a voltage cutoff or its time limit, and where the
+# rest voltage sits. An oracle tuned on ECM features alone can match the arcs
+# while accepting far less (or more) charge per step than the real cell, and so
+# drift to a state of charge the real cells never visit. These functions
+# summarise per-step throughput by C-rate bin, identically for real GCPL records
+# and oracle history, so the two can be compared term by term.
+
+#: C-rate bin edges (C, relative to the cell's own capacity).
+STEP_CRATE_BINS: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0)
+#: Floor added to step fractions before taking log-ratios (0.5% of capacity), so
+#: near-empty steps compare on an absolute rather than relative scale.
+STEP_FRAC_FLOOR: float = 0.005
+
+
+def segment_gcpl_steps(t_s, current_mA, voltage_V, capacity_mah: float, *,
+                       rest_tol_mA: float = 1.0, level_mA: float = 5.0,
+                       level_rel: float = 0.10) -> list[dict]:
+    """Split one GCPL record into constant-current / rest steps.
+
+    A new step starts when the current switches between rest (``|I| <
+    rest_tol_mA``) and load, or moves away from the step's opening current by more
+    than ``max(level_mA, level_rel * |I_open|)``. The relative tolerance matters:
+    the potentiostat logs one averaged sample at every cutoff (e.g. 142 mA at the
+    end of a 150 mA stage), which a fixed mA grid would count as a separate
+    one-sample "step".
+
+    Returns one dict per step in the same layout as the oracle's
+    ``history[i]["step_stats"]`` (``kind`` "chg"/"dis"/"rest", ``crate``,
+    ``duration_s``, ``frac`` = throughput / ``capacity_mah``, ``v_end``,
+    ``current_mA``), so real and simulated steps go through the same summary.
+    Pure numpy; no dataset access.
+    """
+    t = np.asarray(t_s, dtype=float)
+    I = np.asarray(current_mA, dtype=float)
+    V = np.asarray(voltage_V, dtype=float)
+    if t.size < 2:
+        return []
+    bounds: list[tuple[int, int]] = []
+    start, ref = 0, I[0]
+    for k in range(1, t.size):
+        rest_now, rest_ref = abs(I[k]) < rest_tol_mA, abs(ref) < rest_tol_mA
+        if rest_now != rest_ref or (
+                not rest_ref and abs(I[k] - ref) > max(level_mA, level_rel * abs(ref))):
+            bounds.append((start, k))
+            start, ref = k, I[k]
+    bounds.append((start, t.size))
+    dt = float(np.median(np.diff(t)))
+    rows: list[dict] = []
+    for s, e in bounds:
+        i_med = float(np.median(I[s:e]))
+        duration = float(t[e - 1] - t[s]) + dt
+        if abs(i_med) < rest_tol_mA:
+            rows.append({"kind": "rest", "current_mA": 0.0, "crate": 0.0,
+                         "duration_s": duration, "frac": 0.0, "v_end": float(V[e - 1])})
+            continue
+        if e - s > 1:
+            q_mah = abs(float(np.trapezoid(I[s:e], t[s:e]))) / 3600.0
+        else:
+            q_mah = abs(i_med) * duration / 3600.0
+        rows.append({
+            "kind": "chg" if i_med > 0 else "dis",
+            "current_mA": abs(i_med),
+            "crate": abs(i_med) / capacity_mah,
+            "duration_s": duration,
+            "frac": q_mah / capacity_mah,
+            "v_start": float(V[s]),
+            "v_end": float(V[e - 1]),
+        })
+    return rows
+
+
+def summarise_steps(rows: list[dict], bins: tuple[float, ...] = STEP_CRATE_BINS,
+                    min_rest_s: float = 300.0) -> dict:
+    """Per-C-rate-bin step-throughput statistics + the rest-voltage window.
+
+    Returns ``{"chg": [bin, ...], "dis": [bin, ...], "rest_v": {...}}`` where each
+    bin is ``{"lo", "hi", "n", "frac_med", "frac_p90", "dur_med"}`` and ``rest_v``
+    holds the p5/p50/p95 end-of-rest voltage over rests of at least
+    ``min_rest_s`` (the 20-min OCV rests; the ~10 s pauses between the two
+    charge stages are not relaxed). JSON-serialisable.
+    """
+    out: dict[str, Any] = {}
+    for kind in ("chg", "dis"):
+        sel = [r for r in rows if r.get("kind") == kind]
+        crate = np.array([r["crate"] for r in sel], dtype=float)
+        frac = np.array([r["frac"] for r in sel], dtype=float)
+        dur = np.array([r["duration_s"] for r in sel], dtype=float)
+        stats = []
+        for lo, hi in zip(bins[:-1], bins[1:]):
+            m = (crate > lo) & (crate <= hi)
+            n = int(m.sum())
+            stats.append({
+                "lo": lo, "hi": hi, "n": n,
+                "frac_med": float(np.median(frac[m])) if n else None,
+                "frac_p90": float(np.percentile(frac[m], 90)) if n else None,
+                "dur_med": float(np.median(dur[m])) if n else None,
+            })
+        out[kind] = stats
+    rest_v = np.array([r["v_end"] for r in rows
+                       if r.get("kind") == "rest" and r.get("duration_s", 0.0) >= min_rest_s
+                       and np.isfinite(r.get("v_end", np.nan))])
+    out["rest_v"] = ({"p5": float(np.percentile(rest_v, 5)),
+                      "p50": float(np.percentile(rest_v, 50)),
+                      "p95": float(np.percentile(rest_v, 95)), "n": int(rest_v.size)}
+                     if rest_v.size else None)
+    return out
+
+
+def oracle_step_rows(history: list[dict]) -> list[dict]:
+    """Flatten the ``step_stats`` of every oracle history row (see ``_step_stats``)."""
+    return [dict(r) for h in history for r in (h.get("step_stats") or [])]
+
+
+def step_match_error(oracle_summary: dict | None, real_summary: dict | None, *,
+                     min_real_n: int = 20, min_oracle_n: int = 3) -> float | None:
+    """Distance between oracle and real step summaries (lower = closer; 0 = equal).
+
+    Mean, over every charge/discharge C-rate bin populated in both summaries, of
+    the absolute log-ratio of the median and p90 step fractions (each floored at
+    :data:`STEP_FRAC_FLOOR`), plus the fraction of oracle rests whose end voltage
+    falls outside the real p5-p95 window. ``None`` when there is no real summary;
+    ``inf`` when no bin overlaps (e.g. the oracle clipped every current into a bin
+    the real cell never used).
+    """
+    if not real_summary:
+        return None
+    if not oracle_summary:
+        return float("inf")
+    errs: list[float] = []
+    for kind in ("chg", "dis"):
+        for rb, ob in zip(real_summary.get(kind, []), oracle_summary.get(kind, [])):
+            if rb["n"] < min_real_n or ob["n"] < min_oracle_n:
+                continue
+            for key in ("frac_med", "frac_p90"):
+                r = max(rb[key], 0.0) + STEP_FRAC_FLOOR
+                o = max(ob[key], 0.0) + STEP_FRAC_FLOOR
+                errs.append(abs(math.log(o / r)))
+    if not errs:
+        return float("inf")
+    err = float(np.mean(errs))
+    rv, ov = real_summary.get("rest_v"), oracle_summary.get("rest_v")
+    if rv and ov:
+        err += _rest_window_miss(ov, rv)
+    return err
+
+
+def _rest_window_miss(oracle_rest: dict, real_rest: dict) -> float:
+    """Share of the oracle's p5-p95 rest-voltage band lying outside the real band."""
+    lo, hi = real_rest["p5"], real_rest["p95"]
+    olo, ohi = oracle_rest["p5"], oracle_rest["p95"]
+    width = max(ohi - olo, 1e-3)
+    inside = max(0.0, min(ohi, hi) - max(olo, lo))
+    return float(1.0 - min(inside / width, 1.0))
+
+
+# ---------------------------------------------------------------------------
 # Run an oracle candidate + C-rate probes (operate on cache + a fresh oracle)
 # ---------------------------------------------------------------------------
 
@@ -268,8 +429,20 @@ def run_oracle_candidate(
     calibration_model: str = CALIBRATION_MODEL,
     chemistry: str = "Chen2020",
     dod_lam_scale: float = 0.0,
+    oracle_kwargs: dict | None = None,
+    protocol_key: str = "protocol",
+    ecm_stub: bool = False,
 ) -> dict[str, Any]:
     """Replay cached protocols through one oracle candidate and return metrics.
+
+    ``oracle_kwargs`` are extra :class:`PyBaMMOracle` keyword arguments (BOL
+    ``parameter_scales``/``contact_resistance_ohm``, ``discharge_mode``, current
+    bounds, ...). ``protocol_key`` picks which per-cycle protocol to replay:
+    ``"protocol"`` (legacy observed durations) or ``"replay_protocol"`` (commanded
+    durations reconstructed from the real step endings, see the jones2022
+    adapter). ``ecm_stub=True`` fits the analytic Randles stub instead of AutoEIS
+    (much faster; for step-shape-only replays whose ECM metrics are unused).
+    The result carries ``oracle_step_summary`` (see :func:`summarise_steps`).
 
     ``circuit`` sets the oracle's ECM structure (and the ohmic/arc-resistor
     positions the arc-ratio / R1-growth metrics read). It is not assumed: ``None``
@@ -279,7 +452,7 @@ def run_oracle_candidate(
     """
     circuit = _resolve_circuit(circuit)
     ohmic_i, arc_is = _ecm_indices(circuit)
-    oracle = PyBaMMOracle(
+    kwargs: dict[str, Any] = dict(
         model=calibration_model,
         chemistry=chemistry,
         degradation_preset=preset,
@@ -292,21 +465,32 @@ def run_oracle_candidate(
         dod_lam_scale=dod_lam_scale,
         circuit=circuit,   # ECM layout matches the index-based reads below
     )
+    if ecm_stub:
+        kwargs["ecm_model_fn"] = _randles_stub_ecm
+    # Extra kwargs (BOL scales, discharge_mode, widened current bounds, ...); the
+    # keys this function sets itself stay owned by its arguments.
+    kwargs.update(_extra_oracle_kwargs(oracle_kwargs))
+    oracle = PyBaMMOracle(**kwargs)
     oracle.reset()
 
     arc_ratios: list[float] = []
     r1_first = r1_last = None
     oracle_failure = False
+    failure_info = None
     n_completed = 0
     soh_history: list[float] = []
 
     for cyc in cache["cycles"]:
-        protocol = np.array(cache["data"][cyc]["protocol"], dtype=np.float64)
+        entry = cache["data"][cyc]
+        protocol = np.array(entry.get(protocol_key) or entry["protocol"], dtype=np.float64)
         try:
             oracle(protocol)
         except OracleFailure as exc:
             log.warning("  Oracle EOL at cycle %s: %s", cyc, exc)
             oracle_failure = True
+            failure_info = {"cycle": cyc, "kind": getattr(getattr(exc, "failure_kind", None),
+                                                          "value", None),
+                            "message": str(exc)[:300]}
             break
         n_completed += 1
 
@@ -365,6 +549,26 @@ def run_oracle_candidate(
         "oracle_failure":       oracle_failure,
         "n_cycles_completed":   n_completed,
         "implied_eol_cycle":    implied_eol_cycle,
+        "oracle_soh_history":   soh_history,
+        # Fallbacks / compensations: per-cycle solver fidelity and degradation
+        # kind, the protocol clamps applied (current/duration bounds), the failure.
+        "fidelity_counts":      {f: sum(h.get("fidelity") == f for h in oracle._history)
+                                 for f in ("full", "reduced")},
+        "degraded_cycles":      sum(h.get("failure_kind") is not None for h in oracle._history),
+        "clamp_signatures":     sorted(oracle._warned_clamp_signatures),
+        "failure":              failure_info,
+        "oracle_step_summary":  summarise_steps(oracle_step_rows(oracle._history)),
+        "_oracle_step_rows":    oracle_step_rows(oracle._history),
+        # Simulated spectra per completed cycle (for comparison with the real ones).
+        "_oracle_spectra": {"frequencies": np.asarray(oracle.frequencies, float).tolist(),
+                            "cycles": [{"charge": (np.asarray(h["Z_charge_real"])
+                                                   - 1j * np.asarray(h["Z_charge_neg_imag"])),
+                                        "discharge": (np.asarray(h["Z_discharge_real"])
+                                                      - 1j * np.asarray(h["Z_discharge_neg_imag"])),
+                                        "eis_mode_used": h.get("eis_mode_used"),
+                                        "leak_charge": h.get("eis_leakage_charge"),
+                                        "leak_discharge": h.get("eis_leakage_discharge")}
+                                       for h in oracle._history if "Z_charge_real" in h]},
     }
 
 
@@ -458,6 +662,15 @@ def collect_eis_comparison(
     return {"circuit": circuit, "frequencies": freq, "panels": panels}
 
 
+def _extra_oracle_kwargs(oracle_kwargs: dict | None) -> dict:
+    """``oracle_kwargs`` minus the keys the probe/candidate builders set themselves."""
+    owned = {"model", "chemistry", "degradation_preset", "capacity_check",
+             "real_cell_capacity_mah", "kinetics_scale", "sei_rate_scale",
+             "dead_li_decay_scale", "plating_rate_scale", "dod_lam_scale",
+             "circuit", "ecm_model_fn"}
+    return {k: v for k, v in (oracle_kwargs or {}).items() if k not in owned}
+
+
 def run_crate_sensitivity_probe(
     cache: dict,
     kinetics_scale: float,
@@ -472,6 +685,9 @@ def run_crate_sensitivity_probe(
     circuit: str | None = None,
     chemistry: str = "Chen2020",
     dod_lam_scale: float = 0.0,
+    oracle_kwargs: dict | None = None,
+    protocol_key: str = "protocol",
+    calibration_model: str = CALIBRATION_MODEL,
 ) -> dict[str, Any]:
     """Run two short oracle simulations at low vs high C-rate; return loss rates.
 
@@ -482,7 +698,8 @@ def run_crate_sensitivity_probe(
     (``None`` -> loaded from the YAML config) sets the oracle's ECM structure.
     """
     circuit = _resolve_circuit(circuit)
-    protocols = np.array([cache["data"][c]["protocol"] for c in cache["cycles"]], dtype=np.float64)
+    protocols = np.array([cache["data"][c].get(protocol_key) or cache["data"][c]["protocol"]
+                          for c in cache["cycles"]], dtype=np.float64)
     base_protocol = np.median(protocols, axis=0)
     real_cap_mah = float(cache["real_cell_capacity_mah"])
     low_ma  = low_c_mult * real_cap_mah
@@ -490,7 +707,7 @@ def run_crate_sensitivity_probe(
 
     def _mean_loss_per_cycle(c_rate_ma: float) -> float | None:
         oracle = PyBaMMOracle(
-            model=CALIBRATION_MODEL,
+            model=calibration_model,
             chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
@@ -501,6 +718,10 @@ def run_crate_sensitivity_probe(
             plating_rate_scale=plating_rate_scale,
             dod_lam_scale=dod_lam_scale,
             circuit=circuit,
+            # Probes read only SOH, never the ECM fit: the analytic stub avoids
+            # an AutoEIS MCMC fit per probe cycle.
+            ecm_model_fn=_randles_stub_ecm,
+            **_extra_oracle_kwargs(oracle_kwargs),
         )
         oracle.reset()
         proto = base_protocol.copy()
@@ -546,6 +767,9 @@ def run_crate2_slope_probe(
     circuit: str | None = None,
     chemistry: str = "Chen2020",
     dod_lam_scale: float = 0.0,
+    oracle_kwargs: dict | None = None,
+    protocol_key: str = "protocol",
+    calibration_model: str = CALIBRATION_MODEL,
 ) -> dict[str, Any]:
     """Oracle-side analogue of the real multi-cell C_rate_2 slope.
 
@@ -557,7 +781,8 @@ def run_crate2_slope_probe(
     config) sets the oracle's ECM structure.
     """
     circuit = _resolve_circuit(circuit)
-    protocols = np.array([cache["data"][c]["protocol"] for c in cache["cycles"]], dtype=np.float64)
+    protocols = np.array([cache["data"][c].get(protocol_key) or cache["data"][c]["protocol"]
+                          for c in cache["cycles"]], dtype=np.float64)
     base_protocol = np.median(protocols, axis=0)
     real_cap_mah = float(cache["real_cell_capacity_mah"])
     c2_levels_ma = [m * real_cap_mah for m in c2_levels_mult]
@@ -565,7 +790,7 @@ def run_crate2_slope_probe(
     fade_mAh: list[float] = []
     for c2_ma in c2_levels_ma:
         oracle = PyBaMMOracle(
-            model=CALIBRATION_MODEL,
+            model=calibration_model,
             chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
@@ -576,6 +801,10 @@ def run_crate2_slope_probe(
             plating_rate_scale=plating_rate_scale,
             dod_lam_scale=dod_lam_scale,
             circuit=circuit,
+            # Probes read only SOH, never the ECM fit: the analytic stub avoids
+            # an AutoEIS MCMC fit per probe cycle.
+            ecm_model_fn=_randles_stub_ecm,
+            **_extra_oracle_kwargs(oracle_kwargs),
         )
         oracle.reset()
         proto = base_protocol.copy()
@@ -631,6 +860,8 @@ def score_candidate(
     result: dict, real_targets: dict, preset: str = "accelerated",
     crate_sensitivity_min: float = 3.0,
     real_crate2_slope: dict | None = None,
+    step_weight: float = 0.0,
+    fit_fade: bool = False,
 ) -> float:
     """Combined relative error (lower = better). Returns inf if nothing can be fit.
 
@@ -649,6 +880,12 @@ def score_candidate(
     inf (that candidate failed to produce a comparable metric). The legacy
     C_rate_1 sensitivity term (skipped when the probe wasn't run) and the C_rate_2
     slope-matching term (see :func:`slope_match_error`) are added in both modes.
+
+    ``fit_fade=True`` also adds the capacity-fade term in EIS/ECM mode (by default
+    jones2022 only *reports* it). ``step_weight > 0`` adds ``step_weight`` times
+    ``result["step_match_error"]`` (see :func:`step_match_error`): whether the
+    oracle's steps move the same share of capacity, and rest at the same
+    voltages, as the real cell's.
     """
     real_arc = real_targets.get("mean_arc_ratio")
     real_r1 = real_targets.get("r1_growth_pct")
@@ -669,6 +906,10 @@ def score_candidate(
         implied_eol = result.get("implied_eol_cycle")
         terms.append(abs(math.log(implied_eol / eol_target))
                      if eol_target and implied_eol and implied_eol > 0 else float("inf"))
+        if fit_fade and real_fade and real_fade > 0:
+            oracle_fade = result.get("oracle_soh_fade_per_cycle")
+            terms.append(abs(math.log(oracle_fade / real_fade))
+                         if oracle_fade and oracle_fade > 0 else float("inf"))
     elif real_fade and real_fade > 0:
         oracle_fade = result.get("oracle_soh_fade_per_cycle")
         terms.append(abs(math.log(oracle_fade / real_fade))
@@ -685,6 +926,10 @@ def score_candidate(
     if real_crate2_slope is not None:
         terms.append(slope_match_error(
             result.get("oracle_slope_mAh_per_mA"), real_crate2_slope))
+    if step_weight > 0:
+        step_err = result.get("step_match_error")
+        if step_err is not None:
+            terms.append(step_weight * step_err)
 
     return sum(terms)
 
@@ -867,9 +1112,29 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
     ``cfg`` bundles the (picklable) run configuration built in :func:`calibrate_oracle`.
     """
     t0 = time.time()
+    okw, pkey = cfg.get("oracle_kwargs"), cfg.get("protocol_key", "protocol")
+    cm = cfg.get("calibration_model", CALIBRATION_MODEL)
     result = run_oracle_candidate(cache, ks, srs, dds, prs, cfg["preset"],
                                   cfg["capacity_check"], circuit=cfg["circuit"],
-                                  chemistry=cfg["chemistry"], dod_lam_scale=dl)
+                                  calibration_model=cm, chemistry=cfg["chemistry"],
+                                  dod_lam_scale=dl, oracle_kwargs=okw, protocol_key=pkey)
+    step_rows = result.pop("_oracle_step_rows", [])
+    if cfg.get("real_step_summary"):
+        # Step shape is judged over the primary cell plus any extra replay cells
+        # (protocol-only caches): one cell's ~10 cycles populate too few C-rate bins.
+        n_extra_fail = 0
+        for extra in cfg.get("extra_caches") or []:
+            r = run_oracle_candidate(extra, ks, srs, dds, prs, cfg["preset"], False,
+                                     circuit=cfg["circuit"], calibration_model=cm,
+                                     chemistry=cfg["chemistry"],
+                                     dod_lam_scale=dl, oracle_kwargs=okw,
+                                     protocol_key=pkey, ecm_stub=True)
+            step_rows += r.pop("_oracle_step_rows", [])
+            n_extra_fail += int(bool(r["oracle_failure"]))
+        result["oracle_step_summary"] = summarise_steps(step_rows)
+        result["step_match_error"] = step_match_error(result["oracle_step_summary"],
+                                                      cfg["real_step_summary"])
+        result["n_extra_replay_failures"] = n_extra_fail
     if cfg["skip_crate_probe"]:
         result["crate_probe_skipped"] = True
         result["crate_sensitivity_ratio"] = None
@@ -878,16 +1143,20 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
             cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
             probe_cycles=cfg["crate_probe_cycles"], low_c_mult=cfg["crate_probe_low_c"],
             high_c_mult=cfg["crate_probe_high_c"], circuit=cfg["circuit"],
-            chemistry=cfg["chemistry"], dod_lam_scale=dl))
+            chemistry=cfg["chemistry"], dod_lam_scale=dl,
+            oracle_kwargs=okw, protocol_key=pkey, calibration_model=cm))
         result["crate_probe_skipped"] = False
     if not cfg["skip_crate2_slope"]:
         result.update(run_crate2_slope_probe(
             cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
             probe_cycles=cfg["crate2_probe_cycles"], c2_levels_mult=tuple(cfg["crate2_levels"]),
-            circuit=cfg["circuit"], chemistry=cfg["chemistry"], dod_lam_scale=dl))
+            circuit=cfg["circuit"], chemistry=cfg["chemistry"], dod_lam_scale=dl,
+            oracle_kwargs=okw, protocol_key=pkey, calibration_model=cm))
     result["runtime_s"] = round(time.time() - t0, 1)
     score = score_candidate(result, cfg["real_targets"], cfg["preset"],
-                            cfg["crate_sensitivity_min"], cfg["real_crate2_slope"])
+                            cfg["crate_sensitivity_min"], cfg["real_crate2_slope"],
+                            step_weight=cfg.get("step_weight", 0.0),
+                            fit_fade=cfg.get("fit_fade", False))
     result["score"] = score if math.isfinite(score) else None
     return result, score
 
@@ -1005,7 +1274,8 @@ def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler
             "failed or was pruned). Re-run with n_jobs=1 to see per-trial logs.")
     scored = sorted(
         [(r, score_candidate(r, real_targets, cfg["preset"],
-                             cfg["crate_sensitivity_min"], cfg["real_crate2_slope"]))
+                             cfg["crate_sensitivity_min"], cfg["real_crate2_slope"],
+                             step_weight=cfg["step_weight"], fit_fade=cfg["fit_fade"]))
          for r in results],
         key=lambda x: x[1])
     best, best_score = scored[0]
@@ -1043,8 +1313,25 @@ def calibrate_oracle(
     circuit: str | None = None,
     chemistry: str = "Chen2020",
     show_progress_bar: bool = False,
+    oracle_kwargs: dict | None = None,
+    protocol_key: str = "protocol",
+    real_step_summary: dict | None = None,
+    extra_caches: list[dict] | None = None,
+    step_weight: float = 0.0,
+    fit_fade: bool = False,
+    calibration_model: str = CALIBRATION_MODEL,
 ) -> dict[str, Any]:
     """Run the Optuna BO over (kinetics, sei_rate, dead_li_decay, plating)_scale.
+
+    Step-shape calibration (all optional, off by default): ``real_step_summary``
+    (from :func:`summarise_steps` over real GCPL steps) with ``step_weight > 0``
+    adds :func:`step_match_error` to the score, evaluated over the primary cache
+    plus ``extra_caches`` (protocol-only caches of further cells, replayed with the
+    Randles stub). ``oracle_kwargs`` (e.g. BOL ``parameter_scales``,
+    ``discharge_mode="protocol"``, widened ``c_max_mA``) apply to every oracle the
+    sweep builds; ``protocol_key="replay_protocol"`` replays the commanded
+    durations instead of the observed ones; ``fit_fade`` adds the capacity-fade
+    term in EIS mode.
 
     Pure engine: operates on *cache* + precomputed *real_targets* (and optional
     *real_crate2_slope*); no dataset access. Returns a dict with ``best``,
@@ -1082,6 +1369,10 @@ def calibrate_oracle(
         "skip_crate2_slope": skip_crate2_slope, "crate2_probe_cycles": crate2_probe_cycles,
         "crate2_levels": tuple(crate2_levels), "crate_sensitivity_min": crate_sensitivity_min,
         "real_crate2_slope": real_crate2_slope, "real_targets": real_targets,
+        "oracle_kwargs": dict(oracle_kwargs or {}), "protocol_key": protocol_key,
+        "real_step_summary": real_step_summary, "extra_caches": list(extra_caches or []),
+        "step_weight": float(step_weight), "fit_fade": bool(fit_fade),
+        "calibration_model": calibration_model,
     }
     ranges = {"ks_min": ks_min, "ks_max": ks_max, "srs_min": srs_min, "srs_max": srs_max,
               "dds_min": dds_min, "dds_max": dds_max, "prs_min": prs_min, "prs_max": prs_max,
@@ -1110,7 +1401,8 @@ def calibrate_oracle(
         oracle_slope = result.get("oracle_slope_mAh_per_mA")
         log.info(
             "  arc_ratio=%s (real=%s)  r1_growth=%s (real=%s)  eol_cycle~%s (target=%s)  "
-            "fade/cyc=%s (real=%s)  crate_ratio=%s (min=%.1f)  c2_slope=%s (real_CI=%s)  score=%.3f  %.0fs",
+            "fade/cyc=%s (real=%s)  crate_ratio=%s (min=%.1f)  c2_slope=%s (real_CI=%s)  "
+            "step_err=%s  score=%.3f  %.0fs",
             f"{result['oracle_arc_ratio']:.2f}" if result["oracle_arc_ratio"] is not None else "n/a",
             f"{real_targets['mean_arc_ratio']:.2f}" if real_targets["mean_arc_ratio"] else "?",
             f"{result['oracle_r1_growth_pct']:.1f}%" if result["oracle_r1_growth_pct"] is not None else "n/a",
@@ -1123,6 +1415,7 @@ def calibrate_oracle(
             crate_sensitivity_min,
             f"{oracle_slope:.5f}" if oracle_slope is not None else "n/a",
             f"[{real_crate2_slope['ci_lo']:.5f}, {real_crate2_slope['ci_hi']:.5f}]" if real_crate2_slope else "n/a",
+            f"{result['step_match_error']:.3f}" if result.get("step_match_error") is not None else "n/a",
             score if math.isfinite(score) else float("nan"),
             result["runtime_s"],
         )
@@ -1151,7 +1444,8 @@ def calibrate_oracle(
                    show_progress_bar=show_progress_bar)
 
     scored = sorted(
-        [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope))
+        [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope,
+                             step_weight=cfg["step_weight"], fit_fade=cfg["fit_fade"]))
          for r in results],
         key=lambda x: x[1],
     )
@@ -1225,8 +1519,19 @@ def write_oracle_config(
     real_crate2_slope: dict | None = None,
     drift_result: dict | None = None,
     chemistry: str = "Chen2020",
+    oracle_kwargs: dict | None = None,
+    real_step_summary: dict | None = None,
+    step_cells: list[str] | None = None,
+    calibration_model: str = CALIBRATION_MODEL,
+    real_capacity_auto: bool = False,
 ) -> None:
-    """Write YAML config with calibration provenance to *output_path*."""
+    """Write YAML config with calibration provenance to *output_path*.
+
+    ``oracle_kwargs`` (the extra :class:`PyBaMMOracle` kwargs the sweep used) are
+    written back as ``cycling.discharge_mode``, ``protocol_bounds.*`` and the
+    ``bol`` section, so the experiment builds the oracle the calibration scored.
+    """
+    okw = dict(oracle_kwargs or {})
     output_path = Path(output_path)
     oracle_defaults = load_oracle_config()
     _od_cycling = oracle_defaults.get("cycling", {}) or {}
@@ -1255,8 +1560,18 @@ def write_oracle_config(
 
     arc_close  = (arc_real and arc_oracle and abs(arc_oracle / arc_real - 1.0) < 0.25)
     arc_status = "validated" if arc_close else "partial — gap > 25%"
-    r1_close   = (r1_real and r1_oracle and abs(r1_oracle / r1_real - 1.0) < 2.0)
-    r1_status  = "validated" if r1_close else "partial — gap > 200% of target"
+    # Same sign and within 50%: a shrinking oracle R1 cannot "validate" real growth.
+    r1_close   = (r1_real and r1_oracle is not None and r1_oracle * r1_real > 0
+                  and abs(r1_oracle / r1_real - 1.0) < 0.5)
+    r1_status  = "validated" if r1_close else "partial — wrong sign or gap > 50% of target"
+
+    step_err = best.get("step_match_error")
+    if real_step_summary is None:
+        step_status = "not run (no real step summary)"
+    elif step_err is not None and math.isfinite(step_err) and step_err < 0.5:
+        step_status = "validated (step_match_error < 0.5)"
+    else:
+        step_status = "partial — step_match_error >= 0.5"
     dds_best   = best.get("dead_li_decay_scale", 1.0)
     prs_best   = best.get("plating_rate_scale", 1.0)
     dl_best    = best.get("dod_lam_scale", 0.0)
@@ -1319,14 +1634,29 @@ def write_oracle_config(
         f"  n_cycles: {_od_cycling.get('n_cycles', 1)}",
         f"  parameter_set: {chemistry}",
         f"  chemistry: {chemistry}",
-        f"  temperature_K: {_od_cycling.get('temperature_K', 298.15)}",
+        f"  temperature_K: {okw.get('temperature_K', _od_cycling.get('temperature_K', 298.15))}",
+        f"  discharge_mode: {okw.get('discharge_mode', _od_cycling.get('discharge_mode', 'cutoff'))}",
+        *([f"  thermal: {okw['thermal']}",
+           f"  T_ambient_K: {okw.get('T_ambient_K', okw.get('temperature_K', 298.15))}",
+           f"  h_total_W_per_m2K: {float(okw.get('h_total_W_per_m2K', 10.0)):.6g}"]
+          if okw.get("thermal") else []),
         "",
+        "model:",
+        f"  type: {calibration_model}   # calibrated with this model; simulate with the same",
+        "",
+        *_bounds_and_bol_lines(okw),
+        *(["ecm:", "  rescale_target_r0: null   # real-scale cell: no rescaling of fitted R",
+           ""] if "ecm_rescale_target_r0" in okw and okw["ecm_rescale_target_r0"] is None else []),
         "eis:",
         f"  freq_min_hz: {_od_eis.get('freq_min_hz', 0.01)}",
         f"  freq_max_hz: {_od_eis.get('freq_max_hz', 10000.0)}",
         f"  n_freq_points: {_od_eis.get('n_freq_points', 60)}",
+        *([f"  frequencies_hz: {json.dumps([round(float(v), 6) for v in okw['frequencies']])}   # the instrument's grid"]
+          if okw.get("frequencies") is not None else []),
         f"  noise_level: {_od_eis.get('noise_level', 0.02)}",
         f"  noise_model: {_od_eis.get('noise_model', 'combined')}",
+        *([f"  mode: {okw['eis_mode']}   # measured as performed (sweep after the rest); see oracle._nonstationary_spectrum"]
+          if okw.get("eis_mode") else []),
         "  # Non-stationarity drift (EIS measured while the OCP still relaxes); coupled to",
         "  # cycling.rest_s. Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126)",
         "  # Eqs (40)/(43). 0.0 disables. See _calibration.drift below.",
@@ -1343,6 +1673,8 @@ def write_oracle_config(
         "",
         "protocol_scaling:",
         "  real_cell_capacity_mah_legacy_default: 200.0  # always auto-detect per cell",
+        *([f"  real_cell_capacity: auto   # exp2: detect each held-out cell's capacity"]
+          if real_capacity_auto else []),
         f"  kinetics_scale: {best['kinetics_scale']}",
         f"  sei_rate_scale: {best['sei_rate_scale']}",
         f"  dead_li_decay_scale: {dds_best:.4g}",
@@ -1433,6 +1765,15 @@ def write_oracle_config(
         '           crate_sensitivity term above. Requires the oracle.py _C2_MAX_mA clip',
         '           fix (0.5C -> 2C)."',
         "",
+        "  step_shape:",
+        f'    status: "{step_status}"',
+        '    target_metric: "per-C-rate-bin median/p90 step throughput (fraction of capacity) + rest-voltage window, real GCPL vs oracle"',
+        f'    achieved_step_match_error: "{fmt(step_err)}"',
+        f'    cells_used: "{", ".join(step_cells or [cell_id])}"',
+        f'    real_rest_v_p5_p95: "{_fmt_rest(real_step_summary)}"',
+        f'    oracle_rest_v_p5_p95: "{_fmt_rest(best.get("oracle_step_summary"))}"',
+        '    note: "0 = identical step-throughput distributions; see battery_oracle.tune.step_match_error."',
+        "",
         "  drift:",
         f'    status: "{"calibrated" if _drift_scale > 0 else "disabled (drift_scale=0)"}"',
         '    target_metric: "linKK low/high-freq residual ratio (non-stationarity signature)"',
@@ -1458,6 +1799,33 @@ def write_oracle_config(
     with open(output_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     log.info("Wrote config to %s", output_path)
+
+
+_BOUND_KEYS = ("c_min_mA", "c_max_mA", "c2_min_mA", "c2_max_mA", "dur_min_s", "dur_max_s",
+               "v_charge_max", "v_discharge_min", "charge_stage_max_s", "dfn_max_crate")
+
+
+def _bounds_and_bol_lines(okw: dict) -> list[str]:
+    """YAML lines for the protocol_bounds overrides and the bol section in ``okw``."""
+    lines: list[str] = []
+    bounds = {k: okw[k] for k in _BOUND_KEYS if k in okw}
+    if bounds:
+        lines += ["protocol_bounds:"] + [f"  {k}: {float(v):.6g}" for k, v in bounds.items()] + [""]
+    if any(k in okw for k in ("parameter_scales", "parameter_overrides", "contact_resistance_ohm")):
+        cr = okw.get("contact_resistance_ohm")
+        lines += [
+            "bol:",
+            f"  parameter_scales: {json.dumps(okw.get('parameter_scales') or {})}",
+            f"  parameter_overrides: {json.dumps(okw.get('parameter_overrides') or {})}",
+            f"  contact_resistance_ohm: {'null' if cr is None else f'{float(cr):.6g}'}",
+            "",
+        ]
+    return lines
+
+
+def _fmt_rest(summary: dict | None) -> str:
+    rv = (summary or {}).get("rest_v")
+    return f"[{rv['p5']:.3f}, {rv['p95']:.3f}] V" if rv else "n/a"
 
 
 def _json_default(obj):

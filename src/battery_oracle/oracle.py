@@ -58,6 +58,8 @@ from battery_oracle._eis.noise import (
     add_white_noise as _add_white_noise,
 )
 from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
+from battery_oracle.parameter_sets import resolve_parameter_values
+from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES, Protocol
 
 log = logging.getLogger(__name__)
@@ -202,6 +204,16 @@ _SUPPORTED_CHEMISTRIES = {
     "Chen2020":  "Chen2020",   # LG M50, NMC811/graphite, 5 Ah (default)
     "Xu2019":    "Xu2019",     # NMC532 half-cell
     "Prada2013": "Prada2013",  # A123 LFP, 2.3 Ah
+    # Custom sets (battery_oracle.parameter_sets): the real jones2022 LiR2032
+    # LiCoO2/graphite coin cell (~42 mAh), Ai2020 template (or Ramadass2004).
+    "LiR2032":   "LiR2032",
+    "LiR2032_Ramadass2004": "LiR2032_Ramadass2004",
+    "LiR2032_RamadassGraphite": "LiR2032_RamadassGraphite",   # Ai2020 + Ramadass graphite OCP
+    "LiR2032_ChenGraphite": "LiR2032_ChenGraphite",           # Ai2020 + Chen2020 LG M50 graphite OCP
+    "LiR2032_EckerGraphite": "LiR2032_EckerGraphite",
+    "LiR2032_MohtatGraphite": "LiR2032_MohtatGraphite",
+    "LiR2032_EckerGraphite_MarquisLCO": "LiR2032_EckerGraphite_MarquisLCO",
+    "LiR2032_ChenGraphite_MarquisLCO": "LiR2032_ChenGraphite_MarquisLCO",
     # friendly aliases
     "LGM50":     "Chen2020",
     "NMC532":    "Xu2019",
@@ -1139,6 +1151,14 @@ class PyBaMMOracle:
         eis_drift_scale: float = 0.0,
         eis_drift_tau_s: float = 600.0,
         eis_drift_n_periods: float = 4.0,
+        # -- EIS measurement model: "equilibrium" (stock, linearised at a relaxed
+        #    state) | "nonstationary" (the cycling model itself linearised at the
+        #    simulated states inside the sweep that follows each 20 min rest; see
+        #    _nonstationary_spectrum) --
+        eis_mode: str = "equilibrium",
+        eis_sweep_overhead_s: float = 1.15,
+        eis_sweep_periods: float = 1.0,
+        eis_amplitude_mA: float = 5.0,
         # Seedable randomness (#A4): seeds the synthetic EIS noise generator only
         # (see the docstring's `seed` entry for what this does/does not cover).
         seed: int | None = None,
@@ -1151,6 +1171,24 @@ class PyBaMMOracle:
         c2_stress_slope_mah_per_ma: float = 0.0794,
         c2_stress_ref_ma: float = 75.27,
         dod_lam_scale: float = 0.0,
+        # -- Beginning-of-life (BOL) fit (config_oracle_defaults.yml: bol.*) --
+        # Multipliers / absolute values applied to the PyBaMM parameter set after
+        # the degradation preset (see battery_oracle.params). Produced by
+        # battery_oracle.bol_fit (PyBOP fit to the real cell's first cycles).
+        parameter_scales: dict | None = None,
+        parameter_overrides: dict | None = None,
+        # Series contact resistance [Ohm] in the 5 Ah PyBaMM frame; None = off.
+        contact_resistance_ohm: float | None = None,
+        # "cutoff": discharge always runs to v_discharge_min (>= 1 h timeout) --
+        # the jones2022 protocol. "protocol": discharge runs for the protocol's
+        # own duration (or until v_discharge_min), for time-limited protocols.
+        discharge_mode: str = "cutoff",
+        # Graphite OCP hysteresis half-gap [V] (PyBaMM one-state model, as in the chain
+        # fit: bol_chain.hysteresis_values); None = no hysteresis.
+        hysteresis_half_gap_V: float | None = None,
+        # Particle-size distribution, as in the chain fit (bol_chain.size_distribution_values):
+        # {"mode": "both" | "positive" | "negative", "sd_n": .., "sd_p": ..}; None = single size.
+        size_distribution: dict | None = None,
         rest_s: float = 1200.0,
         circuit: str | None = None,
         action_names: list[str] | None = None,
@@ -1248,9 +1286,9 @@ class PyBaMMOracle:
         # Real-cell-specific protocol scaling: jones2022 cells vary in actual
         # measured capacity (e.g. PJ121 ~42 mAh, not the ~200 mAh assumed by the
         # old hardcoded _CAP_SCALE), so this is exposed per-instance rather than
-        # being a fixed class constant. Same-C-rate-fraction scaling onto the
-        # Chen2020 5 Ah cell: see _protocol_to_experiment.
-        self._cap_scale = 5_000.0 / float(real_cell_capacity_mah)
+        # being a fixed class constant. Same-C-rate scaling onto the simulated
+        # cell's nominal capacity (5 Ah for Chen2020, ~42 mAh for LiR2032): set
+        # once the parameter values are resolved below; see _protocol_to_experiment.
         self._real_cell_capacity_mah = float(real_cell_capacity_mah)
 
         # C_rate_2 stress term: an explicit, additive capacity-loss increment,
@@ -1330,7 +1368,7 @@ class PyBaMMOracle:
         self._cumulative_dod_lam_ah = 0.0     # = frac * nominal_cap (eol_loss budget)
         self._cumulative_dod_throughput_ah = 0.0
         self.frequencies = (
-            frequencies if frequencies is not None else np.logspace(-2, 4, 60)
+            np.asarray(frequencies, float) if frequencies is not None else np.logspace(-2, 4, 60)
         )
         # Chemistry (#14): validate early (before any heavy PyBaMM work). An
         # explicit parameter_values wins; otherwise resolve the chemistry name.
@@ -1340,7 +1378,7 @@ class PyBaMMOracle:
                 f"Unknown chemistry {chemistry!r}; choose one of "
                 f"{sorted(_SUPPORTED_CHEMISTRIES)}."
             )
-        self._pv = parameter_values or _pb.ParameterValues(
+        self._pv = parameter_values or resolve_parameter_values(
             _SUPPORTED_CHEMISTRIES[self._chemistry]
         )
         self.eol_capacity_fraction = eol_capacity_fraction
@@ -1353,6 +1391,24 @@ class PyBaMMOracle:
         self._eis_drift_scale = float(eis_drift_scale)
         self._eis_drift_tau_s = float(eis_drift_tau_s)
         self._eis_drift_n_periods = float(eis_drift_n_periods)
+        if eis_mode not in ("equilibrium", "nonstationary"):
+            raise ValueError(f"Unknown eis_mode {eis_mode!r}; choose 'equilibrium' or 'nonstationary'.")
+        self._eis_mode = str(eis_mode)
+        self._eis_amplitude_mA = float(eis_amplitude_mA)
+        # Sweep timing (jones2022: 57 points, 20 kHz -> 0.02 Hz in ~297 s, high to
+        # low): each frequency's window = periods / f + a fixed instrument overhead
+        # (1.15 s/point reproduces the measured sweep length). Offsets from the sweep
+        # start, in self.frequencies order.
+        _f = np.asarray(self.frequencies, float)
+        _order = np.argsort(-_f)
+        _len = float(eis_sweep_periods) / _f[_order] + float(eis_sweep_overhead_s)
+        _end = np.cumsum(_len)
+        self._eis_win_lo = np.empty_like(_f)
+        self._eis_win_hi = np.empty_like(_f)
+        self._eis_win_lo[_order] = _end - _len
+        self._eis_win_hi[_order] = _end
+        self._eis_sweep_s = float(_end[-1]) + 1.0
+        self._eis_lin_ok: bool | None = None       # state layout check (first spectrum)
         # Seedable randomness (#A4): covers only the synthetic EIS noise terms
         # (_eis/noise.py); PyBaMM solver and AutoEIS MCMC are unaffected. Stored
         # separately from self._rng so reset() can re-derive a fresh generator
@@ -1435,6 +1491,31 @@ class PyBaMMOracle:
             preset_constants=preset_constants,
         )
 
+        # Beginning-of-life fit (see battery_oracle.params): applied AFTER the
+        # preset so fitted multipliers compose with kinetics_scale rather than
+        # being overwritten by it.
+        self._parameter_scales = dict(parameter_scales or {})
+        self._parameter_overrides = dict(parameter_overrides or {})
+        apply_parameter_scales(self._pv, self._parameter_scales)
+        apply_parameter_overrides(self._pv, self._parameter_overrides)
+        # Real current [mA] x _cap_scale = simulated current [mA] at the same
+        # C-rate. After the BOL overrides, which may set the nominal capacity.
+        self._nominal_mAh = 1000.0 * float(self._pv["Nominal cell capacity [A.h]"])
+        self._cap_scale = self._nominal_mAh / self._real_cell_capacity_mah
+        self._c20_A = self._nominal_mAh / 1000.0 / 20.0
+        self._contact_resistance_ohm = (
+            float(contact_resistance_ohm) if contact_resistance_ohm is not None else None
+        )
+        if self._contact_resistance_ohm is not None:
+            self._pv.update({"Contact resistance [Ohm]": self._contact_resistance_ohm},
+                            check_already_exists=False)
+            self._deg_opts = {**self._deg_opts, "contact resistance": "true"}
+        if discharge_mode not in ("cutoff", "protocol"):
+            raise ValueError(
+                f"Unknown discharge_mode {discharge_mode!r}; choose 'cutoff' or 'protocol'."
+            )
+        self._discharge_mode = discharge_mode
+
         # Thermal submodel. Lumped (Timms 2021) adds one ODE coupling cell
         # temperature to the electrochemistry; merge it into the degradation option
         # dict so _build_native_state's model picks it up, and write the ambient /
@@ -1456,6 +1537,30 @@ class PyBaMMOracle:
             self._pv["Initial temperature [K]"] = self._T_ambient_K
             self._pv["Total heat transfer coefficient [W.m-2.K-1]"] = self._h_total
             self._deg_opts = {**self._deg_opts, "thermal": "lumped"}
+            # A set with a whole-cell heat capacity (LiR2032: the coin can, see
+            # parameter_sets) heats the real cell, not the electrode stack alone.
+            if "Cell heat capacity [J.K-1.m-3]" in self._pv.keys():
+                self._deg_opts["use lumped thermal capacity"] = "true"
+        # Graphite hysteresis and particle-size distribution from a chain fit: the
+        # same submodels and parameter functions as the fitted model, so the oracle
+        # replays the protocol with the model that was fitted.
+        self._var_pts = None
+        self._hysteresis_half_gap_V = (float(hysteresis_half_gap_V)
+                                       if hysteresis_half_gap_V is not None else None)
+        if self._hysteresis_half_gap_V is not None:
+            from battery_oracle.bol_chain import hysteresis_values
+            self._pv.update(hysteresis_values(self._pv, self._hysteresis_half_gap_V),
+                            check_already_exists=False)
+            self._deg_opts = {**self._deg_opts, "open-circuit potential": ("one-state hysteresis", "single")}
+        self._size_distribution = dict(size_distribution) if size_distribution else None
+        if self._size_distribution:
+            from battery_oracle.bol_chain import PSD_POINTS, chain_options, psd_mode, size_distribution_values
+            mode = psd_mode(self._size_distribution.get("mode", "both"))
+            self._pv = size_distribution_values(self._pv, float(self._size_distribution.get("sd_n") or 0.3),
+                                                float(self._size_distribution.get("sd_p") or 0.3))
+            self._deg_opts = {**self._deg_opts,
+                              "particle size": chain_options(size_distribution=mode)["particle size"]}
+            self._var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS}
         # Arrhenius EIS temperature dependence (#11).
         self._E_a = float(E_a_J_per_mol)
         self._E_a_el = float(E_a_electrolyte_J_per_mol)
@@ -1466,6 +1571,12 @@ class PyBaMMOracle:
 
         # EIS model is built fresh each __call__ so degraded ParameterValues can
         # be injected for LAM before each simulation (see §4.4 ORACLE.md).
+
+        # Same discretisation as stage A: harmonic averaging of coefficients at the
+        # electrode|separator interfaces (battery_oracle.patches). Non-strict: on an
+        # untested PyBaMM it warns and the stock (arithmetic) averaging is used.
+        from battery_oracle import patches as _patches
+        _patches.apply(["harmonic_flux_coefficients"], strict=False)
 
         self._build_native_state()
 
@@ -1581,6 +1692,13 @@ class PyBaMMOracle:
         # or a recognised dataset name -- and load_oracle_config(None) loads the
         # packaged config_oracle_defaults.yml -- so None is passed through as-is.
         return build_oracle_from_oracle_config(source)
+
+    def _model_var_pts(self, model):
+        """Mesh for a PyBaMM model of this oracle: the defaults, with the coarse
+        size-distribution mesh of the chain fit when one is set (None otherwise)."""
+        if not self._var_pts:
+            return None
+        return {**model.default_var_pts, **self._var_pts}
 
     def _refresh_state_schema(self) -> None:
         """Recompute the returned-state layout from the circuit + active flags.
@@ -1859,11 +1977,12 @@ class PyBaMMOracle:
         c2_hi = self._current_ceiling_mA(self._C2_MAX_mA)
 
         clamps: list[tuple[str, str]] = []
-        C1    = self._sanitise_current(C1_mA * s, 500.0, self._C_MIN_mA,  c_hi,
+        # NaN fallbacks: 0.1C / 0.05C of the simulated cell (500 / 250 mA on 5 Ah).
+        C1    = self._sanitise_current(C1_mA * s, 0.1 * self._nominal_mAh, self._C_MIN_mA,  c_hi,
                                         label="C1", clamps=clamps)
-        C2    = self._sanitise_current(C2_mA * s, 250.0, self._C2_MIN_mA, c2_hi,
+        C2    = self._sanitise_current(C2_mA * s, 0.05 * self._nominal_mAh, self._C2_MIN_mA, c2_hi,
                                         label="C2", clamps=clamps)
-        D     = self._sanitise_current(D_mA  * s, 500.0, self._C_MIN_mA,  c_hi,
+        D     = self._sanitise_current(D_mA  * s, 0.1 * self._nominal_mAh, self._C_MIN_mA,  c_hi,
                                         label="D", clamps=clamps)
         # Discharge is governed by the 3.0 V cutoff (Jones 2022): use a generous
         # timeout (>= time to reach 3.0 V even at ~1C) rather than the real
@@ -1872,7 +1991,11 @@ class PyBaMMOracle:
         # discharge step always has time to reach v_discharge_min rather than
         # being cut off early by a too-short requested duration.
         dur_d_pre = self._sanitise_duration(dur_d_h, 1.0, label="dur_d", clamps=clamps)
-        dur_d = max(dur_d_pre, 3_600.0)
+        # discharge_mode="protocol" keeps the requested duration, for protocols
+        # whose discharges are time-limited (jones2022's are not: they run to
+        # 3.0 V; their records only *look* time-limited because ~10 s logging
+        # misses the last part of the voltage drop).
+        dur_d = dur_d_pre if self._discharge_mode == "protocol" else max(dur_d_pre, 3_600.0)
         if dur_d != dur_d_pre:
             clamps.append(("dur_d:discharge_floor",
                             f"dur_d {dur_d_pre:.0f}→{dur_d:.0f} s "
@@ -1902,16 +2025,20 @@ class PyBaMMOracle:
         )
 
         vc, vd, rest = self._V_CHARGE_MAX, self._V_DISCHARGE_MIN, self._rest_s
+        # Non-stationary EIS: the sweep is a zero-current period after the 20 min
+        # rest, so the rest step runs on through it (the cycle keeps the real timing).
+        rest_step = (f"Rest for {rest + self._eis_sweep_s:.0f} seconds"
+                     if self._eis_mode == "nonstationary" else f"Rest for {rest:.0f} seconds")
         # Faithful jones2022 cycle (Jones, Stimming & Lee 2022, Nat. Commun.
         # 13:4806, Methods). Discharge-first order (cyclically equivalent to the
         # paper's discharged-start; preserves the initial_soc=0.8 first-call
         # logic). EIS is read at the relaxed post-rest states (steps[1], steps[4]).
         steps = (
             f"Discharge at {D:.4f} A for {dur_d:.0f} seconds or until {vd} V",   # [0]
-            f"Rest for {rest:.0f} seconds",                                       # [1] discharged-state OCV rest -> EIS@discharged
+            rest_step,                                                            # [1] discharged-state OCV rest -> EIS@discharged
             f"Charge at {C1:.4f} A for {dur1:.0f} seconds or until {vc} V",       # [2] CC stage 1
             f"Charge at {C2:.4f} A for {dur2:.0f} seconds or until {vc} V",       # [3] CC stage 2
-            f"Rest for {rest:.0f} seconds",                                       # [4] charged-state OCV rest -> EIS@charged
+            rest_step,                                                            # [4] charged-state OCV rest -> EIS@charged
         )
         # Each oracle call is ONE cycle from PyBaMM's perspective.
         # Wrapping all steps in a tuple tells PyBaMM to treat them as a single
@@ -1931,6 +2058,156 @@ class PyBaMMOracle:
                   len(self._history), np.array2string(np.asarray(protocol), precision=4),
                   steps)
         return pb.Experiment(cycles), protocol_applied
+
+    def _add_eis_noise(self, Z: np.ndarray) -> np.ndarray:
+        """Measurement noise on a spectrum (config eis.noise_*)."""
+        if self._eis_noise_level > 0.0 and self._eis_noise_model != "none":
+            nl = self._eis_noise_level
+            if self._eis_noise_model == "white":
+                Z = _add_white_noise(Z, nl, rng=self._rng)
+            elif self._eis_noise_model == "flicker":
+                Z = _add_flicker_noise(self.frequencies, Z, nl, rng=self._rng)
+            else:  # "combined": split budget across flicker and white terms
+                Z = _add_flicker_noise(
+                    self.frequencies, Z,
+                    noise_level=nl * self._noise_combined_flicker_frac,
+                    rng=self._rng,
+                )
+                Z = _add_white_noise(
+                    Z, noise_level=nl * self._noise_combined_white_frac, rng=self._rng
+                )
+        return Z
+
+    def _nonstationary_spectrum(self, step, eis_pv) -> np.ndarray:
+        """The EIS sweep after a 20 min rest, measured as performed.
+
+        ``step`` is the cycling solution's rest step. A double-layer DFN with the
+        oracle's own options and the EIS voltage/current variables (PyBOP's EIS
+        model) starts from the rest's first state -- current already zero; mapped by
+        variable name in physical units (``set_initial_conditions_from``), so PyBaMM's
+        state references are handled -- and is integrated at zero current through
+        the rest and the sweep. (Starting from the end of the step before, still
+        under current at a voltage cut-off, has no consistent zero-current initial
+        state; the double layer relaxes in milliseconds, so nothing is lost.) Frequency ``k`` is linearised at
+        the simulated state at the centre of its window (``self._eis_win_lo/hi``
+        after the rest; :func:`battery_oracle.eis_nonstationary.linearised_impedance`)
+        and the lock-in leakage of the simulated voltage drift is added. Same physics
+        as stage A (:mod:`battery_oracle.bol_chain`). The cycling model itself keeps
+        its algebraic surface form: the double layer only matters at EIS frequencies,
+        and in the experiment's instantaneous current steps it makes the DAE fail.
+        """
+        import pybamm
+        from pybop.pybamm.eis_simulator import EISSimulator
+
+        from battery_oracle.eis_nonstationary import linearised_impedance
+
+        pv = eis_pv.copy()
+        pv["Ambient temperature [K]"] = self._pv["Ambient temperature [K]"]
+        pv["Current function [A]"] = 0.0
+        lo, hi = self._rest_s + self._eis_win_lo, self._rest_s + self._eis_win_hi
+        lin = 0.5 * (lo + hi)
+        t_end = float(hi.max()) + 1.0
+
+        def _measure(start_state, t0: float):
+            """Double-layer EIS model from ``start_state`` at rest time ``t0``, to t_end."""
+            opts = {**self._deg_opts, "surface form": "differential"}
+            model = self._model_cls(options=opts)
+            model.set_initial_conditions_from(start_state, inplace=True)
+            model = EISSimulator.set_up_for_eis(None, model)
+            # dense output in the first second after t0: the stiffest part of the rest
+            rel = np.unique(np.concatenate([[0.0, t_end - t0], np.logspace(-4, 0, 9),
+                                            np.linspace(0.0, max(self._rest_s - t0, 1.0), 61),
+                                            lo - t0, hi - t0, lin - t0]))
+            rel = rel[rel >= 0.0]
+            last_exc = None
+            # A failure raises with its reason (caught and recorded by the caller).
+            # Tier 2 relaxes the algebraic error test (PyBOP's own IDAKLU setting).
+            for options in ({"num_threads": 1}, {"num_threads": 1, "suppress_algebraic_error": True}):
+                try:
+                    solver = pybamm.IDAKLUSolver(rtol=1e-6, atol=1e-6, options=options)
+                    sim = pybamm.Simulation(model, parameter_values=pv, solver=solver,
+                                            var_pts=self._model_var_pts(model))
+                    return model, sim, sim.solve(t_eval=rel)
+                except pybamm.SolverError as exc:
+                    last_exc = exc
+            raise last_exc
+
+        try:
+            model, sim, sol = _measure(step.first_state, 0.0)
+            t_shift = 0.0
+        except pybamm.SolverError:
+            # The first instants after the current stops (double layer and
+            # electrolyte relaxing) can defeat the double-layer DAE. Run them with
+            # the cycling model itself (no double layer; it integrated this rest
+            # already), then measure from there: the double layer relaxes in ms
+            # and the first EIS window starts after the 20 min rest, so nothing
+            # measured changes.
+            t_shift = 30.0
+            m0 = self._model_cls(options=self._deg_opts)
+            m0.set_initial_conditions_from(step.first_state, inplace=True)
+            pre = pybamm.Simulation(m0, parameter_values=pv, var_pts=self._model_var_pts(m0),
+                                    solver=pybamm.IDAKLUSolver(rtol=1e-6, atol=1e-6,
+                                                               options={"num_threads": 1}))
+            pre_sol = pre.solve(t_eval=np.linspace(0.0, t_shift, 31))
+            model, sim, sol = _measure(pre_sol, t_shift)
+        ts = np.asarray(sol.t, float) + t_shift
+        if ts[-1] < t_end - 1e-6:
+            raise RuntimeError(f"rest + sweep simulation stopped at {ts[-1]:.0f} s of {t_end:.0f} s "
+                               f"({sol.termination})")
+        v = np.asarray(sol["Voltage [V]"].entries, float)
+        idx = np.clip(np.searchsorted(ts, lin), 0, ts.size - 1)
+        self._eis_lin_ok = bool(np.allclose(ts[idx], lin, atol=1e-6))
+        v_scale = getattr(model.variables["Voltage [V]"], "scale", 1)
+        i_scale = getattr(model.variables["Current [A]"], "scale", 1)
+        z_scale = float(np.asarray(pv.evaluate(v_scale / i_scale)).ravel()[0])
+        z = linearised_impedance(sim, ts[idx], np.asarray(sol.y)[:, idx], self.frequencies, z_scale)
+        dvdt = (np.interp(hi, ts, v) - np.interp(lo, ts, v)) / np.maximum(hi - lo, 1e-9)
+        amp_a = self._eis_amplitude_mA / 1000.0 * self._cap_scale
+        leak = -2.0 * dvdt / (2 * np.pi * np.asarray(self.frequencies, float) * amp_a)
+        self._last_eis_leakage = leak            # real [Ohm]; recorded in the history row
+        return z + leak
+
+    # Kinds of the five protocol steps built by _protocol_to_experiment.
+    _STEP_KINDS: tuple[str, ...] = ("dis", "rest", "chg", "chg", "rest")
+
+    def _step_stats(self, last_cycle) -> list[dict]:
+        """Per-step summary of the protocol steps of the last simulated cycle.
+
+        One dict per protocol step (capacity-check steps excluded): ``kind``,
+        ``current_A`` (mean |I|), ``crate`` (vs. the parameter set's nominal
+        capacity), ``duration_s``, ``throughput_ah``, ``frac`` (throughput /
+        nominal capacity), ``v_end`` and ``hit_cutoff``. A step PyBaMM skipped
+        because its cutoff was already exceeded at t=0 (an empty step) reports
+        zero duration/throughput -- the same near-empty step the real cells show
+        when they hit 4.3 V / 3.0 V within the first sample.
+        """
+        nominal_ah = 20.0 * self._c20_A
+        out: list[dict] = []
+        steps = list(getattr(last_cycle, "steps", []) or [])
+        for i, kind in enumerate(self._STEP_KINDS):
+            row = {"kind": kind, "current_A": 0.0, "crate": 0.0, "duration_s": 0.0,
+                   "throughput_ah": 0.0, "frac": 0.0, "v_end": float("nan"),
+                   "hit_cutoff": False}
+            try:
+                step = steps[i]
+                t = np.asarray(step["Time [s]"].entries, dtype=float)
+                I = np.asarray(step["Current [A]"].entries, dtype=float)
+                V = np.asarray(step["Voltage [V]"].entries, dtype=float)
+            except Exception:
+                out.append(row)
+                continue
+            if t.size:
+                q = float(abs(np.trapezoid(I, t)) / 3600.0) if t.size > 1 else 0.0
+                i_mean = float(np.mean(np.abs(I)))
+                row.update(current_A=i_mean, crate=i_mean / nominal_ah,
+                           duration_s=float(t[-1] - t[0]), throughput_ah=q,
+                           frac=q / nominal_ah, v_end=float(V[-1]))
+                if kind == "chg":
+                    row["hit_cutoff"] = bool(V[-1] >= self._V_CHARGE_MAX - 5e-3)
+                elif kind == "dis":
+                    row["hit_cutoff"] = bool(V[-1] <= self._V_DISCHARGE_MIN + 5e-3)
+            out.append(row)
+        return out
 
     def _is_truncated(self, sol, experiment) -> bool:
         """True if PyBaMM silently dropped steps from the cycle(s) this call added.
@@ -1979,9 +2256,13 @@ class PyBaMMOracle:
         proto = np.asarray(protocol).copy()
 
         def _solve(model, solver):
-            sim = pb.Simulation(model, experiment=experiment,
+            sim = pb.Simulation(model, experiment=experiment, var_pts=self._model_var_pts(model),
                                 parameter_values=self._pv, solver=solver)
             sol = sim.solve(starting_solution=self._prev_solution, **solve_kw)
+            # The values this solve was built with (incl. initial_soc's initial
+            # concentrations): PyBaMM stores potentials relative to references
+            # set by them, so the non-stationary EIS model must use the same.
+            self._last_cycle_pv = sim.parameter_values
             if self._is_truncated(sol, experiment):
                 raise _SilentTruncation()
             return sol
@@ -2255,7 +2536,27 @@ class PyBaMMOracle:
             delta_R_ohmic += crack_sei_thick * self._crack_sei_R_base / l_crack
         delta_R_ohmic += dead_li_thick * self._dead_li_to_R
 
-        def _eis_and_correct(soc: float, T_cell: float) -> np.ndarray:
+        self._last_eis_mode_used = "equilibrium"
+
+        def _eis_and_correct(soc: float, T_cell: float, step=None) -> np.ndarray:
+            native = False
+            if self._eis_mode == "nonstationary" and step is not None and self._last_fidelity == "full":
+                try:
+                    Z = self._nonstationary_spectrum(step, eis_pv)
+                    native = True
+                    self._last_eis_mode_used = "nonstationary"
+                except Exception as exc:              # noqa: BLE001 - recorded, stock path below
+                    log.warning("[PyBaMMOracle] non-stationary EIS failed (%s: %s); "
+                                "equilibrium EIS for this spectrum", type(exc).__name__, str(exc)[:200])
+                    self._last_eis_mode_used = "equilibrium (non-stationary failed)"
+            if native:
+                # The model itself carries temperature, the SEI film and contact
+                # resistance and the relaxation drift: only effects it does not
+                # model (crack SEI, dead lithium) and the measurement noise follow.
+                d_r = delta_R_ohmic - sei_thick * self._sei_to_R
+                if d_r > 0.0:
+                    Z = (Z.real + d_r) + 1j * Z.imag
+                return self._add_eis_noise(Z)
             sim = _pb.EISSimulation(
                 self._model_cls(options={"surface form": "differential"}),
                 parameter_values=eis_pv,
@@ -2277,21 +2578,7 @@ class PyBaMMOracle:
                 Z = (R0 * arr_el) + arr_ct * (Z - R0)
             if delta_R_ohmic > 0.0:
                 Z = (Z.real + delta_R_ohmic) + 1j * Z.imag
-            if self._eis_noise_level > 0.0 and self._eis_noise_model != "none":
-                nl = self._eis_noise_level
-                if self._eis_noise_model == "white":
-                    Z = _add_white_noise(Z, nl, rng=self._rng)
-                elif self._eis_noise_model == "flicker":
-                    Z = _add_flicker_noise(self.frequencies, Z, nl, rng=self._rng)
-                else:  # "combined": split budget across flicker and white terms
-                    Z = _add_flicker_noise(
-                        self.frequencies, Z,
-                        noise_level=nl * self._noise_combined_flicker_frac,
-                        rng=self._rng,
-                    )
-                    Z = _add_white_noise(
-                        Z, noise_level=nl * self._noise_combined_white_frac, rng=self._rng
-                    )
+            Z = self._add_eis_noise(Z)
             # Non-stationarity drift: EIS measured while the OCP still relaxes
             # (Hallemans et al. 2023, Eqs 40/43). Coupled to self._rest_s, so it
             # vanishes for well-rested cells; disabled at scale 0.0.
@@ -2304,8 +2591,14 @@ class PyBaMMOracle:
                 )
             return Z
 
-        Z_charge    = _eis_and_correct(soc_charge, T_cell_chg)
-        Z_discharge = _eis_and_correct(soc_discharge, T_cell_dis)
+        _steps = last_cycle.steps if last_cycle is not None else None
+        # non-stationary EIS starts from the first state of each rest (current already
+        # zero): step 4 for the charged spectrum, step 1 for the discharged one
+        self._last_eis_leakage = None
+        Z_charge    = _eis_and_correct(soc_charge, T_cell_chg, _steps[4] if _steps else None)
+        leak_charge, self._last_eis_leakage = self._last_eis_leakage, None
+        Z_discharge = _eis_and_correct(soc_discharge, T_cell_dis, _steps[1] if _steps else None)
+        leak_discharge = self._last_eis_leakage
 
         # cap_ah: when capacity_check is enabled, read from the dedicated C/20
         # discharge step (last step) — this is sensitive to LLI and protocol.
@@ -2445,6 +2738,10 @@ class PyBaMMOracle:
             # here, never raised. Successful full-fidelity steps carry None/"full".
             "failure_kind":       self._last_failure_kind,
             "fidelity":           self._last_fidelity,
+            "eis_mode_used":      getattr(self, "_last_eis_mode_used", "equilibrium"),
+            # lock-in drift leakage included in Z (non-stationary EIS only) [Ohm]
+            "eis_leakage_charge": None if leak_charge is None else np.asarray(leak_charge).copy(),
+            "eis_leakage_discharge": None if leak_discharge is None else np.asarray(leak_discharge).copy(),
             "sei_thickness_nm":   sei_thick * 1e9 if self._sei_to_R > 0.0 else float("nan"),
             "crack_sei_nm":       crack_sei_thick * 1e9,
             "dead_li_nm":         dead_li_thick * 1e9,
@@ -2464,6 +2761,9 @@ class PyBaMMOracle:
             "cumulative_c2_stress_ah":  self._cumulative_c2_stress_ah,
             "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
             "cumulative_dod_throughput_ah": self._cumulative_dod_throughput_ah,
+            # Per-step throughput / duration / end voltage (see _step_stats) --
+            # what the tune engine's step-shape term compares to real GCPL steps.
+            "step_stats":         self._step_stats(last_cycle),
             # EIS spectra at this call, jones2022 raw-data convention
             # (freq/Hz, Re(Z)/Ohm, -Im(Z)/Ohm) so a Nyquist plot is just
             # ax.plot(Z_charge_real, Z_charge_neg_imag).
