@@ -120,11 +120,14 @@ def windows_from_stamps(stamps):
     return start, end
 
 
-def linearised_impedance(sim, t_lin, y_states, frequencies, z_scale, *, per_frequency: bool = True):
+def linearised_impedance(sim, t_lin, y_states, frequencies, z_scale, *, per_frequency: bool = True,
+                         inputs: dict | None = None):
     """Impedance [Ohm] of a built EIS model (``eis_model``) linearised at given states.
 
     ``y_states[:, k]`` is the state at ``t_lin[k]`` where frequency ``k`` is
     measured: ``Z_k = -x[V] / x[I] * z_scale`` with ``(j w_k M - J(y_k)) x = b``.
+    ``inputs``: values of the model's input parameters (e.g. the chain fit's cycler
+    cut-off, 0 at rest), in the model's input order.
     """
     from scipy.sparse import csc_matrix
     from scipy.sparse.linalg import spsolve
@@ -132,7 +135,8 @@ def linearised_impedance(sim, t_lin, y_states, frequencies, z_scale, *, per_freq
     f = np.asarray(frequencies, float)
     built = sim.built_model
     if not hasattr(built, "jac_rhs_algebraic_eval") or built.jac_rhs_algebraic_eval is None:
-        sim.solver.set_up(built, inputs={})
+        sim.solver.set_up(built, inputs=dict(inputs or {}))
+    p = np.asarray(list(inputs.values()), float) if inputs else []
     M = csc_matrix(built.mass_matrix.entries)
     b = np.zeros(M.shape[0])
     b[-1] = -1.0
@@ -141,7 +145,7 @@ def linearised_impedance(sim, t_lin, y_states, frequencies, z_scale, *, per_freq
     for k, fk in enumerate(f):
         key = k if per_frequency else 0
         if key not in cache:
-            cache[key] = csc_matrix(built.jac_rhs_algebraic_eval(float(t_lin[k]), y_states[:, k], []).sparse())
+            cache[key] = csc_matrix(built.jac_rhs_algebraic_eval(float(t_lin[k]), y_states[:, k], p).sparse())
         x = spsolve(1.0j * 2 * np.pi * fk * M - cache[key], b)
         z[k] = -x[-2] / x[-1]
     return z * z_scale

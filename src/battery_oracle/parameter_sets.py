@@ -99,6 +99,34 @@ LICO2_DS_DEFAULTS = {LICO2_DS_KNEE: 0.85, LICO2_DS_DROP: 0.0}
 GRAPHITE_DS_KNEE = "Negative particle diffusivity knee stoichiometry"
 GRAPHITE_DS_DROP = "Negative particle diffusivity decades drop at full lithiation"
 GRAPHITE_DS_DEFAULTS = {GRAPHITE_DS_KNEE: 0.6, GRAPHITE_DS_DROP: 0.0}
+#: Stoichiometry dependence of the exchange-current density beyond the standard
+#: j0 ~ sqrt(theta (1 - theta)) (theta = surface stoichiometry): j0 x [4 theta (1 - theta)
+#: + J0_SHAPE_FLOOR]^gamma / (1 + J0_SHAPE_FLOOR)^gamma, unchanged at theta = 0.5 and
+#: falling faster towards a full or empty surface for gamma > 0 (gamma = 0, the default,
+#: is the standard form). Evidence: the jones2022 charge-transfer arc of the rested cells
+#: grows from 1.02 to 1.86 ohm between 4.18 and 3.58 V OCV (+82%, all 32 cells;
+#: scripts/eis_vs_state.py), faster than the fitted standard-form model (slope -1.1 vs
+#: -1.5 ohm/V; scripts/model_arc_vs_ocv.py); SOC-dependent, asymmetric Butler-Volmer
+#: kinetics of Li_xCoO2 from GITT: Hess, A. et al., J. Power Sources 299, 156 (2015),
+#: doi 10.1016/j.jpowsour.2015.07.080.
+J0_SHAPE_N = "Negative electrode exchange-current density stoichiometry exponent"
+J0_SHAPE_P = "Positive electrode exchange-current density stoichiometry exponent"
+J0_SHAPE_DEFAULTS = {J0_SHAPE_N: 0.0, J0_SHAPE_P: 0.0}
+J0_SHAPE_FLOOR = 1.0e-3
+
+
+def _with_j0_shape(fn, exponent_name: str):
+    """Exchange-current density ``fn(c_e, c_s_surf, c_s_max, T)`` x the stoichiometry
+    factor of J0_SHAPE_N / J0_SHAPE_P (see there)."""
+    import pybamm
+
+    def wrapped(c_e, c_s_surf, c_s_max, T):
+        gamma = pybamm.Parameter(exponent_name)
+        theta = c_s_surf / c_s_max
+        shape = (4 * theta * (1 - theta) + J0_SHAPE_FLOOR) / (1 + J0_SHAPE_FLOOR)
+        return fn(c_e, c_s_surf, c_s_max, T) * pybamm.maximum(shape, J0_SHAPE_FLOOR) ** gamma
+
+    return wrapped
 
 
 def _with_lithiation_drop(fn, knee_name: str = LICO2_DS_KNEE, drop_name: str = LICO2_DS_DROP):
@@ -215,6 +243,11 @@ def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
                    _with_lithiation_drop(pv["Negative particle diffusivity [m2.s-1]"],
                                          GRAPHITE_DS_KNEE, GRAPHITE_DS_DROP)})
         pv.update(dict(GRAPHITE_DS_DEFAULTS), check_already_exists=False)
+        pv.update({"Negative electrode exchange-current density [A.m-2]":
+                   _with_j0_shape(pv["Negative electrode exchange-current density [A.m-2]"], J0_SHAPE_N),
+                   "Positive electrode exchange-current density [A.m-2]":
+                   _with_j0_shape(pv["Positive electrode exchange-current density [A.m-2]"], J0_SHAPE_P)})
+        pv.update(dict(J0_SHAPE_DEFAULTS), check_already_exists=False)
         _lico2_monotone_table()          # registers the data range
     if graphite_ocp == "Ramadass2004":
         from pybamm.input.parameters.lithium_ion.Ramadass2004 import (
