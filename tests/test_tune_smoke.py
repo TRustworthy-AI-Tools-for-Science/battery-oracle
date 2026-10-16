@@ -26,9 +26,9 @@ from battery_oracle.tune import (
 )
 
 
-def test_calibration_model_is_spme():
-    """#5: calibration always runs on SPMe, independent of experiment-time model."""
-    assert CALIBRATION_MODEL == "SPMe"
+def test_calibration_model_is_dfn():
+    """Calibration runs on the DFN, the model the oracle simulates with (SPMe removed)."""
+    assert CALIBRATION_MODEL == "DFN"
 
 
 def _synthetic_cache():
@@ -131,7 +131,7 @@ def test_score_candidate_present_target_missing_oracle_is_inf():
 def _stub_candidate_result(cache, ks, srs, dds, prs, preset, capacity_check,
                            circuit=None, chemistry="Chen2020", dod_lam_scale=0.0,
                            oracle_kwargs=None, protocol_key="protocol", ecm_stub=False,
-                           calibration_model="SPMe"):
+                           calibration_model="DFN"):
     """Cheap stand-in for run_oracle_candidate (no PyBaMM): arc-ratio tracks ks so
     scores vary; deliberately returns numpy types to exercise the _native sanitiser."""
     return {

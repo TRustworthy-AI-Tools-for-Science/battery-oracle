@@ -1,9 +1,9 @@
-"""Battery oracle: PyBaMM SPMe simulations + EIS + ECM fitting.
+"""Battery oracle: PyBaMM DFN simulations + EIS + ECM fitting.
 
 Public
 ------
 OracleFailure           — raised when simulation fails; caller should end the AL loop
-PyBaMMOracle            — stateful battery oracle (SPMe → EIS → ECM); see ``run_cycle``
+PyBaMMOracle            — stateful battery oracle (DFN → EIS → ECM); see ``run_cycle``
 CycleResult             — named, schema-aware result of one ``PyBaMMOracle.run_cycle`` call
 make_pybamm_candidates  — build a 6-D protocol candidate grid for the CLI
 randles_stub_ecm        — fast analytic Randles fallback (no AutoEIS required)
@@ -181,14 +181,17 @@ _ECM_RESCALE_TARGET_R0 = 0.1334
 # model (``_eis_and_correct``). All three build with both the degradation option
 # dict from ``_build_degradation_config`` and the EIS ``surface form: differential``
 # option (verified against PyBaMM 26.5.0).
-#   SPM  — single particle, NO electrolyte (fastest, least stiff; no electrolyte overpotential)
-#   SPMe — single particle + electrolyte (default; degradation presets are calibrated here)
-#   DFN  — full Doyle–Fuller–Newman (most accurate, slowest, stiffest — see the numerics docs)
+#   DFN  — full Doyle–Fuller–Newman: the ONLY model (electrolyte transport resolved --
+#          required at the jones2022 C-rates, 1.5-4C).
+# The reduced models were REMOVED (2026-10-16): SPMe had been the default and the DFN's
+# silent fallback, so a run could report "DFN" results computed with a reduced model;
+# SPM (no electrolyte at all) was kept only for comparisons. A model that does not
+# solve now fails loudly (OracleFailure) instead of being swapped for another.
 _MODEL_CLASSES = {
-    "SPM":  _pb.lithium_ion.SPM,
-    "SPMe": _pb.lithium_ion.SPMe,
     "DFN":  _pb.lithium_ion.DFN,
 }
+REMOVED_MODELS = {name: f"{name} was removed from the oracle (2026-10-16); use model='DFN'"
+                  for name in ("SPMe", "SPM")}
 
 # Ideal gas constant (J/mol/K), for the Arrhenius EIS temperature correction (#11).
 _R_GAS = 8.314462618
@@ -982,7 +985,7 @@ class CycleResult:
 # ---------------------------------------------------------------------------
 
 class PyBaMMOracle:
-    """Battery oracle using PyBaMM SPMe simulations + EIS + ECM fitting.
+    """Battery oracle using PyBaMM DFN simulations + EIS + ECM fitting.
 
     The oracle is **stateful**: each call runs ``n_cycles`` charge/discharge
     cycles starting from the cell state left by the previous call, so
@@ -991,8 +994,9 @@ class PyBaMMOracle:
     is ready to call immediately — :meth:`reset` is only needed to *reuse*
     this instance for a new run starting from a fresh cell.
 
-    If the PyBaMM simulation fails (even after an emergency retry with tighter
-    solver settings), :class:`OracleFailure` is raised.  The caller should
+    If the PyBaMM simulation fails (even after an emergency retry with the emergency
+    solver on the same model), :class:`OracleFailure` is raised -- the model is never
+    swapped for a reduced one.  The caller should
     treat this as battery end-of-life and end the active learning loop; the
     oracle state is **not** reset automatically.
 
@@ -1000,10 +1004,10 @@ class PyBaMMOracle:
 
     1. Builds a PyBaMM ``Experiment`` from the 6-D protocol vector
        ``[C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]``.
-    2. Runs ``n_cycles`` SPMe charge/discharge cycles, continuing from the
+    2. Runs ``n_cycles`` DFN charge/discharge cycles, continuing from the
        cell state accumulated so far (``starting_solution``).
     3. Reads post-charge and post-discharge SOC from the cycling solution.
-    4. Simulates EIS at each SOC using a separate SPMe model with
+    4. Simulates EIS at each SOC using a separate model of the same class with
        ``surface form = differential``, then applies post-hoc ohmic corrections
        for SEI, crack-SEI, dead-Li, and LAM degradation.
     5. Calls ``ecm_model_fn(frequencies, Z_real, Z_imag)`` independently on the
@@ -1037,18 +1041,15 @@ class PyBaMMOracle:
         its own calibration (degradation preset, voltage window) — see
         :meth:`from_config` with a matching ``config_oracle_*.yml``.
     model : str
-        Reduced-order PyBaMM model — ``"SPMe"`` (default, single particle with
-        electrolyte), ``"SPM"`` (single particle, no electrolyte overpotential),
-        or ``"DFN"`` (full Doyle–Fuller–Newman: most accurate but much slower and
-        numerically stiffer — see the numerical-stability docs).  Drives both the
-        cycling model and the internal EIS model.  ``"SPM"``/``"DFN"`` are
-        primarily for the model-comparison demonstration: the degradation presets
-        are calibrated against SPMe, so a given preset may reach end-of-life on a
-        different cycle count under SPM or DFN.
+        PyBaMM model — ``"DFN"`` (default and only option; full Doyle–Fuller–Newman,
+        needed at the jones2022 C-rates where electrolyte gradients matter). Drives both
+        the cycling model and the internal EIS model. ``"SPMe"`` and ``"SPM"`` were
+        removed (2026-10-16) and raise a ValueError. NOTE: the legacy degradation presets were calibrated against SPMe,
+        so a preset may reach end-of-life on a different cycle count under DFN.
     degradation_preset : str
         Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
-        or ``"severe"``.  See :func:`_build_degradation_config`. Calibrated for
-        SPMe; particle-cracking/LAM submodels are currently disabled in every
+        or ``"severe"``.  See :func:`_build_degradation_config`. Calibrated (legacy)
+        for SPMe; particle-cracking/LAM submodels are currently disabled in every
         preset (see the comment in :func:`_build_degradation_config` — an
         upstream PyBaMM regression workaround, not a design choice).
     thermal : str
@@ -1125,7 +1126,7 @@ class PyBaMMOracle:
         # explicit parameter_values object is passed. Non-Chen2020 chemistries need
         # their own calibration YAML (bounds/preset) — see _SUPPORTED_CHEMISTRIES.
         chemistry: str = "Chen2020",
-        model: str = "SPMe",
+        model: str = "DFN",
         degradation_preset: str = "accelerated",
         eol_capacity_fraction: float = 0.80,
         capacity_check: bool = False,
@@ -1468,14 +1469,16 @@ class PyBaMMOracle:
         except Exception:
             self._c20_A = 5.0 / 20.0  # Chen2020 nominal 5 Ah → 0.25 A
 
-        # Reduced-order model selection (SPMe default; SPM / DFN for comparison).
+        # Model selection (DFN only; SPMe and SPM removed).
         # Store both the name (provenance/history) and the resolved class (applied
         # at the cycling and EIS instantiation sites). _build_degradation_config is
         # model-agnostic — the class is applied only where the model is built.
         self._model = str(model)
+        if self._model in REMOVED_MODELS:
+            raise ValueError(REMOVED_MODELS[self._model])
         if self._model not in _MODEL_CLASSES:
             raise ValueError(
-                f"Unknown model {model!r}; choose 'SPMe', 'SPM', or 'DFN'."
+                f"Unknown model {model!r}; choose one of {sorted(_MODEL_CLASSES)}."
             )
         self._model_cls = _MODEL_CLASSES[self._model]
 
@@ -1598,14 +1601,6 @@ class PyBaMMOracle:
         # out-of-range protocol doesn't spam every cycle in an AL loop — see
         # _warn_clamps / _protocol_to_experiment.
         self._warned_clamp_signatures: set[str] = set()
-        # DFN solver fallback (#4): once the DFN->SPMe fallback fires, the oracle
-        # latches to SPMe (reduced fidelity) for the rest of the run — it cannot
-        # warm-start DFN back from an SPMe solution (see the SPMe/DFN
-        # starting_solution incompatibility). SPMe fallback model+solver are built
-        # lazily on first use and reused thereafter.
-        self._degraded_to_spme: bool = False
-        self._spme_fallback_model = None
-        self._spme_fallback_solver = None
 
         # Pre-compute SEI-thickness → ohmic resistance factor (Ohm / m).
         # Specific surface area of spherical particles: a_s = 3 * eps_s / r_p
@@ -1818,9 +1813,6 @@ class PyBaMMOracle:
         self._last_fidelity = "full"
         self._last_result = None
         self._warned_clamp_signatures = set()
-        self._degraded_to_spme = False
-        self._spme_fallback_model = None
-        self._spme_fallback_solver = None
         self._build_native_state()
 
     # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah) --
@@ -1873,7 +1865,7 @@ class PyBaMMOracle:
     def _current_ceiling_mA(self, base_hi: float) -> float:
         """Model-aware upper current bound (in the 5 Ah PyBaMM frame, mA).
 
-        SPMe/SPM keep ``base_hi`` (typically ``_C_MAX_mA`` = 2C). DFN tightens to
+        Non-DFN models (none remain) kept ``base_hi``. DFN tightens to
         ``_dfn_max_crate`` (1.5C) — computed from the cell's own C/20 current, so
         no mA value is hardcoded (``nominal_A = 20 * self._c20_A``).
         """
@@ -2224,33 +2216,16 @@ class PyBaMMOracle:
         added = sol.cycles[-n:] if n <= len(sol.cycles) else sol.cycles
         return any(len(c.steps) < expected for c in added)
 
-    def _spme_fallback(self):
-        """Lazily build + cache an SPMe cycling model and a safe Casadi solver for
-        the DFN->SPMe reduced-fidelity fallback (#4). SPMe can warm-start from a
-        DFN solution (verified), so ``_prev_solution`` carries over cleanly; the
-        reverse is impossible, which is why the fallback latches (see #4)."""
-        if self._spme_fallback_model is None:
-            self._spme_fallback_model = _MODEL_CLASSES["SPMe"](options=self._deg_opts)
-            self._spme_fallback_solver = self._pb.CasadiSolver(
-                mode="safe",
-                dt_max=self._emergency_solver_dt_max_s,
-                rtol=self._emergency_solver_rtol,
-                atol=self._emergency_solver_atol,
-            )
-        return self._spme_fallback_model, self._spme_fallback_solver
-
     def _solve_with_fallbacks(self, experiment, protocol, solve_kw):
         """Solve ``experiment``, returning ``(solution, fidelity, failure_kind)``.
 
-        - SPMe/SPM (or an oracle already latched to SPMe): primary solver ->
-          emergency Casadi — the historical two-tier ladder.
-        - DFN: IDAKLU(tight) -> Casadi(loose, low dt_max) -> SPMe fallback. The SPMe
-          fallback latches ``self._degraded_to_spme`` because DFN cannot warm-start
-          back from an SPMe solution.
+        Primary solver, then the emergency (looser) solver on the same model and cell
+        state. The model is never swapped (the DFN -> SPMe fallback was removed
+        2026-10-16): when both solvers fail, ``OracleFailure`` is raised.
 
-        ``FailureKind.SOLVER_DEGRADED`` is *recorded* (returned) on any downgrade,
-        never raised — raising would end the AL loop. Only when every tier fails is
-        ``OracleFailure`` raised. Must be called holding ``self._lock``.
+        ``FailureKind.SOLVER_DEGRADED`` is *recorded* (returned) when the emergency
+        solver was needed (same model, looser tolerances). Must be called holding
+        ``self._lock``.
         """
         pb = self._pb
         proto = np.asarray(protocol).copy()
@@ -2267,48 +2242,14 @@ class PyBaMMOracle:
                 raise _SilentTruncation()
             return sol
 
-        # ---- DFN 3-tier ladder (only while not yet latched to SPMe) ----
-        if self._model == "DFN" and not self._degraded_to_spme:
-            try:
-                return _solve(self._cycling_model, self._solver), "full", None
-            except Exception as exc1:
-                log.warning("[PyBaMMOracle] DFN IDAKLU tier failed (%s: %s); "
-                            "retrying DFN+Casadi(loose)", type(exc1).__name__, exc1)
-            try:
-                return _solve(self._cycling_model, self._solver_emerg), "full", \
-                    FailureKind.SOLVER_DEGRADED
-            except Exception as exc2:
-                log.warning("[PyBaMMOracle] DFN Casadi tier failed (%s: %s); "
-                            "falling back to SPMe (reduced fidelity)",
-                            type(exc2).__name__, exc2)
-            m, s = self._spme_fallback()
-            try:
-                sol = _solve(m, s)
-            except Exception as exc3:
-                kind = (FailureKind.VOLTAGE_INFEASIBLE if "voltage" in str(exc3).lower()
-                        else FailureKind.SOLVER_FAILURE)
-                raise OracleFailure(
-                    f"DFN solver fallbacks exhausted (IDAKLU -> Casadi -> SPMe): {exc3}",
-                    protocol=proto, failure_kind=kind,
-                ) from exc3
-            self._degraded_to_spme = True
-            log.warning("[PyBaMMOracle] degraded to SPMe (reduced fidelity) for the "
-                        "rest of the run — DFN cannot warm-start from an SPMe solution")
-            return sol, "reduced", FailureKind.SOLVER_DEGRADED
-
-        # ---- Two-tier ladder: SPMe/SPM, or a DFN oracle already latched to SPMe ----
-        if self._degraded_to_spme:
-            m, s = self._spme_fallback()
-            active_model, primary_solver, emerg_solver, base_fid = m, s, s, "reduced"
-        else:
-            active_model = self._cycling_model
-            primary_solver, emerg_solver, base_fid = self._solver, self._solver_emerg, "full"
+        # Same model throughout: primary solver, then the emergency (looser) solver on the
+        # SAME model and cell state. No model swap: if both fail, OracleFailure is raised.
+        active_model = self._cycling_model
+        primary_solver, emerg_solver, base_fid = self._solver, self._solver_emerg, "full"
 
         try:
             sol = _solve(active_model, primary_solver)
-            return sol, base_fid, (
-                FailureKind.SOLVER_DEGRADED if base_fid == "reduced" else None
-            )
+            return sol, base_fid, None
         except Exception as exc1:
             log.warning("[PyBaMMOracle] primary solver failed (%s: %s); retrying "
                         "with emergency solver (same cell state)",
@@ -2371,8 +2312,8 @@ class PyBaMMOracle:
             else np.asarray(protocol, dtype=float)
         )
         # Per-call fidelity/degradation status, recorded into this call's history
-        # row. Reset to full fidelity every call; the DFN solver fallback (#4)
-        # downgrades these when it drops to a looser solver or the SPMe fallback.
+        # row. Reset to full fidelity every call; _solve_with_fallbacks records
+        # SOLVER_DEGRADED when it needed the emergency solver (same model).
         self._last_failure_kind = None
         self._last_fidelity = "full"
         experiment, protocol_applied = self._protocol_to_experiment(protocol)

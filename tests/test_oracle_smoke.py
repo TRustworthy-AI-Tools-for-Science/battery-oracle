@@ -1,4 +1,4 @@
-"""Smoke tests for the oracle: construction, constants, and one SPMe cycle.
+"""Smoke tests for the oracle: construction, constants, and one DFN cycle.
 
 Uses the Randles-stub ECM (no AutoEIS) so these run without the [autoeis] extra.
 """
@@ -49,29 +49,20 @@ def test_construct_custom_circuit():
 def test_model_kwarg_resolves():
     import pybamm
 
-    assert PyBaMMOracle()._model == "SPMe"  # default
-    assert PyBaMMOracle(model="SPM")._model_cls is pybamm.lithium_ion.SPM
-    assert PyBaMMOracle(model="SPMe")._model_cls is pybamm.lithium_ion.SPMe
+    assert PyBaMMOracle()._model == "DFN"  # default
     assert PyBaMMOracle(model="DFN")._model_cls is pybamm.lithium_ion.DFN
+
+
+@pytest.mark.parametrize("name", ["SPMe", "SPM"])
+def test_reduced_models_are_rejected(name):
+    """SPMe and SPM were removed (2026-10-16): asking for one fails loudly."""
+    with pytest.raises(ValueError, match=f"{name} was removed"):
+        PyBaMMOracle(model=name)
 
 
 def test_model_kwarg_rejects_unknown():
     with pytest.raises(ValueError):
         PyBaMMOracle(model="bogus")
-
-
-@pytest.mark.slow
-def test_one_cycle_runs_spm():
-    """Run a single SPM cycle (new model kwarg) with the Randles stub."""
-    oracle = PyBaMMOracle(model="SPM", ecm_model_fn=randles_stub_ecm, capacity_check=False)
-    oracle.reset()
-    protocol = make_pybamm_candidates(n_candidates=1)[0]
-    try:
-        oracle(protocol)
-    except OracleFailure as exc:
-        pytest.skip(f"SPM oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert len(oracle.history) == 1
-    assert oracle.history[-1]["model"] == "SPM"
 
 
 def test_build_degradation_config_default_matches_module_dict():
@@ -309,13 +300,10 @@ def test_dfn_solver_kwargs_wire_to_instance_attrs():
     assert o._dfn_max_crate == pytest.approx(1.2)
 
 
-def test_dfn_current_ceiling_tighter_than_spme():
-    """DFN tightens the current ceiling to _dfn_max_crate; SPMe keeps c_max_mA.
-    Ceiling is derived from the cell's own C/20 current (no hardcoded mA)."""
-    spme = PyBaMMOracle(model="SPMe")
+def test_dfn_current_ceiling():
+    """The DFN current ceiling is _dfn_max_crate of the cell's own nominal current,
+    derived from its C/20 current (no hardcoded mA)."""
     dfn = PyBaMMOracle(model="DFN")
-    # SPMe: ceiling unchanged.
-    assert spme._current_ceiling_mA(spme._C_MAX_mA) == pytest.approx(spme._C_MAX_mA)
     # DFN: ceiling = dfn_max_crate * nominal_A * 1000, derived from _c20_A.
     nominal_A = 20.0 * dfn._c20_A
     expected = min(dfn._C_MAX_mA, dfn._dfn_max_crate * nominal_A * 1000.0)
@@ -325,8 +313,7 @@ def test_dfn_current_ceiling_tighter_than_spme():
 
 @pytest.mark.slow
 def test_one_cycle_runs_dfn():
-    """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works;
-    the 3-tier fallback is only for failures)."""
+    """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works)."""
     oracle = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
@@ -336,16 +323,13 @@ def test_one_cycle_runs_dfn():
     assert len(state) == oracle.state_vector_len
     h = oracle.history[-1]
     assert h["model"] == "DFN"
-    # If DFN succeeded outright it's full fidelity + not degraded; if it fell back
-    # it would be reduced — either way the run completes without raising.
-    assert h["fidelity"] in ("full", "reduced")
+    # the model is never swapped: a completed cycle is always full fidelity
+    assert h["fidelity"] == "full"
 
 
-@pytest.mark.slow
-def test_dfn_solver_fallback_latches_to_spme():
-    """When both DFN solver tiers fail, the oracle falls back to SPMe (reduced
-    fidelity, SOLVER_DEGRADED) and latches there for subsequent calls."""
-    from battery_oracle import FailureKind
+def test_dfn_solver_failure_fails_loudly():
+    """When both solvers fail on the DFN, the oracle raises OracleFailure: it never
+    swaps in a reduced model (the DFN -> SPMe fallback was removed 2026-10-16)."""
     o = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
 
@@ -355,21 +339,9 @@ def test_dfn_solver_fallback_latches_to_spme():
 
     o._solver = _Boom()
     o._solver_emerg = _Boom()
-    proto = make_pybamm_candidates(n_candidates=1)[0]
-    try:
-        o(proto)
-    except OracleFailure as exc:
-        pytest.skip(f"SPMe fallback itself failed on this protocol: {exc}")
-    h = o.history[-1]
-    assert o._degraded_to_spme is True
-    assert h["fidelity"] == "reduced"
-    assert h["failure_kind"] == FailureKind.SOLVER_DEGRADED
-    # Latched: the next call stays on SPMe even though _solver is still broken.
-    try:
-        o(proto)
-    except OracleFailure as exc:
-        pytest.skip(f"latched SPMe step failed: {exc}")
-    assert o.history[-1]["fidelity"] == "reduced"
+    with pytest.raises(OracleFailure):
+        o(make_pybamm_candidates(n_candidates=1)[0])
+    assert not hasattr(o, "_degraded_to_spme")
 
 
 # ── Phase 0: STATE_VECTOR_SCHEMA + ECM σ (#6) ──────────────────────────────
@@ -455,7 +427,7 @@ def test_lumped_thermal_populates_t_cell():
 
 @pytest.mark.slow
 def test_one_cycle_runs():
-    """Run a single SPMe cycle with the Randles stub and check the history entry."""
+    """Run a single (default, DFN) cycle with the Randles stub and check the history entry."""
     oracle = PyBaMMOracle(
         ecm_model_fn=randles_stub_ecm,
         degradation_preset="accelerated",

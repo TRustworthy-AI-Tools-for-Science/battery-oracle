@@ -1,7 +1,7 @@
-"""battery_oracle — a standalone PyBaMM/SPMe battery *oracle* (simulator).
+"""battery_oracle — a standalone PyBaMM (DFN) battery *oracle* (simulator).
 
 The simulated counterpart to a physical battery / BattMAP lab interface: given a
-6-D charge/discharge protocol it runs a PyBaMM SPMe simulation, synthesises an
+6-D charge/discharge protocol it runs a PyBaMM DFN simulation, synthesises an
 EIS spectrum, and fits an equivalent-circuit model — returning the same kind of
 featurised state a real cell would. Drop-in usable as the "battery source" in an
 active-learning loop.

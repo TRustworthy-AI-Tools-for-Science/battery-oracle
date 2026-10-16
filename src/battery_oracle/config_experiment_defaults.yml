@@ -24,7 +24,7 @@
 oracle_config: null
 
 model:
-  type: SPMe                 # SPMe | SPM | DFN  -> PyBaMMOracle(model=...)
+  type: DFN                  # DFN only -> PyBaMMOracle(model=...)  (SPMe and SPM removed 2026-10-16)
 
 cycling:
   n_cycles: 1                # -> n_cycles

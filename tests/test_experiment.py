@@ -24,7 +24,7 @@ def test_load_packaged_default():
     cfg = load_experiment_config(None)
     for section in ("model", "cycling", "degradation", "eis", "protocols"):
         assert section in cfg
-    assert cfg["model"]["type"] in ("SPMe", "SPM", "DFN")
+    assert cfg["model"]["type"] == "DFN"
     assert len(cfg["protocols"]) >= 1
 
 
@@ -56,11 +56,13 @@ def test_scale_defaults_when_omitted():
         assert kw[f] == 1.0
 
 
-def test_model_passthrough_spm():
+@pytest.mark.parametrize("name", ["SPM", "SPMe"])
+def test_reduced_model_config_is_rejected(name):
+    """SPM and SPMe were removed (2026-10-16): a config asking for one fails loudly."""
     cfg = load_experiment_config(None)
-    cfg["model"]["type"] = "SPM"
-    _validate_config(cfg)  # SPM is valid
-    assert oracle_kwargs_from_config(cfg)["model"] == "SPM"
+    cfg["model"]["type"] = name
+    with pytest.raises(ValueError):
+        _validate_config(cfg)
 
 
 def test_ecm_fitter_default_and_mapping():
@@ -161,7 +163,7 @@ def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
 def test_base_oracle_yaml_emits_model():
     """#1: model is now in the base oracle YAML layer (was only in the experiment YAML)."""
     kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["model"] == "SPMe"
+    assert kw["model"] == "DFN"
 
 
 def test_base_oracle_yaml_emits_dfn_solver_settings():
@@ -194,7 +196,7 @@ def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
     """#14: an LFP-declared calibration YAML must not pair with an NMC parameter set."""
     from battery_oracle.experiment import build_oracle_from_config
     cfg = {
-        "model": {"type": "SPMe"},
+        "model": {"type": "DFN"},
         "cycling": {"parameter_set": "Chen2020", "chemistry": "Prada2013"},
         "degradation": {"preset": "accelerated"},
         "eis": {}, "ecm": {},
@@ -219,7 +221,7 @@ def test_config_dataset_and_oracle_config_are_mutually_exclusive():
     """#12: both select the base layer, so setting both must raise."""
     from battery_oracle.experiment import build_oracle_from_config
     cfg = {
-        "model": {"type": "SPMe"}, "cycling": {}, "degradation": {"preset": "nominal"},
+        "model": {"type": "DFN"}, "cycling": {}, "degradation": {"preset": "nominal"},
         "eis": {}, "ecm": {}, "oracle_config": "somewhere.yml",
         "protocols": [{"C_rate_1": 100, "C_rate_2": 50, "duration_1": 1,
                        "duration_2": 0.5, "D_rate": 100, "duration_d": 1}],
@@ -322,4 +324,4 @@ def test_run_experiment_default():
     history = run_experiment(path)
     assert isinstance(history, list)
     assert len(history) >= 1
-    assert history[0].get("model") == "SPMe"
+    assert history[0].get("model") == "DFN"

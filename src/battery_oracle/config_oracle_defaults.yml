@@ -11,7 +11,7 @@
 # calibration workflow).
 
 model:
-  type: SPMe                       # SPMe (default) | SPM | DFN -> PyBaMMOracle(model=...). Base layer; an
+  type: DFN                        # DFN only -> PyBaMMOracle(model=...); SPMe and SPM removed 2026-10-16. Base layer; an
                                    # experiment YAML's `model.type` overlays this (see experiment.py).
 
 cycling:
@@ -82,7 +82,7 @@ protocol_bounds:
   v_charge_max: 4.3         # charge safety cutoff (V) -- Jones, Stimming & Lee 2022
   v_discharge_min: 3.0      # discharge cutoff (V)
   charge_stage_max_s: 900.0 # 15 min per CC charge stage (paper limit)
-  dfn_max_crate: 1.5        # DFN-only current ceiling (C); SPMe/SPM keep c_max_mA (2C)
+  dfn_max_crate: 1.5        # DFN current ceiling (C); protocols above it are clipped (with a warning)
 
 eis:
   freq_min_hz: 0.01

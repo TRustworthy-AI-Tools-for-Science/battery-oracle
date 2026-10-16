@@ -57,7 +57,7 @@ _YAML_FIELD_NAME_BY_SLOT = {
     "discharge_duration_h": "dur_d_h",
 }
 _PROTOCOL_FIELDS = tuple(_YAML_FIELD_NAME_BY_SLOT[slot] for slot in PROTOCOL_FIELD_NAMES)
-_VALID_MODELS = ("SPMe", "SPM", "DFN")
+_VALID_MODELS = ("DFN",)                # SPMe and SPM removed 2026-10-16 (oracle.REMOVED_MODELS)
 _VALID_PRESETS = ("nominal", "accelerated", "severe")
 # Packaged per-dataset calibration configs (#12), selectable via config_dataset=.
 # Each ships as config_oracle_{name}.yml alongside config_oracle_defaults.yml.
@@ -217,7 +217,7 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     n_freq = int(eis.get("n_freq_points", 60))
 
     return {
-        "model": model_cfg.get("type", "SPMe"),
+        "model": model_cfg.get("type", "DFN"),
         "n_cycles": int(cycling.get("n_cycles", 1)),
         "temperature_K": float(cycling.get("temperature_K", 298.15)),
         "parameter_set": cycling.get("parameter_set", "Chen2020"),

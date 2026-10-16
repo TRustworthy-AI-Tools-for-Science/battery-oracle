@@ -69,13 +69,10 @@ from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
 
 log = logging.getLogger(__name__)
 
-# Default calibration model: SPMe, regardless of the experiment-time model (#5:
-# DFN is far slower for the hundreds of oracle calls a sweep makes). Pinned here
-# so a change to PyBaMMOracle's default `model` can't silently change it. A
-# caller that simulates the experiment with DFN should calibrate with DFN too
-# (``calibrate_oracle(calibration_model="DFN")``) so fitted and simulated models
-# agree -- the jones2022 LiR2032 pipeline does.
-CALIBRATION_MODEL = "SPMe"
+# Calibration model: the DFN, the same model the oracle simulates the experiment with,
+# so fitted and simulated models agree (SPMe, the former default for speed, was
+# removed 2026-10-16).
+CALIBRATION_MODEL = "DFN"
 
 
 def _resolve_circuit(circuit: str | None) -> str:
@@ -447,7 +444,7 @@ def run_oracle_candidate(
     ``circuit`` sets the oracle's ECM structure (and the ohmic/arc-resistor
     positions the arc-ratio / R1-growth metrics read). It is not assumed: ``None``
     loads the default from ``config_oracle_defaults.yml`` (``ecm.circuit``).
-    ``calibration_model`` pins the reduced-order model (SPMe) for the sweep;
+    ``calibration_model`` pins the model (DFN) for the sweep;
     ``chemistry`` selects the PyBaMM parameter set (#14).
     """
     circuit = _resolve_circuit(circuit)

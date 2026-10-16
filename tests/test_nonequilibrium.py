@@ -235,7 +235,7 @@ def test_parallel_batches_match_sequential_and_preserve_order():
 
     from battery_oracle import patches
 
-    model = pybamm.lithium_ion.SPM()
+    model = pybamm.lithium_ion.DFN()
     pv = pybamm.ParameterValues("Chen2020")
     t = np.linspace(0, 300, 61)
     truth = pybamm.Simulation(model, parameter_values=pv).solve(t_eval=t)
