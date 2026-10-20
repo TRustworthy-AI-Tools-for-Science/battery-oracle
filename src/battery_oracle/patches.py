@@ -83,8 +83,12 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-#: Versions the patches were written and tested against.
-TESTED_PYBAMM = "26.7.1.0"
+#: Versions the patches were written and tested against. 26.10.1.0 added 2026-10-20 for
+#: the upgrade (the user's decision): every patch's target and signature re-checked on it,
+#: tests/ pass there; nonuniform_edge_extrapolation stands down on it (upstream #5755).
+#: Drop 26.7.1.0 once nothing runs on the old env. A string is accepted (verification
+#: scripts set the installed version to force-install every patch).
+TESTED_PYBAMM: tuple[str, ...] | str = ("26.7.1.0", "26.10.1.0")
 TESTED_PYBOP_PREFIX = "26.3"   # develop branch at commit 25d0b5b reports 26.3
 
 _ORIGINALS: dict[str, Callable] = {}
@@ -99,8 +103,9 @@ def _check_versions() -> None:
     import pybamm
     import pybop
 
-    if pybamm.__version__ != TESTED_PYBAMM:
-        raise PatchError(f"pybamm {pybamm.__version__} != tested {TESTED_PYBAMM}")
+    tested = (TESTED_PYBAMM,) if isinstance(TESTED_PYBAMM, str) else tuple(TESTED_PYBAMM)
+    if pybamm.__version__ not in tested:
+        raise PatchError(f"pybamm {pybamm.__version__} not in tested {tested}")
     if not str(pybop.__version__).startswith(TESTED_PYBOP_PREFIX):
         raise PatchError(f"pybop {pybop.__version__} not {TESTED_PYBOP_PREFIX}.x")
 
@@ -507,7 +512,7 @@ def _edge_weights(nodes: np.ndarray, edges: np.ndarray, interior: str):
     return w.tocsr()
 
 
-def _install_nonuniform_edge_extrapolation() -> None:
+def _install_nonuniform_edge_extrapolation() -> bool | None:
     """Replace ``FiniteVolume.shift`` (node to edge) with a mesh-aware implementation:
     exterior edges by linear extrapolation with the actual node positions, interior edges
     by linear interpolation at the edge position (arithmetic) or PyBaMM's control-volume
@@ -526,7 +531,8 @@ def _install_nonuniform_edge_extrapolation() -> None:
     if "exterior_edge_rows" in inspect.getsource(original) or hasattr(fv, "exterior_edge_rows"):
         log.info("nonuniform_edge_extrapolation: installed PyBaMM already uses mesh-aware "
                  "node-to-edge weights (PyBaMM#5755); stock shift kept")
-        return
+        _ORIGINALS.pop("FiniteVolume.shift")
+        return False                                    # not installed: upstream has the fix
 
     def shift(self, discretised_symbol, shift_key, method):
         if shift_key != "node to edge" or discretised_symbol.size == 1:
@@ -591,7 +597,8 @@ def apply(names: list[str] | None = None, *, strict: bool = True) -> list[str]:
             continue
         try:
             _check_versions()
-            _PATCHES[name][0]()
+            if _PATCHES[name][0]() is False:            # the patch found an upstream fix and stood down
+                continue
         except Exception as exc:
             if strict:
                 raise PatchError(f"patch {name!r} not applied: {exc}") from exc

@@ -30,6 +30,13 @@ def leak(mesh_kind):
     return (tot[-1] - tot[0] - delivered) / delivered
 
 
+@pytest.fixture(autouse=True)
+def installed_version(monkeypatch):
+    """Test the conservation property on the installed PyBaMM: the patch where it is needed,
+    upstream's fix where the patch stands down. The version guard is a deployment check."""
+    monkeypatch.setattr(patches, "TESTED_PYBAMM", pybamm.__version__)
+
+
 @pytest.fixture
 def patched():
     patches.apply(["nonuniform_edge_extrapolation"])
@@ -44,8 +51,14 @@ def _upstream_fixed():
 
 @pytest.mark.skipif(_upstream_fixed(), reason="PyBaMM >= 26.10 has the fix (PyBaMM#5755)")
 def test_stock_pybamm_leaks_on_a_clustered_mesh():
-    assert patches.applied().isdisjoint({"nonuniform_edge_extrapolation"})
-    assert abs(leak("surface")) > 0.1          # the bug this patch fixes
+    was = "nonuniform_edge_extrapolation" in patches.applied()   # another test may have installed it
+    patches.revert(["nonuniform_edge_extrapolation"])
+    try:
+        assert patches.applied().isdisjoint({"nonuniform_edge_extrapolation"})
+        assert abs(leak("surface")) > 0.1          # the bug this patch fixes
+    finally:
+        if was:
+            patches.apply(["nonuniform_edge_extrapolation"])
 
 
 def test_patch_conserves_lithium_on_a_clustered_mesh(patched):
@@ -86,3 +99,21 @@ def test_stretched_mesh_is_exact_for_a_linear_profile(patched):
     assert np.allclose(vals, f(edges), rtol=1e-12)
     vals_h, _ = _shifted("surface", "harmonic", f)
     assert np.allclose(vals_h[[0, -1]], f(edges)[[0, -1]], rtol=1e-12)   # exterior edges exact
+
+
+def test_patch_that_stands_down_is_not_reported_applied(monkeypatch):
+    """An installer returning False (upstream already has the fix) must not be listed or
+    recorded as applied, so the applied list says which code path actually runs."""
+    calls = []
+    monkeypatch.setitem(patches._PATCHES, "_stands_down", (lambda: calls.append("i") or False, lambda: calls.append("r")))
+    monkeypatch.setitem(patches._PATCHES, "_installs", (lambda: calls.append("i2"), lambda: calls.append("r2")))
+    monkeypatch.setattr(patches, "_check_versions", lambda: None)
+    try:
+        got = patches.apply(["_stands_down", "_installs"])
+        assert got == ["_installs"]
+        assert "_stands_down" not in patches.applied() and "_installs" in patches.applied()
+        patches.revert(["_stands_down", "_installs"])
+        assert calls == ["i", "i2", "r2"]                 # nothing to revert for the stood-down one
+    finally:
+        patches._APPLIED.discard("_installs")
+        patches._APPLIED.discard("_stands_down")

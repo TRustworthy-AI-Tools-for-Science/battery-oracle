@@ -40,6 +40,21 @@ def test_leakage_is_about_one_percent_at_the_lowest_frequency():
 
 # --------------------------------------------------------------------------- patches
 
+@pytest.fixture(autouse=True)
+def clean_patch_state():
+    """Every test here starts with no patches installed (other test modules install them
+    globally, and apply() reports an already-installed patch without re-checking it) and
+    leaves the global state as it found it."""
+    from battery_oracle import patches
+
+    before = patches.applied()
+    patches.revert()
+    yield
+    patches.revert()
+    if before:
+        patches.apply(sorted(before), strict=False)
+
+
 def test_patches_apply_and_revert_cleanly():
     pybop = pytest.importorskip("pybop")
     from pybop.costs.error_measures import ErrorMeasure
@@ -49,8 +64,10 @@ def test_patches_apply_and_revert_cleanly():
 
     stock_solve, stock_eval = EISSimulator._solve, ErrorMeasure.evaluate_batch
     try:
-        assert set(patches.apply()) == {"eis_nonstationary", "graded_failure", "parallel_batches",
-                                         "harmonic_flux_coefficients"}
+        got = set(patches.apply())
+        # the PyBOP / EIS / flux patches always install; the edge patch only where upstream lacks the fix
+        assert {"eis_nonstationary", "graded_failure", "parallel_batches", "harmonic_flux_coefficients"} <= got
+        assert got <= set(patches._PATCHES)
         assert EISSimulator._solve is not stock_solve
         assert hasattr(EISSimulator, "set_measurement")
         assert ErrorMeasure.evaluate_batch is not stock_eval

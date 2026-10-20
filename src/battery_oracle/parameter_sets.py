@@ -221,12 +221,66 @@ def _with_thermodynamic_factor(fn):
     return wrapped
 
 
+#: Vacancy-limited LiCoO2 diffusivity (``lico2_ds="vacancy"`` of :func:`lir2032`):
+#: D(y) = D0 max(1 - y, LICO2_VACANCY_FLOOR). Site-exclusion mobility without the
+#: thermodynamic factor (Hasegawa, Kuwata et al. 2021, eq. for D* = D0 (1 - x)); it makes a
+#: near-full surface region whose transport collapses, which a coarse radial mesh cannot
+#: resolve (use ORACLE_FIT_R_MESH=surface with a strong stretch). Only D0 is free.
+LICO2_VACANCY_FLOOR = 1.0e-3
+
+
+def _with_vacancy_limit(fn):
+    """``fn(sto, T)`` x max(1 - sto, LICO2_VACANCY_FLOOR)."""
+    import pybamm
+
+    def wrapped(sto, T):
+        base = fn(sto, T) if callable(fn) else fn
+        return base * pybamm.maximum(1.0 - sto, LICO2_VACANCY_FLOOR)
+
+    return wrapped
+
+
 def lico2_ocp_monotone(sto):
     """Ai2020 LiCoO2 OCP, continued linearly (monotonic) beyond both ends of its data."""
     import pybamm
 
     x, y = _lico2_monotone_table()
     return pybamm.Interpolant(x, y, sto, name=LICO2_MONOTONE_NAME, interpolator="cubic")
+
+
+#: Literature-shaped LiCoO2 OCP tail (``lico2_ocp="PlateauWall"``, 2026-10-20). Measured
+#: Li_xCoO2 potentials stay on the two-phase plateau (3.88-3.92 V) and then fall in a
+#: near-vertical wall within the last few percent of lithiation: Reimers & Dahn, J.
+#: Electrochem. Soc. 139, 2091 (1992), Fig. 2a (C/50 discharge: ~3.75 V at x = 0.93,
+#: ~3.5 V at 0.95-0.96); Ohzuku & Ueda, J. Electrochem. Soc. 141, 2972 (1994), Figs. 7, 9
+#: (10-h OCV flat at 3.92 V to x ~ 1, then ~3.1 V for pristine LiCoO2). Ai2020's tail is
+#: ~0.04 later and softer (3.82 V at 0.95, 3.66 V at 0.99). Form: Ai2020 up to
+#: LICO2_WALL_FROM, its plateau slope continued beyond, minus a smooth wall of
+#: LICO2_WALL_DROP_V and width LICO2_WALL_WIDTH centred at the parameter LICO2_WALL_Y.
+#: The papers fix the wall's shape but not its position in a given cell's stoichiometry
+#: (their x is from charge passed, with 5-7 % irreversibility; Li/Co > 1 shifts the tail,
+#: Levasseur et al. 2002), so LICO2_WALL_Y is a fit parameter bounded to 0.93-0.99.
+LICO2_WALL_Y = "Positive electrode OCP wall stoichiometry"
+LICO2_WALL_DEFAULTS = {LICO2_WALL_Y: 0.965}
+LICO2_WALL_BOUNDS = {LICO2_WALL_Y: (0.93, 0.99)}
+LICO2_WALL_FROM = 0.90
+LICO2_WALL_DROP_V = 0.8
+LICO2_WALL_WIDTH = 0.004
+
+
+def lico2_ocp_plateau_wall(sto):
+    """Ai2020 LiCoO2 OCP to LICO2_WALL_FROM, the plateau slope continued, minus the wall."""
+    import pybamm
+
+    x, y = _lico2_monotone_table()
+    order = np.argsort(x)
+    xs, ys = np.asarray(x, float)[order], np.asarray(y, float)[order]
+    slope = float((np.interp(LICO2_WALL_FROM, xs, ys) - np.interp(LICO2_WALL_FROM - 0.05, xs, ys)) / 0.05)
+    base = pybamm.Interpolant(x, y, pybamm.minimum(sto, LICO2_WALL_FROM), name=LICO2_MONOTONE_NAME,
+                              interpolator="cubic")
+    plateau = base + slope * pybamm.maximum(sto - LICO2_WALL_FROM, 0.0)
+    wall = 0.5 * LICO2_WALL_DROP_V * (1.0 + pybamm.tanh((sto - pybamm.Parameter(LICO2_WALL_Y)) / LICO2_WALL_WIDTH))
+    return plateau - wall
 
 
 def _total_electrode_area_m2(pv) -> float:
@@ -253,7 +307,7 @@ GRAPHITE_OCP_OPTIONS = (None, "Ramadass2004", "Chen2020", "Ecker2015", "Mohtat20
 #: LiCoO2 OCP alternatives (``lico2_ocp``): None = Ai2020 (monotone continuation);
 #: "Marquis2019" = Dualfoil LiCoO2 (analytic over 0-1; resolves the ~4.0-4.1 V
 #: order-disorder region), entropic term zero.
-LICO2_OCP_OPTIONS = (None, "Marquis2019")
+LICO2_OCP_OPTIONS = (None, "Marquis2019", "PlateauWall")
 
 
 def _ai2020_electrolyte_diffusivity_in_cm2(pv) -> bool:
@@ -275,12 +329,13 @@ def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
             graphite_ocp: str | None = None, lico2_ocp: str | None = None, lico2_ds: str = "knee"):
     """``pybamm.ParameterValues`` for the jones2022 LiR2032 coin cell (see module doc).
     ``graphite_ocp`` replaces the template's graphite OCP (GRAPHITE_OCP_OPTIONS).
-    ``lico2_ds``: "knee" (D x 10**(-drop s^2) above a fitted knee, LICO2_DS_KNEE) or
-    "thermo" (D0 x the OCP's thermodynamic factor, LICO2_THETA_NAME; no shape parameters)."""
+    ``lico2_ds``: "knee" (D x 10**(-drop s^2) above a fitted knee, LICO2_DS_KNEE),
+    "thermo" (D0 x the OCP's thermodynamic factor, LICO2_THETA_NAME; no shape parameters) or
+    "vacancy" (D0 x max(1 - y, LICO2_VACANCY_FLOOR); no shape parameters)."""
     import pybamm
 
-    if lico2_ds not in ("knee", "thermo"):
-        raise ValueError(f"lico2_ds must be 'knee' or 'thermo', got {lico2_ds!r}")
+    if lico2_ds not in ("knee", "thermo", "vacancy"):
+        raise ValueError(f"lico2_ds must be 'knee', 'thermo' or 'vacancy', got {lico2_ds!r}")
     if lico2_ds == "thermo" and lico2_ocp is not None:
         raise ValueError("lico2_ds='thermo' needs the Ai2020 LiCoO2 OCP table (lico2_ocp=None)")
 
@@ -307,15 +362,22 @@ def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
         "Cell heat capacity [J.K-1.m-3]": COIN_HEAT_CAPACITY_J_K / COIN_VOLUME_M3,
         "Total heat transfer coefficient [W.m-2.K-1]": COIN_H_DEFAULT,
     }, check_already_exists=False)
-    if template == "Ai2020" and _ai2020_electrolyte_diffusivity_in_cm2(pv):
-        from battery_oracle.params import apply_parameter_scales
-        apply_parameter_scales(pv, {"Electrolyte diffusivity [m2.s-1]":
-                                    AI2020_ELECTROLYTE_DIFFUSIVITY_UNIT_FIX})
+    if template == "Ai2020":
+        # only the unit fix depends on the PyBaMM version; everything below it applies always
+        # (until 2026-10-20 the whole block sat under this check, so on PyBaMM >= 26.10 the
+        # monotone OCP, activation energies, D_s forms and j0 shape were all silently dropped)
+        if _ai2020_electrolyte_diffusivity_in_cm2(pv):
+            from battery_oracle.params import apply_parameter_scales
+            apply_parameter_scales(pv, {"Electrolyte diffusivity [m2.s-1]":
+                                        AI2020_ELECTROLYTE_DIFFUSIVITY_UNIT_FIX})
         pv.update({"Positive electrode OCP [V]": lico2_ocp_monotone})
         pv.update({name: _with_activation(pv[name], e) for name, e in LIR2032_ACTIVATION_J_MOL.items()})
         if lico2_ds == "thermo":
             pv.update({"Positive particle diffusivity [m2.s-1]":
                        _with_thermodynamic_factor(pv["Positive particle diffusivity [m2.s-1]"])})
+        elif lico2_ds == "vacancy":
+            pv.update({"Positive particle diffusivity [m2.s-1]":
+                       _with_vacancy_limit(pv["Positive particle diffusivity [m2.s-1]"])})
         else:
             pv.update({"Positive particle diffusivity [m2.s-1]":
                        _with_lithiation_drop(pv["Positive particle diffusivity [m2.s-1]"])})
@@ -342,6 +404,11 @@ def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
     elif graphite_ocp in ("Ecker2015", "Mohtat2020"):
         pv.update({"Negative electrode OCP [V]": pybamm.ParameterValues(graphite_ocp)["Negative electrode OCP [V]"],
                    "Negative electrode OCP entropic change [V.K-1]": 0.0})
+    if lico2_ocp == "PlateauWall":
+        if template != "Ai2020":
+            raise ValueError("lico2_ocp='PlateauWall' continues the Ai2020 LiCoO2 table (template='Ai2020')")
+        pv.update({"Positive electrode OCP [V]": lico2_ocp_plateau_wall})
+        pv.update(dict(LICO2_WALL_DEFAULTS), check_already_exists=False)
     if lico2_ocp == "Marquis2019":
         pv.update({"Positive electrode OCP [V]": pybamm.ParameterValues("Marquis2019")["Positive electrode OCP [V]"],
                    "Positive electrode OCP entropic change [V.K-1]": 0.0})
@@ -358,6 +425,10 @@ CUSTOM_PARAMETER_SETS = {
     "LiR2032_EckerGraphite": lambda: lir2032(graphite_ocp="Ecker2015"),
     "LiR2032_MohtatGraphite": lambda: lir2032(graphite_ocp="Mohtat2020"),
     "LiR2032_MohtatGraphite_ThermoD": lambda: lir2032(graphite_ocp="Mohtat2020", lico2_ds="thermo"),
+    "LiR2032_MohtatGraphite_VacancyD": lambda: lir2032(graphite_ocp="Mohtat2020", lico2_ds="vacancy"),
+    "LiR2032_MohtatGraphite_Wall": lambda: lir2032(graphite_ocp="Mohtat2020", lico2_ocp="PlateauWall"),
+    "LiR2032_MohtatGraphite_Wall_VacancyD": lambda: lir2032(graphite_ocp="Mohtat2020", lico2_ocp="PlateauWall",
+                                                            lico2_ds="vacancy"),
     "LiR2032_EckerGraphite_MarquisLCO": lambda: lir2032(graphite_ocp="Ecker2015", lico2_ocp="Marquis2019"),
     "LiR2032_ChenGraphite_MarquisLCO": lambda: lir2032(graphite_ocp="Chen2020", lico2_ocp="Marquis2019"),
 }

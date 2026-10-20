@@ -926,7 +926,11 @@ class ChainModel:
         capture = capture[(capture > 0.0) & (capture < t_end)]
         states: dict[float, np.ndarray] = {}
         sol, cut, n_cuts = None, 0.0, 0
-        for _ in range(MAX_SEGMENTS):
+        # every capture time ends a segment, and so does every cycler stop / release:
+        # the cap must grow with them (a fixed 5000 silently truncated long histories at
+        # ~14 cycle groups, 2026-10-19)
+        max_segments = MAX_SEGMENTS + 2 * capture.size
+        for _ in range(max_segments):
             t0 = 0.0 if sol is None else float(sol.t[-1])
             nxt = capture[capture > t0 + 1e-9]
             target = float(nxt[0]) if nxt.size else t_end
@@ -953,6 +957,9 @@ class ChainModel:
                 states[float(sol.t[-1])] = np.asarray(sol.last_state.all_ys[0][:, 0], float).copy()
             else:
                 break                               # final time, floor, or another event
+        else:
+            raise RuntimeError(f"segment limit ({max_segments}) reached at t = {float(sol.t[-1]):.0f} of "
+                               f"{t_end:.0f} s: history truncated")
         return sol, n_cuts, states
 
     def solve(self, inputs: dict) -> dict:
@@ -1323,6 +1330,13 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                                  best_cost=ck["best_cost"], n_iterations=None)
         log.info("%s: report from checkpoint %s (cost %s, written %s)", cell_id,
                  os.environ["ORACLE_FIT_CHECKPOINT"], ck["best_cost"], ck.get("written"))
+    elif os.environ.get("ORACLE_FIT_POLISH_ONLY") == "1":
+        # validate / apply the local polish alone, from the warm-start point (no CMA-ES)
+        from types import SimpleNamespace
+        if warm_inputs is None:
+            raise ValueError("ORACLE_FIT_POLISH_ONLY needs ORACLE_FIT_WARM_JSON (the start point)")
+        result = SimpleNamespace(best_inputs={k: float(warm_inputs[k]) for k in fit}, best_cost=np.nan,
+                                 n_iterations=0)
     else:
         optim = pybop.CMAES(meta, options=options)
         if warm_inputs is not None:
@@ -1332,6 +1346,26 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                 x0=optim.problem.parameters.get_initial_values(transformed=True),
                 sigma0=np.asarray(optim._std0, float) * f_sigma, boundaries=optim._boundaries)
         result = optim.run()
+    polish_report = None
+    n_polish = int(os.environ.get("ORACLE_FIT_POLISH", "0"))
+    if n_polish > 0 or os.environ.get("ORACLE_FIT_POLISH_ONLY") == "1":
+        # local polish from the CMA-ES best (battery_oracle.polish): replaces it only if better
+        from battery_oracle.polish import polish as _polish
+        names = list(fit)
+        start = {k: float(np.asarray(result.best_inputs[k]).ravel()[0]) for k in names}
+        pol = _polish(lambda cands: np.ravel(np.asarray(meta.evaluate_batch(cands).values, float)), names,
+                      [tuple(map(float, fit[k].bounds)) for k in names], start, max_iter=max(n_polish, 1),
+                      h=float(os.environ.get("ORACLE_FIT_POLISH_STEP", "5e-3")))
+        cma_cost = float(np.asarray(result.best_cost).ravel()[0])
+        polish_report = {k: pol[k] for k in ("start_cost", "best_cost", "iterations", "stop_reason", "history",
+                                             "log_scaled")}
+        polish_report["cmaes_cost"] = cma_cost
+        log.info("%s: polish %s -> %s in %d iterations (%s)", cell_id, pol["start_cost"], pol["best_cost"],
+                 pol["iterations"], pol["stop_reason"])
+        if not np.isfinite(cma_cost) or pol["best_cost"] < cma_cost:
+            from types import SimpleNamespace
+            result = SimpleNamespace(best_inputs=pol["best_inputs"], best_cost=pol["best_cost"],
+                                     n_iterations=getattr(result, "n_iterations", None))
     runtime = time.time() - t0
     best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
     log.info("%s: chain fit cost %s in %.0f s: %s", cell_id, result.best_cost, runtime, best)
@@ -1350,6 +1384,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                             "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}
                            if warm_inputs is not None else None),
             "cost": float(np.asarray(result.best_cost).ravel()[0]),
+            "polish": polish_report,
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()},
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
             "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),

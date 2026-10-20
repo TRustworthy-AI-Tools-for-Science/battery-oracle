@@ -76,6 +76,9 @@ def test_lir2032_corrects_the_ai2020_electrolyte_diffusivity_units():
     def d(p):
         return float(p.process_symbol(p["Electrolyte diffusivity [m2.s-1]"](c, T)).evaluate())
 
-    assert d(ai) > 1e-6                     # PyBaMM's Ai2020: cm2/s returned as m2/s
-    assert 1e-10 < d(pv) < 1e-9             # corrected: ~3.2e-10 m2/s
-    assert d(pv) == pytest.approx(1e-4 * d(ai))
+    # whichever unit the installed PyBaMM's Ai2020 returns (cm2/s before 26.10, m2/s since),
+    # the LiR2032 set is in m2/s (a 1 M LiPF6 carbonate electrolyte: ~1e-10 .. 1e-9 m2/s), and
+    # the 1e-4 correction is applied exactly when the template needs it
+    assert 1e-10 < d(pv) < 1e-9
+    needs_fix = d(ai) > 1e-8
+    assert d(pv) == pytest.approx((1e-4 if needs_fix else 1.0) * d(ai))

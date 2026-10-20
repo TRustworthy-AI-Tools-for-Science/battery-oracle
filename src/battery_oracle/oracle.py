@@ -217,6 +217,9 @@ _SUPPORTED_CHEMISTRIES = {
     "LiR2032_MohtatGraphite": "LiR2032_MohtatGraphite",
     # + LiCoO2 solid diffusivity from the OCP's thermodynamic factor (no shape parameters)
     "LiR2032_MohtatGraphite_ThermoD": "LiR2032_MohtatGraphite_ThermoD",
+    "LiR2032_MohtatGraphite_VacancyD": "LiR2032_MohtatGraphite_VacancyD",
+    "LiR2032_MohtatGraphite_Wall": "LiR2032_MohtatGraphite_Wall",
+    "LiR2032_MohtatGraphite_Wall_VacancyD": "LiR2032_MohtatGraphite_Wall_VacancyD",
     "LiR2032_EckerGraphite_MarquisLCO": "LiR2032_EckerGraphite_MarquisLCO",
     "LiR2032_ChenGraphite_MarquisLCO": "LiR2032_ChenGraphite_MarquisLCO",
     # friendly aliases
