@@ -35,6 +35,23 @@ sweeps on a relaxing cell):
     killed and scored ``inf`` like any failed simulation, so one pathological
     parameter set cannot freeze a whole population.
 
+``nonuniform_edge_extrapolation``
+    ``pybamm.FiniteVolume.shift`` maps node values to the two EXTERIOR edges with the
+    fixed weights [1.5, -0.5] -- linear extrapolation that is right only on a uniform
+    mesh -- while ``boundary_value`` (``pybamm.surf``) extrapolates with the mesh's own
+    spacings. A Fickian particle imposes its surface flux as dc/dr = -J / surf(D) but
+    divides with the boundary-edge D of ``shift``: on a non-uniform mesh with a
+    concentration-dependent D the imposed flux is J D_edge / surf(D) != J, and lithium
+    leaks (diag/particle_conservation.py, 2026-10-19: -82 to -91 % of the delivered Li
+    for a D falling 3 decades near full lithiation on a surface-clustered mesh; exact on
+    a uniform mesh or with constant D). Reported and fixed upstream in PyBaMM 26.10.0.0
+    (pybamm-team/PyBaMM#5754, PR #5755); this environment pins 26.7.1.0, so: ``shift``
+    is reimplemented for node to edge with the mesh's actual positions -- exterior edges
+    by the same linear extrapolation as ``boundary_value``, interior arithmetic means by
+    linear interpolation at the edge position (stock: the plain average of the two nodes,
+    biased on a stretched mesh); the harmonic interior mean is PyBaMM's. Identical to
+    stock PyBaMM on uniform meshes.
+
 ``harmonic_flux_coefficients``
     PyBaMM averages a coefficient onto cell edges harmonically only when it
     multiplies a bare gradient; the DFN electrolyte current multiplies its
@@ -221,13 +238,15 @@ def _remove_graded_failure() -> None:
 _ACTIVE_META = None
 
 
-def single_thread_solver(rtol: float = 1e-6, atol: float = 1e-6):
+def single_thread_solver(rtol: float = 1e-6, atol: float = 1e-6, output_variables: list[str] | None = None):
     """PyBOP-style IDAKLU solver (failures ignored, algebraic errors suppressed) with
     ``num_threads = 1``: process parallelism replaces OpenMP threads, which also
-    avoids PyBOP's default of one thread per core of the whole node."""
+    avoids PyBOP's default of one thread per core of the whole node. With
+    ``output_variables`` the solver stores only those variables (not the state
+    history; the terminal state is kept for continuing)."""
     import pybamm
 
-    return pybamm.IDAKLUSolver(rtol=rtol, atol=atol, on_failure="ignore",
+    return pybamm.IDAKLUSolver(rtol=rtol, atol=atol, on_failure="ignore", output_variables=output_variables,
                                options={"suppress_algebraic_error": True, "num_threads": 1})
 
 
@@ -250,6 +269,13 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
     integration crawl, and a pool would wait for it forever. An exception inside a
     candidate is also scored ``inf`` (logged); if every candidate fails, the first
     error is raised so a real bug is not hidden.
+
+    A worker KILLED from outside (SIGKILL without a result: the kernel's out-of-memory
+    killer) says nothing about the candidate, so it is not scored ``inf``: the
+    candidate is run again with one worker fewer (kept for later batches too). If it
+    is killed again with a single worker, the job does not have the memory for one
+    simulation and this raises. (Before 2026-10-18 such candidates were scored
+    ``inf``: the v20 pilots lost 251 / 706 of their candidates to OOM kills.)
     """
     import multiprocessing as mp
     import time
@@ -262,9 +288,10 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
     errors: list[str] = []
     pending = list(range(len(inputs)))
     running: dict = {}                       # conn -> (index, process, start time)
+    limit = max(1, int(n_workers))
     try:
         while pending or running:
-            while pending and len(running) < max(1, n_workers):
+            while pending and len(running) < limit:
                 k = pending.pop(0)
                 recv, send = ctx.Pipe(duplex=False)
                 proc = ctx.Process(target=_candidate_worker, args=(send, inputs[k]), daemon=True)
@@ -275,10 +302,24 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
                 k, proc, _ = running.pop(conn)
                 try:
                     kind, val = conn.recv()
-                except EOFError:             # died without reporting (e.g. out of memory)
+                except EOFError:             # died without reporting
                     kind, val = "err", "worker died without a result"
                 conn.close()
                 proc.join(timeout=5)
+                if kind == "err" and val == "worker died without a result" and proc.exitcode == -9:
+                    # killed from outside (out of memory): not the candidate's fault
+                    POOL_STATS["killed_workers"] += 1
+                    if limit == 1 and len(running) == 0:
+                        raise RuntimeError(
+                            "a candidate worker was killed (SIGKILL, out of memory?) while running "
+                            "alone: the job has too little memory for one simulation")
+                    limit = max(1, min(limit, len(running) + 1) - 1)
+                    setattr(meta, "_n_workers", limit)
+                    POOL_STATS["workers"] = limit
+                    pending.insert(0, k)
+                    log.warning("candidate %d: worker killed (out of memory?); rerun with %d workers",
+                                k, limit)
+                    continue
                 if kind == "ok":
                     costs[k] = val
                 else:
@@ -303,6 +344,9 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
 
 
 _BEST: dict = {"cost": np.inf}
+#: worker-pool health of this process: workers killed from outside (rerun, not
+#: scored) and the current number of concurrent workers
+POOL_STATS: dict = {"killed_workers": 0, "workers": None}
 
 
 def _checkpoint_best(inputs: list, costs) -> None:
@@ -440,11 +484,97 @@ def _remove_harmonic_flux_coefficients() -> None:
 
 # ---------------------------------------------------------------------------
 
+def _edge_weights(nodes: np.ndarray, edges: np.ndarray, interior: str):
+    """(n+1, n) node-to-edge weights on a 1D submesh: linear extrapolation from the two
+    nearest nodes to the exterior edges (the formula of ``boundary_value``), and on the
+    interior edges either linear interpolation at the edge position (``"linear"``) or
+    nothing (``"none"``, rows left empty for the harmonic mean)."""
+    from scipy.sparse import lil_matrix
+
+    n = nodes.size
+    w = lil_matrix((n + 1, n))
+
+    def line(row, a, b, x):                  # value at x from nodes a, b: f_a + (x - x_a)/(x_b - x_a) (f_b - f_a)
+        t = (x - nodes[a]) / (nodes[b] - nodes[a])
+        w[row, a] = 1.0 - t
+        w[row, b] = t
+
+    line(0, 0, 1, edges[0])
+    line(n, n - 2, n - 1, edges[-1])
+    if interior == "linear":
+        for k in range(1, n):
+            line(k, k - 1, k, edges[k])
+    return w.tocsr()
+
+
+def _install_nonuniform_edge_extrapolation() -> None:
+    """Replace ``FiniteVolume.shift`` (node to edge) with a mesh-aware implementation:
+    exterior edges by linear extrapolation with the actual node positions, interior edges
+    by linear interpolation at the edge position (arithmetic) or PyBaMM's control-volume
+    harmonic mean (harmonic). Identical to stock PyBaMM on uniform meshes; edge to node is
+    stock (PyBaMM's nodes are cell midpoints, so its averages are already exact)."""
+    import pybamm
+    from scipy.sparse import csr_matrix, diags, eye, hstack, kron
+
+    import inspect
+
+    fv = pybamm.FiniteVolume
+    _require_signature(fv.shift, ["self", "discretised_symbol", "shift_key", "method"], "FiniteVolume.shift")
+    original = fv.shift
+    _ORIGINALS["FiniteVolume.shift"] = original
+    # PyBaMM >= 26.10.0.0 has the same fix (pybamm-team/PyBaMM#5754, PR #5755): keep its own
+    if "exterior_edge_rows" in inspect.getsource(original) or hasattr(fv, "exterior_edge_rows"):
+        log.info("nonuniform_edge_extrapolation: installed PyBaMM already uses mesh-aware "
+                 "node-to-edge weights (PyBaMM#5755); stock shift kept")
+        return
+
+    def shift(self, discretised_symbol, shift_key, method):
+        if shift_key != "node to edge" or discretised_symbol.size == 1:
+            return original(self, discretised_symbol, shift_key, method)
+        if method not in ("arithmetic", "harmonic"):
+            raise ValueError(f"method '{method}' not recognised")
+        array = discretised_symbol
+        submesh = self.mesh[array.domain]
+        n = submesh.npts
+        reps = self._get_auxiliary_domain_repeats(discretised_symbol.domains)
+        nodes, edges = np.asarray(submesh.nodes, float), np.asarray(submesh.edges, float)
+
+        def full(sub):
+            return pybamm.Matrix(csr_matrix(kron(eye(reps, dtype=np.float64), sub)))
+
+        if method == "arithmetic":
+            return full(_edge_weights(nodes, edges, "linear")) @ array
+
+        # harmonic: exterior edges extrapolated as above; interior edges as stock PyBaMM
+        D1 = full(hstack([eye(n - 1, dtype=np.float64), csr_matrix((n - 1, 1))])) @ array
+        D2 = full(hstack([csr_matrix((n - 1, 1)), eye(n - 1, dtype=np.float64)])) @ array
+        if hasattr(submesh, "length"):
+            d_edges = self._get_d_edges_symbolic_mesh(discretised_symbol.domains["primary"])
+            left_dx = pybamm.Matrix(diags([1.0], [0], shape=(d_edges.size - 1, d_edges.size))) @ d_edges
+            right_dx = pybamm.Matrix(diags([1.0], [1], shape=(d_edges.size - 1, d_edges.size))) @ d_edges
+        else:
+            dx = submesh.d_edges
+            left_dx, right_dx = pybamm.Vector(dx[:-1]), pybamm.Vector(dx[1:])
+        beta = pybamm.kronecker_product(pybamm.Matrix(np.ones((reps, 1))), left_dx / (left_dx + right_dx))
+        D_eff = 1 / (beta / D1 + (1 - beta) / D2)
+        pad = full(csr_matrix(np.vstack([np.zeros((1, n - 1)), np.eye(n - 1), np.zeros((1, n - 1))])))
+        return full(_edge_weights(nodes, edges, "none")) @ array + pad @ D_eff
+
+    fv.shift = shift
+
+
+def _remove_nonuniform_edge_extrapolation() -> None:
+    import pybamm
+
+    pybamm.FiniteVolume.shift = _ORIGINALS.pop("FiniteVolume.shift")
+
+
 _PATCHES = {
     "eis_nonstationary": (_install_eis_nonstationary, _remove_eis_nonstationary),
     "graded_failure": (_install_graded_failure, _remove_graded_failure),
     "parallel_batches": (_install_parallel_batches, _remove_parallel_batches),
     "harmonic_flux_coefficients": (_install_harmonic_flux_coefficients, _remove_harmonic_flux_coefficients),
+    "nonuniform_edge_extrapolation": (_install_nonuniform_edge_extrapolation, _remove_nonuniform_edge_extrapolation),
 }
 
 

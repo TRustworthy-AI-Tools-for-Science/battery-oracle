@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 #: Measured capacity of the jones2022 LiR2032 cells (deepest discharge, ~42 mAh).
 LIR2032_NOMINAL_AH = 0.042
 #: Voltage window of the jones2022 protocol (Jones et al. 2022 Methods).
@@ -150,8 +152,14 @@ OCP_DATA_RANGES: dict[str, tuple[float, float]] = {}
 LICO2_MONOTONE_NAME = "lico2_ocp_Ai2020_monotone"
 
 
-def _lico2_monotone_table(step: float = 0.01, n_slope: int = 5):
-    """Ai2020 LiCoO2 OCP table + a linear continuation from y = 0 to the data start."""
+def _lico2_monotone_table(step: float = 0.01, n_slope: int = 5, step_hi: float = 0.002, y_hi: float = 1.03):
+    """Ai2020 LiCoO2 OCP table, continued linearly (monotonic) at both ends: from y = 0
+    to the data start, and from the data end (y = 0.9989, 3.41 V, still falling at
+    -73 V per unit y) to y_hi. Without the upper continuation PyBaMM extrapolates the
+    end cubic, which need not keep falling: with a fine particle mesh the LiCoO2 surface
+    reaches the data end during a discharge and the solver fails at 3.003 V, just above
+    the 3.0 V stop that a real cell reaches as Li_yCoO2 fills (radial_ref_why.py,
+    2026-10-16). The OCP guard still fails candidates that go beyond OCP_GUARD_TOL."""
     import numpy as np
     from pybamm.input.parameters.lithium_ion.Ai2020 import lico2_ocp_Ai2020_data
 
@@ -162,12 +170,59 @@ def _lico2_monotone_table(step: float = 0.01, n_slope: int = 5):
     slope = np.polyfit(x[:n_slope], y[:n_slope], 1)[0]          # dU/dy < 0 at the data start
     x_ext = np.arange(0.0, x[0] - step / 2, step)
     y_ext = y[0] + slope * (x_ext - x[0])
+    slope_hi = (y[-1] - y[-2]) / (x[-1] - x[-2])                 # dU/dy of the last data segment
+    x_up = np.arange(x[-1] + step_hi, y_hi + step_hi / 2, step_hi)
+    y_up = y[-1] + slope_hi * (x_up - x[-1])
     OCP_DATA_RANGES[LICO2_MONOTONE_NAME] = (float(x[0]), float(x[-1]))
-    return np.r_[x_ext, x], np.r_[y_ext, y]
+    return np.r_[x_ext, x, x_up], np.r_[y_ext, y, y_up]
+
+
+#: LiCoO2 solid diffusivity from the measured OCP (``lico2_ds="thermo"`` of :func:`lir2032`),
+#: replacing the hand-chosen knee/drop form. Lattice gas with site exclusion: flux
+#: N = -M c grad(mu), vacancy-limited mobility M = D0 (1 - y) / kT (Bazant, Acc. Chem. Res.
+#: 46, 1144 (2013); Bazant et al., arXiv 1204.2934), mu = -F U(y) from the OCP, gives Fick's
+#: law with D(y) = D0 Theta(y), Theta(y) = -(F/RT) y (1 - y) dU/dy (Theta = 1 for an ideal
+#: lattice gas). The shape of D(y) is the measured OCP's; only D0 (the template's D, scaled
+#: by the fit) is free. The collapse near full lithiation is the vacancy mechanism measured
+#: for Li_xCoO2 (tracer D* falling steeply to a minimum at x = 1; Hasegawa, Kuwata et al.,
+#: Phys. Chem. Chem. Phys. 2021, doi 10.1039/d0cp04598e).
+LICO2_THETA_NAME = "lico2_thermodynamic_factor"
+LICO2_THETA_FLOOR = 1.0e-3            # keeps D > 0 where the OCP is flat (two-phase) or y -> 1
+LICO2_THETA_T_REF = 298.15
+
+
+def lico2_thermodynamic_factor_table(step: float = 5e-4):
+    """(y, Theta(y)) on a grid from the monotone Ai2020 OCP table (cubic spline slope)."""
+    import numpy as np
+    from scipy.interpolate import CubicSpline
+
+    x, u = _lico2_monotone_table()
+    order = np.argsort(x)
+    x, u = np.asarray(x, float)[order], np.asarray(u, float)[order]
+    keep = np.r_[True, np.diff(x) > 1e-9]
+    spline = CubicSpline(x[keep], u[keep])
+    y = np.arange(0.0, 1.0 + step / 2, step)
+    theta = -(96485.33212 / (8.314462618 * LICO2_THETA_T_REF)) * y * (1.0 - y) * spline(y, 1)
+    return y, np.maximum(theta, LICO2_THETA_FLOOR)
+
+
+def _with_thermodynamic_factor(fn):
+    """``fn(sto, T)`` x Theta(sto) (see LICO2_THETA_NAME)."""
+    import pybamm
+
+    y, theta = lico2_thermodynamic_factor_table()
+
+    def wrapped(sto, T):
+        th = pybamm.Interpolant(y, theta, pybamm.minimum(pybamm.maximum(sto, 0.0), 1.0),
+                                name=LICO2_THETA_NAME, interpolator="linear")
+        base = fn(sto, T) if callable(fn) else fn
+        return base * th
+
+    return wrapped
 
 
 def lico2_ocp_monotone(sto):
-    """Ai2020 LiCoO2 OCP, continued linearly (monotonic) below its data (see module doc)."""
+    """Ai2020 LiCoO2 OCP, continued linearly (monotonic) beyond both ends of its data."""
     import pybamm
 
     x, y = _lico2_monotone_table()
@@ -201,11 +256,33 @@ GRAPHITE_OCP_OPTIONS = (None, "Ramadass2004", "Chen2020", "Ecker2015", "Mohtat20
 LICO2_OCP_OPTIONS = (None, "Marquis2019")
 
 
-def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
-            graphite_ocp: str | None = None, lico2_ocp: str | None = None):
-    """``pybamm.ParameterValues`` for the jones2022 LiR2032 coin cell (see module doc).
-    ``graphite_ocp`` replaces the template's graphite OCP (GRAPHITE_OCP_OPTIONS)."""
+def _ai2020_electrolyte_diffusivity_in_cm2(pv) -> bool:
+    """True if this PyBaMM's Ai2020 electrolyte diffusivity still returns cm2/s (the bug
+    AI2020_ELECTROLYTE_DIFFUSIVITY_UNIT_FIX corrects); False once upstream returns m2/s
+    (PyBaMM >= 26.10 multiplies by 1e-4 itself). Decided from the value at 1000 mol/m3 and
+    298 K: ~3e-6 in cm2/s, ~3e-10 in m2/s. Applying the fix twice makes D_e 1e4 x too small
+    (the electrolyte then depletes within minutes at 1C)."""
     import pybamm
+
+    f = pv["Electrolyte diffusivity [m2.s-1]"]
+    if not callable(f):
+        return float(f) > 1e-8
+    value = float(np.asarray(pv.process_symbol(f(pybamm.Scalar(1000.0), pybamm.Scalar(298.15))).evaluate()).ravel()[0])
+    return value > 1e-8
+
+
+def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
+            graphite_ocp: str | None = None, lico2_ocp: str | None = None, lico2_ds: str = "knee"):
+    """``pybamm.ParameterValues`` for the jones2022 LiR2032 coin cell (see module doc).
+    ``graphite_ocp`` replaces the template's graphite OCP (GRAPHITE_OCP_OPTIONS).
+    ``lico2_ds``: "knee" (D x 10**(-drop s^2) above a fitted knee, LICO2_DS_KNEE) or
+    "thermo" (D0 x the OCP's thermodynamic factor, LICO2_THETA_NAME; no shape parameters)."""
+    import pybamm
+
+    if lico2_ds not in ("knee", "thermo"):
+        raise ValueError(f"lico2_ds must be 'knee' or 'thermo', got {lico2_ds!r}")
+    if lico2_ds == "thermo" and lico2_ocp is not None:
+        raise ValueError("lico2_ds='thermo' needs the Ai2020 LiCoO2 OCP table (lico2_ocp=None)")
 
     if lico2_ocp not in LICO2_OCP_OPTIONS:
         raise ValueError(f"lico2_ocp must be one of {LICO2_OCP_OPTIONS}, got {lico2_ocp!r}")
@@ -230,15 +307,19 @@ def lir2032(template: str = "Ai2020", nominal_ah: float = LIR2032_NOMINAL_AH,
         "Cell heat capacity [J.K-1.m-3]": COIN_HEAT_CAPACITY_J_K / COIN_VOLUME_M3,
         "Total heat transfer coefficient [W.m-2.K-1]": COIN_H_DEFAULT,
     }, check_already_exists=False)
-    if template == "Ai2020":
+    if template == "Ai2020" and _ai2020_electrolyte_diffusivity_in_cm2(pv):
         from battery_oracle.params import apply_parameter_scales
         apply_parameter_scales(pv, {"Electrolyte diffusivity [m2.s-1]":
                                     AI2020_ELECTROLYTE_DIFFUSIVITY_UNIT_FIX})
         pv.update({"Positive electrode OCP [V]": lico2_ocp_monotone})
         pv.update({name: _with_activation(pv[name], e) for name, e in LIR2032_ACTIVATION_J_MOL.items()})
-        pv.update({"Positive particle diffusivity [m2.s-1]":
-                   _with_lithiation_drop(pv["Positive particle diffusivity [m2.s-1]"])})
-        pv.update(dict(LICO2_DS_DEFAULTS), check_already_exists=False)
+        if lico2_ds == "thermo":
+            pv.update({"Positive particle diffusivity [m2.s-1]":
+                       _with_thermodynamic_factor(pv["Positive particle diffusivity [m2.s-1]"])})
+        else:
+            pv.update({"Positive particle diffusivity [m2.s-1]":
+                       _with_lithiation_drop(pv["Positive particle diffusivity [m2.s-1]"])})
+            pv.update(dict(LICO2_DS_DEFAULTS), check_already_exists=False)
         pv.update({"Negative particle diffusivity [m2.s-1]":
                    _with_lithiation_drop(pv["Negative particle diffusivity [m2.s-1]"],
                                          GRAPHITE_DS_KNEE, GRAPHITE_DS_DROP)})
@@ -276,6 +357,7 @@ CUSTOM_PARAMETER_SETS = {
     "LiR2032_ChenGraphite": lambda: lir2032(graphite_ocp="Chen2020"),
     "LiR2032_EckerGraphite": lambda: lir2032(graphite_ocp="Ecker2015"),
     "LiR2032_MohtatGraphite": lambda: lir2032(graphite_ocp="Mohtat2020"),
+    "LiR2032_MohtatGraphite_ThermoD": lambda: lir2032(graphite_ocp="Mohtat2020", lico2_ds="thermo"),
     "LiR2032_EckerGraphite_MarquisLCO": lambda: lir2032(graphite_ocp="Ecker2015", lico2_ocp="Marquis2019"),
     "LiR2032_ChenGraphite_MarquisLCO": lambda: lir2032(graphite_ocp="Chen2020", lico2_ocp="Marquis2019"),
 }

@@ -215,6 +215,8 @@ _SUPPORTED_CHEMISTRIES = {
     "LiR2032_ChenGraphite": "LiR2032_ChenGraphite",           # Ai2020 + Chen2020 LG M50 graphite OCP
     "LiR2032_EckerGraphite": "LiR2032_EckerGraphite",
     "LiR2032_MohtatGraphite": "LiR2032_MohtatGraphite",
+    # + LiCoO2 solid diffusivity from the OCP's thermodynamic factor (no shape parameters)
+    "LiR2032_MohtatGraphite_ThermoD": "LiR2032_MohtatGraphite_ThermoD",
     "LiR2032_EckerGraphite_MarquisLCO": "LiR2032_EckerGraphite_MarquisLCO",
     "LiR2032_ChenGraphite_MarquisLCO": "LiR2032_ChenGraphite_MarquisLCO",
     # friendly aliases
@@ -1190,6 +1192,10 @@ class PyBaMMOracle:
         # Particle-size distribution, as in the chain fit (bol_chain.size_distribution_values):
         # {"mode": "both" | "positive" | "negative", "sd_n": .., "sd_p": ..}; None = single size.
         size_distribution: dict | None = None,
+        # Particle radial mesh of the chain fit (bol_chain.radial_mesh_setting):
+        # {"points": .., "kind": "uniform" | "surface", "stretch": .., "x_factor": ..}
+        # (x_factor multiplies PyBaMM's electrode/separator points); None = PyBaMM default.
+        radial_mesh: dict | None = None,
         rest_s: float = 1200.0,
         circuit: str | None = None,
         action_names: list[str] | None = None,
@@ -1564,6 +1570,15 @@ class PyBaMMOracle:
             self._deg_opts = {**self._deg_opts,
                               "particle size": chain_options(size_distribution=mode)["particle size"]}
             self._var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS}
+        self._radial_mesh = dict(radial_mesh) if radial_mesh else None
+        self._submesh = None
+        if self._radial_mesh:
+            from battery_oracle.bol_chain import radial_mesh as _radial_mesh
+            r_pts, self._submesh = _radial_mesh(self._radial_mesh.get("points"),
+                                                self._radial_mesh.get("kind", "uniform"),
+                                                float(self._radial_mesh.get("stretch") or 1.15))
+            self._var_pts = {**(self._var_pts or {}), **r_pts}
+        self._x_factor = int((self._radial_mesh or {}).get("x_factor") or 1)
         # Arrhenius EIS temperature dependence (#11).
         self._E_a = float(E_a_J_per_mol)
         self._E_a_el = float(E_a_electrolyte_J_per_mol)
@@ -1691,9 +1706,19 @@ class PyBaMMOracle:
     def _model_var_pts(self, model):
         """Mesh for a PyBaMM model of this oracle: the defaults, with the coarse
         size-distribution mesh of the chain fit when one is set (None otherwise)."""
-        if not self._var_pts:
+        from battery_oracle.bol_chain import x_var_pts
+
+        x_pts = x_var_pts(model, self._x_factor)
+        if not self._var_pts and not x_pts:
             return None
-        return {**model.default_var_pts, **self._var_pts}
+        return {**model.default_var_pts, **(self._var_pts or {}), **x_pts}
+
+    def _model_submesh(self, model):
+        """Submesh types for a PyBaMM model of this oracle: the chain fit's radial mesh
+        when one is set (None otherwise: PyBaMM's defaults)."""
+        if not self._submesh:
+            return None
+        return {**model.default_submesh_types, **self._submesh}
 
     def _refresh_state_schema(self) -> None:
         """Recompute the returned-state layout from the circuit + active flags.
@@ -2118,7 +2143,7 @@ class PyBaMMOracle:
                 try:
                     solver = pybamm.IDAKLUSolver(rtol=1e-6, atol=1e-6, options=options)
                     sim = pybamm.Simulation(model, parameter_values=pv, solver=solver,
-                                            var_pts=self._model_var_pts(model))
+                                            var_pts=self._model_var_pts(model), submesh_types=self._model_submesh(model))
                     return model, sim, sim.solve(t_eval=rel)
                 except pybamm.SolverError as exc:
                     last_exc = exc
@@ -2137,7 +2162,7 @@ class PyBaMMOracle:
             t_shift = 30.0
             m0 = self._model_cls(options=self._deg_opts)
             m0.set_initial_conditions_from(step.first_state, inplace=True)
-            pre = pybamm.Simulation(m0, parameter_values=pv, var_pts=self._model_var_pts(m0),
+            pre = pybamm.Simulation(m0, parameter_values=pv, var_pts=self._model_var_pts(m0), submesh_types=self._model_submesh(m0),
                                     solver=pybamm.IDAKLUSolver(rtol=1e-6, atol=1e-6,
                                                                options={"num_threads": 1}))
             pre_sol = pre.solve(t_eval=np.linspace(0.0, t_shift, 31))
@@ -2231,7 +2256,7 @@ class PyBaMMOracle:
         proto = np.asarray(protocol).copy()
 
         def _solve(model, solver):
-            sim = pb.Simulation(model, experiment=experiment, var_pts=self._model_var_pts(model),
+            sim = pb.Simulation(model, experiment=experiment, var_pts=self._model_var_pts(model), submesh_types=self._model_submesh(model),
                                 parameter_values=self._pv, solver=solver)
             sol = sim.solve(starting_solution=self._prev_solution, **solve_kw)
             # The values this solve was built with (incl. initial_soc's initial

@@ -7,6 +7,14 @@ Every check returns ``{"name", "status", "value", "limit", "note"}`` with
 battery-forecast pipeline refuses to start the degradation tune (stage B) on a
 stage-A result whose overall status is ``"fail"`` unless forced.
 
+Validity before accuracy (user rule, 2026-10-18): a fit need not reproduce the cell
+exactly, but it must be physically valid. In the chain report (:func:`check_chain`) the
+fit-accuracy checks (voltage and EIS errors) are therefore reported but never fail a
+fit (at worst ``warn``), while the internal-solution checks of
+:mod:`battery_oracle.validity` (interface flux continuity, charge balance, mesh
+oscillation, lithium conservation) and the state checks (electrolyte, stoichiometry,
+OCP data range, temperature, whole history simulated) do.
+
 Stage A (:func:`check_bol`, on a :func:`battery_oracle.bol_fit.fit_bol` report):
 
 * balancing: stoichiometry window inside [0, 1]; fitted parameters pinned at a
@@ -232,9 +240,10 @@ def check_esoh(pv_fitted) -> list[dict]:
                    "voltage limits map to valid stoichiometries on the fitted cell")]
 
 
-def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.6, c2_crate: float = 2.0,
-                    d_crate: float = 3.0) -> list[dict]:
-    """One demanding cycle on the fitted cell; internal-state and conservation checks.
+def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: float = 2.0,
+                    d_crate: float = 3.8) -> list[dict]:
+    """One demanding cycle on the fitted cell (default: the jones2022 protocol envelope,
+    ~3.8C charge and discharge; diag/protocol_envelope.py); internal-state and conservation checks.
 
     ``oracle_kwargs`` must build the fitted oracle (chemistry, model, BOL values,
     bounds, temperature). Currents are given at the stated C-rates of its own
@@ -268,9 +277,11 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.6, c2_crate: flo
         ce = _entries("Electrolyte concentration [mol.m-3]")
         ce0 = float(oracle._pv["Initial concentration in electrolyte [mol.m-3]"])
         ratio = float(np.min(ce)) / ce0
-        status = "fail" if ratio <= 0 else ("warn" if ratio < 0.1 else "pass")
-        out.append(_check("electrolyte not depleted (min c_e / initial)", status, ratio, ">= 0.1",
-                          "local depletion makes the electrolyte the rate limit"))
+        # the final model must be physical (user, 2026-10-16): below the fits' 0.1 c0
+        # floor the oracle reaches its rate limit through electrolyte starvation
+        status = "fail" if ratio < 0.1 else ("warn" if ratio < 0.2 else "pass")
+        out.append(_check("electrolyte not depleted (min c_e / initial)", status, ratio, ">= 0.1 (fail), 0.2 (warn)",
+                          "the fits' electrolyte floor; below it the electrolyte is the rate limit"))
     except Exception as exc:
         out.append(_check("electrolyte not depleted", "skip", None, None, str(exc)[:120]))
     for d in ("negative", "positive"):
@@ -296,6 +307,45 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.6, c2_crate: flo
                           "outside it PyBaMM extrapolates the electrode curve"))
     except Exception as exc:
         out.append(_check("positive stoichiometry inside the OCP data range", "skip", None, None, str(exc)[:120]))
+    # the two-mesh validity gate (battery_oracle.validity.judge) on the oracle's own
+    # demanding cycle -- the model exp2 uses: the same cycle on the oracle's mesh and on
+    # it with the electrode/separator mesh refined x2
+    try:
+        from battery_oracle import validity
+        tag = "oracle demanding cycle"
+        mesh = dict(kw.get("radial_mesh") or {})
+        xf = int(mesh.get("x_factor") or 1)
+        fine_kw = {**kw, "radial_mesh": {**mesh, "x_factor": 2 * xf}}
+        fine = PyBaMMOracle(**fine_kw)
+        fine._real_cell_capacity_mah = nominal
+        fine._cap_scale = 1.0
+        fine(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+        fsol = fine._prev_solution
+        names = (f"x{xf}", f"x{2 * xf}")
+        m_dep = validity.measure(sol, oracle._pv)
+        tight_m = None
+        if any((m_dep.get(k) or 0.0) > 10.0 * oracle._dfn_solver_rtol for k in ("charge", "charge_integral", "lithium")):
+            # an exact-law residual above 10 rtol: is it a tolerance error? (100x tighter solve)
+            tight_kw = {**kw, "dfn_solver_rtol": oracle._dfn_solver_rtol / 100.0,
+                        "dfn_solver_atol": oracle._dfn_solver_atol / 100.0}
+            tight = PyBaMMOracle(**tight_kw)
+            tight._real_cell_capacity_mah = nominal
+            tight._cap_scale = 1.0
+            tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+            tight_m = validity.measure(tight._prev_solution, tight._pv)
+        out += validity.judge(m_dep, validity.measure(fsol, fine._pv), factor=2, cell=tag, mesh=names,
+                              rtol=oracle._dfn_solver_rtol, tight=tight_m)
+        t = np.asarray(sol.t, float)
+        v_a = np.asarray(sol["Voltage [V]"].entries, float)
+        v_b = np.interp(t, np.asarray(fsol.t, float), np.asarray(fsol["Voltage [V]"].entries, float))
+        p99 = float(np.percentile(np.abs(v_a - v_b), 99))
+        out.append(_check(f"validity[{tag}] {names[0]} mesh resolves the voltage",
+                          "pass" if p99 < validity.VOLTAGE_NOISE_V else "fail", 1e3 * p99,
+                          1e3 * validity.VOLTAGE_NOISE_V, f"p99 |dV| mV {names[0]} vs {names[1]}; limit the "
+                          "instrument noise (a fail means the oracle must run the refined mesh)"))
+    except Exception as exc:                    # noqa: BLE001 - unevaluable validity fails
+        out.append(_check("validity[oracle demanding cycle] two-mesh gate evaluated", "fail", None, None,
+                          f"{type(exc).__name__}: {str(exc)[:160]}"))
     try:
         lost = _entries("Total lithium lost [mol]")[-1]
         lost_side = _entries("Total lithium lost to side reactions [mol]")[-1]
@@ -400,14 +450,16 @@ def check_chain(fit_report: dict, cell_reports: list[dict], pv_template, oracle_
             if "error" in r:
                 checks.append(_check(f"fit[{cid}] {r['kind']} {lab} evaluated", "fail", None, None, r["error"]))
             elif r["kind"] in ("formation", "cycling"):
+                # accuracy: reported, never fails the fit; a record not simulated does
                 done = r["n_simulated"] / max(r["n_points"], 1)
-                st = "fail" if (done < 0.99 or r["rmse_v"] > 0.1) else ("warn" if r["rmse_v"] > 0.03 else "pass")
-                checks.append(_check(f"fit[{cid}] {r['kind']} voltage RMSE {lab}", st, round(r["rmse_v"], 4),
-                                     [0.03, 0.1], f"{done:.0%} of the record simulated"))
+                st = "fail" if done < 0.99 else ("warn" if r["rmse_v"] > 0.03 else "pass")
+                checks.append(_check(f"accuracy[{cid}] {r['kind']} voltage RMSE {lab}", st, round(r["rmse_v"], 4),
+                                     [0.03, 0.1], f"{done:.0%} of the record simulated; accuracy is "
+                                     "reported, not a validity gate"))
             else:
-                st = "fail" if r["rel_rmse"] > 0.4 else ("warn" if r["rel_rmse"] > 0.15 else "pass")
-                checks.append(_check(f"fit[{cid}] EIS relative RMSE {lab}", st, round(r["rel_rmse"], 3),
-                                     [0.15, 0.4]))
+                st = "warn" if r["rel_rmse"] > 0.15 else "pass"
+                checks.append(_check(f"accuracy[{cid}] EIS relative RMSE {lab}", st, round(r["rel_rmse"], 3),
+                                     [0.15, 0.4], "accuracy is reported, not a validity gate"))
         for name, v in c.get("best_inputs", {}).items():
             if name in bounds:
                 hit = at_bound(v, *bounds[name], log_scale=name in logs)
@@ -418,6 +470,12 @@ def check_chain(fit_report: dict, cell_reports: list[dict], pv_template, oracle_
         if "error" in d:
             checks.append(_check(f"fit[{cid}] history simulated", "fail", None, None, d["error"]))
             continue
+        if d.get("validity"):
+            checks += d["validity"]
+        else:
+            checks.append(_check(f"validity[{cid}] internal-solution checks evaluated", "fail", None, None,
+                                 "no validity checks in the cell report (re-evaluate with "
+                                 "bol_chain.evaluate_chain)"))
         done = d.get("t_simulated_s", 0.0) / max(d.get("t_total_s", 1.0), 1.0)
         checks.append(_check(f"fit[{cid}] whole history simulated", "pass" if done > 0.999 else "fail",
                              round(done, 4), 1.0, d.get("termination", "")))

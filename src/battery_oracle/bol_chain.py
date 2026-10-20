@@ -102,6 +102,50 @@ PSD_SD_N = "Negative particle radius relative width"
 PSD_SD_P = "Positive particle radius relative width"
 PSD_BOUNDS = {PSD_SD_N: (0.15, 0.6), PSD_SD_P: (0.15, 0.6)}
 PSD_POINTS = int(os.environ.get("ORACLE_FIT_PSD_POINTS", "6"))
+
+#: particle radial mesh (checklist 4: the default 20 uniform points are not converged for
+#: the LiCoO2 surface gradients). env ORACLE_FIT_R_POINTS (points per particle, default:
+#: PyBaMM's) and ORACLE_FIT_R_MESH ("uniform" or "surface": exponential, clustered at r = R)
+R_POINTS = os.environ.get("ORACLE_FIT_R_POINTS")
+R_MESH = os.environ.get("ORACLE_FIT_R_MESH", "uniform")
+R_MESH_STRETCH = float(os.environ.get("ORACLE_FIT_R_STRETCH", "1.15"))
+#: electrode/separator (x) mesh, as a factor on PyBaMM's points: the fit runs on
+#: ORACLE_FIT_X_FACTOR (default 1); the final evaluation, the validity gate and the
+#: oracle use ORACLE_FIT_VALIDATE_X_FACTOR (default 2). The x mesh moves the fitted
+#: voltage by <= 0.3 mV (verify/mesh_domains.py) but the default one does not resolve
+#: the salt flux at the negative|separator interface during fast charge (jump 0.10 of
+#: the current at x1, 0.033 at x2; diag/validity_probe.py, 2026-10-18).
+X_FACTOR = int(os.environ.get("ORACLE_FIT_X_FACTOR", "1"))
+VALIDATE_X_FACTOR = int(os.environ.get("ORACLE_FIT_VALIDATE_X_FACTOR", "2"))
+
+
+def radial_mesh(points=None, kind: str = "uniform", stretch: float = 1.15):
+    """(var_pts, submesh_types) overrides for both particles' radial mesh."""
+    var_pts = {"r_n": int(points), "r_p": int(points)} if points else {}
+    if kind == "uniform":
+        return var_pts, {}
+    if kind != "surface":
+        raise ValueError(f"radial mesh kind {kind!r}: use 'uniform' or 'surface'")
+    import pybamm
+    sub = pybamm.MeshGenerator(pybamm.Exponential1DSubMesh, submesh_params={"side": "right", "stretch": stretch})
+    return var_pts, {"negative particle": sub, "positive particle": sub}
+
+
+def radial_mesh_setting(x_factor: int | None = None) -> dict | None:
+    """The mesh set by ORACLE_FIT_R_* (and the x factor) as an oracle setting
+    (``radial_mesh`` of PyBaMMOracle): {"points", "kind", "stretch", "x_factor"}; None
+    for PyBaMM's default mesh. ``x_factor`` defaults to the validation mesh's."""
+    xf = VALIDATE_X_FACTOR if x_factor is None else int(x_factor)
+    if not R_POINTS and R_MESH == "uniform" and xf == 1:
+        return None
+    return {"points": int(R_POINTS) if R_POINTS else None, "kind": R_MESH, "stretch": R_MESH_STRETCH,
+            "x_factor": xf}
+
+
+def x_var_pts(model, factor: int) -> dict:
+    """x points of ``model``'s default mesh times ``factor``."""
+    d = model.default_var_pts
+    return {k: int(d[k]) * int(factor) for k in ("x_n", "x_s", "x_p")} if factor != 1 else {}
 #: Cycler voltage limits of the jones2022 protocol, from the raw GCPL files (PJ248,
 #: PJ250; diag/cutoff_behaviour.py) and Jones et al. 2022 Methods: formation charge CC
 #: to 4.2 V then CV (40 -> ~4 mA); every cycling charge stage CC with a hard stop at
@@ -131,13 +175,63 @@ LATCH_VAR = "Cycler cut-off state"
 #: (BaseSolver.step returns the old solution unchanged after any other event)
 EVENT_LIMIT = "Cycler limit reached [experiment]"
 EVENT_RELEASE = "Cycler limit released [experiment]"
-MAX_SEGMENTS = 2000
+MAX_SEGMENTS = 5000
+#: scalar minimum of the electrolyte concentration (added to the chain model)
+CE_MIN_VAR = "Minimum electrolyte concentration [mol.m-3]"
+#: what a fit candidate stores at every output time (memory: the full state history of
+#: one PJ248 candidate is ~1.7 GB on the converged mesh and was held several times over,
+#: ~9 GB per candidate; diag/memory_profile.py, 2026-10-18). Full states are captured
+#: only at the EIS linearisation times (segment ends).
+OUTPUT_VARS = ("Voltage [V]", CE_MIN_VAR, "Volume-averaged cell temperature [K]",
+               "Minimum negative particle surface stoichiometry", "Maximum negative particle surface stoichiometry",
+               "Minimum positive particle surface stoichiometry", "Maximum positive particle surface stoichiometry")
 #: smallest particle radius kept in the distribution, relative to the mean
 PSD_R_MIN = 0.2
 #: which electrodes get a size distribution: True / "both", or "positive" (LiCoO2
 #: only; the PJ248 probes show the LiCoO2 spread is the one that changes the
 #: end-of-discharge, and a single graphite radius halves the cost)
 PSD_ELECTRODES = ("both", "positive", "negative")
+
+#: Envelope probe (2026-10-19): the fit's electrolyte floor protects only the measured
+#: history, but the oracle is asked for the whole jones2022 protocol space. With
+#: ORACLE_FIT_ENVELOPE_MA="<charge mA>,<discharge mA>" every candidate's history is
+#: followed by the most demanding protocol in that space -- CC charge to the 4.3 V cycler
+#: stop, 20-min rest, CC discharge to the 3.0 V stop, 20-min rest -- and a candidate whose
+#: electrolyte reaches the floor (or whose solve stops) in the probe is rejected. The
+#: chemistry2-25C envelope is ~159 mA in both directions (~3.8C; 480 cycling files of 8
+#: cells, diag/protocol_envelope.py).
+ENVELOPE_MA = os.environ.get("ORACLE_FIT_ENVELOPE_MA")
+PROBE_NAME = "envelope probe"
+PROBE_STEP_S, PROBE_REST_S, PROBE_GAP_S, PROBE_SAMPLE_S = 3600.0, 1200.0, 600.0, 5.0
+
+
+def envelope_setting() -> tuple[float, float] | None:
+    """(charge mA, discharge mA) of the envelope probe set by ORACLE_FIT_ENVELOPE_MA."""
+    if not ENVELOPE_MA:
+        return None
+    c, d = (float(x) for x in ENVELOPE_MA.replace(";", ",").split(","))
+    return c, d
+
+
+def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float) -> dict:
+    """``data`` with the envelope probe appended as a last (synthetic, unmeasured) group."""
+    if any(g.get("probe") for g in data["groups"]):
+        return data
+    d = dict(data)
+    groups = [dict(g) for g in data["groups"]]
+    r = EDGE_RAMP_S
+    i_c, i_d = -float(charge_ma) / 1000.0, float(discharge_ma) / 1000.0     # PyBaMM sign: discharge > 0
+    t1 = PROBE_STEP_S
+    t2 = t1 + PROBE_REST_S
+    t3 = t2 + PROBE_STEP_S
+    t4 = t3 + PROBE_REST_S
+    tk = np.array([0.0, r, t1, t1 + r, t2, t2 + r, t3, t3 + r, t4])
+    ik = np.array([0.0, i_c, i_c, 0.0, 0.0, i_d, i_d, 0.0, 0.0])
+    groups.append({"name": PROBE_NAME, "duration_s": t4 + r, "gap_before": PROBE_GAP_S, "formation": False,
+                   "probe": True, "charge_ma": float(charge_ma), "discharge_ma": float(discharge_ma)})
+    d["groups"] = groups
+    d["current"] = list(data["current"]) + [{"group": len(groups) - 1, "t": tk, "I": ik}]
+    return d
 
 
 def psd_mode(size_distribution) -> str | None:
@@ -749,10 +843,14 @@ class ChainModel:
                  atol: float = 1e-6, fixed: dict | None = None, sei: str = "constant",
                  hysteresis: bool = False, size_distribution: bool | str = False,
                  voltage_limits: bool = False):
-        self.data = data
+        env = envelope_setting()
+        self.data = with_envelope_probe(data, *env) if env else data
         self.voltage_limits = bool(voltage_limits)
         self.options = chain_options(sei, hysteresis, size_distribution)
-        self.var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS} if psd_mode(size_distribution) else None
+        self.var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS} if psd_mode(size_distribution) else {}
+        r_pts, self.submesh_types = radial_mesh(R_POINTS, R_MESH, R_MESH_STRETCH)
+        self.var_pts = {**self.var_pts, **r_pts} or None
+        self.x_factor = X_FACTOR
         self.pv_base = pv_base
         self.fixed = dict(fixed or {})          # inputs held fixed (e.g. the OCV balance)
         self.rtol, self.atol = rtol, atol
@@ -801,6 +899,8 @@ class ChainModel:
             # electrolyte floor as a solver EVENT: a candidate whose electrolyte runs out
             # stops at the floor instead of crawling on with ever smaller steps (a joint fit
             # spent > 100 min per candidate there); the truncated history is penalised below
+            self._model.variables[CE_MIN_VAR] = pybamm.min(
+                self._model.variables["Electrolyte concentration [mol.m-3]"])
             floor = float(os.environ.get("ORACLE_FIT_CE_FLOOR", CE_FLOOR_DEFAULT))
             if floor > 0:
                 c_e = self._model.variables["Electrolyte concentration [mol.m-3]"]
@@ -810,22 +910,30 @@ class ChainModel:
         return self._model
 
     @staticmethod
-    def _solve_segments(sim, t_eval: np.ndarray):
+    def _solve_segments(sim, t_eval: np.ndarray, capture: np.ndarray | None = None):
         """Integrate with exact cycler hard stops (see CYCLER_V_MIN): segments between
         EVENT_LIMIT / EVENT_RELEASE, each continued from the last state with CUT_INPUT
-        switched, on one built model. Returns (solution, number of stops)."""
+        switched, on one built model. Segments also end at every ``capture`` time,
+        where the full state is recorded (the EIS linearisation points when the
+        solver stores only output variables). Returns (solution, number of stops,
+        {capture time: state vector})."""
         import pybamm
 
         sim.build()
         solver, model = sim.solver, sim.built_model
         t_end = float(t_eval[-1])
+        capture = np.unique(np.asarray(capture if capture is not None else [], float))
+        capture = capture[(capture > 0.0) & (capture < t_end)]
+        states: dict[float, np.ndarray] = {}
         sol, cut, n_cuts = None, 0.0, 0
         for _ in range(MAX_SEGMENTS):
             t0 = 0.0 if sol is None else float(sol.t[-1])
-            dt = t_end - t0
-            if dt <= 1e-6:
+            nxt = capture[capture > t0 + 1e-9]
+            target = float(nxt[0]) if nxt.size else t_end
+            dt = target - t0
+            if t_end - t0 <= 1e-6:
                 break
-            rel = np.unique(np.r_[0.0, t_eval[t_eval > t0 + 1e-9] - t0])
+            rel = np.unique(np.r_[0.0, t_eval[(t_eval > t0 + 1e-9) & (t_eval <= target + 1e-9)] - t0, dt])
             try:
                 sol = solver.step(sol, model, dt, t_eval=rel, inputs={CUT_INPUT: cut})
             except pybamm.SolverError as exc:
@@ -841,9 +949,11 @@ class ChainModel:
                 cut, n_cuts = 1.0, n_cuts + 1
             elif EVENT_RELEASE in term:
                 cut = 0.0
+            elif "final time" in term and float(sol.t[-1]) < t_end - 1e-6:
+                states[float(sol.t[-1])] = np.asarray(sol.last_state.all_ys[0][:, 0], float).copy()
             else:
                 break                               # final time, floor, or another event
-        return sol, n_cuts
+        return sol, n_cuts, states
 
     def solve(self, inputs: dict) -> dict:
         inputs = {**self.fixed, **inputs}
@@ -889,13 +999,25 @@ class ChainModel:
         pv["Current function [A]"] = pybamm.Interpolant(tk, ik, pybamm.t, interpolator="linear")
         if self.voltage_limits:
             pv[V_HI_PARAM], pv[CV_PARAM] = limit_schedule(self.data["groups"], off, t_end)
-        t_eval = np.unique(np.concatenate([[0.0, t_end]] + rec_t + sp_lin + sp_lo + sp_hi))
+        probe_g = [k for k, g in enumerate(self.data["groups"]) if g.get("probe")]
+        t_probe = float(off[probe_g[0]]) if probe_g else None
+        probe_t = [np.arange(t_probe, t_end, PROBE_SAMPLE_S)] if probe_g else []
+        t_eval = np.unique(np.concatenate([[0.0, t_end]] + rec_t + sp_lin + sp_lo + sp_hi + probe_t))
 
-        var_pts = {**self.model().default_var_pts, **self.var_pts} if self.var_pts else None
-        sim = pybamm.Simulation(self.model(), parameter_values=pv, var_pts=var_pts,
-                                solver=single_thread_solver(self.rtol, self.atol))
+        x_pts = x_var_pts(self.model(), getattr(self, "x_factor", 1))
+        var_pts = ({**self.model().default_var_pts, **(self.var_pts or {}), **x_pts}
+                   if (self.var_pts or x_pts) else None)
+        submesh = {**self.model().default_submesh_types, **self.submesh_types} if self.submesh_types else None
+        # a fit candidate stores only OUTPUT_VARS and the states at the EIS linearisation
+        # times; a kept solution (diagnostics, validity checks) stores everything
+        lean = self.voltage_limits and not getattr(self, "keep_solution", False)
+        capture = np.concatenate(sp_lin) if (lean and sp_lin) else None
+        sim = pybamm.Simulation(self.model(), parameter_values=pv, var_pts=var_pts, submesh_types=submesh,
+                                solver=single_thread_solver(self.rtol, self.atol,
+                                                            output_variables=list(OUTPUT_VARS) if lean else None))
+        states: dict = {}
         if self.voltage_limits:
-            sol, n_cuts = self._solve_segments(sim, t_eval)
+            sol, n_cuts, states = self._solve_segments(sim, t_eval, capture)
         else:
             sol, n_cuts = sim.solve(t_eval=t_eval), 0
         ts = np.asarray(sol.t)
@@ -908,8 +1030,7 @@ class ChainModel:
         # not carry the measured current from here on -- the real one did -- so the
         # history ends here for scoring; the graded penalty scores what is left.
         try:
-            ce = np.asarray(sol["Electrolyte concentration [mol.m-3]"].entries)
-            ce_min_t = ce.reshape(-1, ts.size).min(axis=0) if ce.ndim > 1 else ce
+            ce_min_t = np.asarray(sol[CE_MIN_VAR].entries, float).ravel()
         except Exception:                       # noqa: BLE001
             ce_min_t = np.ones_like(ts)
         # optional physical floor (review R2): below CE_FLOOR x c0 the candidate is
@@ -925,10 +1046,26 @@ class ChainModel:
             ts, v_all = ts[:max(k, 1)], v_all[:max(k, 1)]
             t_last = float(ts[-1])
             diag["t_simulated_s"] = t_last
+        if probe_g:
+            # envelope probe: a candidate that reaches it must come through it with the
+            # electrolyte above the floor (a failure before it keeps the graded penalty)
+            ts_all = np.asarray(sol.t, float)
+            in_p = ts_all >= t_probe
+            sim_end = float(ts_all[-1])
+            g_p = self.data["groups"][probe_g[0]]
+            pr = {"charge_ma": g_p["charge_ma"], "discharge_ma": g_p["discharge_ma"], "start_s": t_probe,
+                  "reached": bool(sim_end >= t_probe), "completed": bool(sim_end >= t_end - 1.0),
+                  "c_e_min_rel": float(np.min(ce_min_t[in_p[:ce_min_t.size]]) / c0) if in_p.any() else None}
+            diag["envelope_probe"] = pr
+            stop_t = diag.get("t_stopped_s")
+            if pr["reached"] and (not pr["completed"] or (stop_t is not None and stop_t >= t_probe)):
+                raise RuntimeError(
+                    f"envelope probe ({pr['charge_ma']:.0f} mA charge / {pr['discharge_ma']:.0f} mA discharge) "
+                    f"failed: electrolyte min {pr['c_e_min_rel']} c0, simulated {sim_end - t_probe:.0f} of "
+                    f"{t_end - t_probe:.0f} s ({diag.get('stopped') or diag['termination']})")
         try:
             diag["T_max_K"] = float(np.max(sol["Volume-averaged cell temperature [K]"].entries))
-            diag["c_e_min_rel"] = float(np.min(sol["Electrolyte concentration [mol.m-3]"].entries)
-                                        / float(pv["Initial concentration in electrolyte [mol.m-3]"]))
+            diag["c_e_min_rel"] = float(np.min(ce_min_t) / c0)
         except Exception:                       # noqa: BLE001 - diagnostics only
             pass
         # OCP guard: surface stoichiometry vs the OCP data range.
@@ -956,14 +1093,25 @@ class ChainModel:
         v_scale = getattr(model.variables["Voltage [V]"], "scale", 1)
         i_scale = getattr(model.variables["Current [A]"], "scale", 1)
         z_scale = _f(pv.evaluate(v_scale / i_scale))
-        y = np.asarray(sol.y)
         amp = float(self.data.get("amplitude_a", 5e-3))
+        if states:
+            cap_t = np.array(sorted(states))
+            state_at = lambda tt: np.column_stack([states[float(cap_t[np.argmin(np.abs(cap_t - x))])]  # noqa: E731
+                                                   for x in tt])
+        else:
+            y = np.asarray(sol.y)
+            state_at = lambda tt: y[:, np.clip(np.searchsorted(ts, tt), 0, ts.size - 1)]  # noqa: E731
         for s, t_lin, lo, hi in zip(self.data["spectra"], sp_lin, sp_lo, sp_hi):
             if hi[-1] > t_last + 1e-6:
                 spectra.append(None)
                 continue
-            idx = np.clip(np.searchsorted(ts, t_lin), 0, ts.size - 1)
-            z = linearised_impedance(sim, ts[idx], y[:, idx], s["f"], z_scale,
+            if states:
+                t_at = np.asarray(t_lin, float)
+                ys = state_at(t_at)
+            else:
+                idx = np.clip(np.searchsorted(ts, t_lin), 0, ts.size - 1)
+                t_at, ys = ts[idx], state_at(t_lin)
+            z = linearised_impedance(sim, t_at, ys, s["f"], z_scale,
                                      inputs={CUT_INPUT: 0.0} if self.voltage_limits else None)
             dvdt = (np.interp(hi, ts, v_all) - np.interp(lo, ts, v_all)) / np.maximum(hi - lo, 1e-9)
             z = z - 2.0 * dvdt / (2 * np.pi * np.asarray(s["f"], float) * amp)
@@ -1193,6 +1341,8 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
             "fixed_inputs": fixed, "ocv_balance": balance_report, "balance_mode": balance,
             "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
             "hysteresis": bool(hysteresis), "size_distribution": psd_mode(size_distribution) or False,
+            "radial_mesh": radial_mesh_setting(),
+            "envelope_probe_ma": envelope_setting(),
             "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
                                 "v_max_formation_cv": CYCLER_V_MAX_FORMATION} if voltage_limits else None),
             "seed": seed,
@@ -1202,7 +1352,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
             "cost": float(np.asarray(result.best_cost).ravel()[0]),
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()},
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
-            "runtime_s": round(runtime, 1),
+            "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
             "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
             "from_checkpoint": bool(resume),
             **evaluate_chain(data, pv_base, fitted, chain=chain)}
@@ -1338,6 +1488,8 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
             "fixed_inputs": fixed[c], "ocv_balance": balances[c], "balance_mode": balance,
             "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
             "hysteresis": bool(hysteresis), "size_distribution": psd_mode(size_distribution) or False,
+            "radial_mesh": radial_mesh_setting(),
+            "envelope_probe_ma": envelope_setting(),
             "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
                                 "v_max_formation_cv": CYCLER_V_MAX_FORMATION} if voltage_limits else None),
             "seed": seed,
@@ -1349,7 +1501,7 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()
                              if not k.startswith("Rest before ") or f"{c}:" in k},
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
-            "runtime_s": round(runtime, 1),
+            "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
             "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
             "from_checkpoint": bool(resume),
             **ev}
@@ -1360,13 +1512,71 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     return reports
 
 
+def _mesh_agreement(fit_res: dict, val_res: dict, x_fit: int, cell: str) -> dict:
+    """Validity record: the fit mesh's voltages vs the validation mesh's (the fitted
+    parameters must not depend on resolving the interfaces better)."""
+    name = f"validity[{cell}] fit mesh (x{x_fit}) agrees with validation mesh (x{VALIDATE_X_FACTOR})"
+    if "error" in fit_res:
+        return {"name": name, "status": "fail", "value": None, "limit": [1.0, 3.0], "note": fit_res["error"]}
+    dv = [float(np.max(np.abs(np.asarray(a) - np.asarray(b)))) for a, b in
+          zip(fit_res["records"], val_res["records"]) if len(a) and len(a) == len(b)]
+    # stop times may shift a sample: compare away from the largest single-point jumps
+    worst = float(np.percentile(np.concatenate([np.abs(np.asarray(a) - np.asarray(b)) for a, b in
+                  zip(fit_res["records"], val_res["records"]) if len(a) and len(a) == len(b)]), 99)) if dv else np.nan
+    v = 1e3 * worst
+    # a mesh-dependent fit is a resolution matter, not unphysical: warn above the 1 mV noise
+    status = "skip" if not np.isfinite(v) else ("pass" if v < 1.0 else "warn")
+    return {"name": name, "status": status, "value": v, "limit": 1.0,
+            "note": f"p99 |dV| mV over all records (max {1e3 * max(dv):.1f} mV, at cycler stops)" if dv else ""}
+
+
 def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None = None) -> dict:
-    """Measured vs simulated curves/spectra + diagnostics at ``inputs`` (plot/physicality)."""
+    """Measured vs simulated curves/spectra + diagnostics at ``inputs`` (plot/physicality),
+    including the physical-validity gate (:mod:`battery_oracle.validity`, under
+    ``diagnostics["validity"]``): the full internal solution on the deployed mesh
+    (x VALIDATE_X_FACTOR, the oracle's) and on that mesh refined x2, judged by exact
+    laws, convergence of the interface continuity, and whether the deployed mesh
+    resolves the outputs to the measurement noise. Curves are the deployed mesh's."""
+    from battery_oracle import validity
+
     chain = chain or ChainModel(data, pv_base)
-    res = chain.solve(inputs)
+    cell = str(data.get("cell_id", ""))
+    fit_res = chain.solve(inputs)               # on the fit mesh (usually cached)
+    keep, xf = getattr(chain, "keep_solution", False), getattr(chain, "x_factor", 1)
+
+    def full(x_factor):
+        """Full-storage solve past the candidate cache on x ``x_factor``; returns the
+        result with the solution replaced by its validity measures."""
+        chain.keep_solution, chain.x_factor = True, x_factor
+        try:
+            r = chain._solve({**chain.fixed, **inputs})
+        except Exception as exc:                # noqa: BLE001
+            r = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        finally:
+            chain.keep_solution, chain.x_factor = keep, xf
+        if "error" not in r:
+            try:
+                r["measures"] = validity.measure(r.pop("solution"), r.pop("parameter_values"))
+            except Exception as exc:            # noqa: BLE001
+                r["measures_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        return r
+
+    res = full(VALIDATE_X_FACTOR)
     if "error" in res:
         return {"records": [{"kind": r["kind"], "label": r["label"], "error": res["error"]}
                             for r in data["records"]], "diagnostics": {"error": res["error"]}}
+    fine = full(2 * VALIDATE_X_FACTOR)
+    names = (f"x{VALIDATE_X_FACTOR}", f"x{2 * VALIDATE_X_FACTOR}")
+    if "error" in fine or "measures" not in res or "measures" not in fine:
+        why = fine.get("error") or res.get("measures_error") or fine.get("measures_error")
+        res["diag"]["validity"] = [{"name": f"validity[{cell}] two-mesh gate evaluated", "status": "fail",
+                                    "value": None, "limit": None, "note": f"refined mesh: {why}"}]
+    else:
+        res["diag"]["validity"] = (validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol,
+                                                  cell=cell, mesh=names)
+                                   + validity.relevance(res, fine, cell=cell, mesh=names)
+                                   + [_mesh_agreement(fit_res, res, xf, cell)])
+        res["diag"]["validity_measures"] = {names[0]: res["measures"], names[1]: fine["measures"]}
     recs = []
     for r, v in zip(data["records"], res["records"]):
         vm = np.asarray(r["V"], float)
@@ -1504,6 +1714,10 @@ def aggregate_chain(cell_reports: list[dict], pv) -> dict:
     mode = psd_mode(ok[0].get("size_distribution"))
     if mode:
         model_kw["size_distribution"] = {"mode": mode, "sd_n": med.get(PSD_SD_N), "sd_p": med.get(PSD_SD_P)}
+    # the fit's particle mesh (a report written before reports recorded it: this run's setting)
+    mesh = ok[0]["radial_mesh"] if "radial_mesh" in ok[0] else radial_mesh_setting()
+    if mesh:
+        model_kw["radial_mesh"] = mesh
     return {"parameter_overrides": ov, "parameter_scales": scales, "contact_resistance_ohm": cr,
             **thermal, **model_kw,
             "fit": {"method": "chain DFN fit per cell (one continuous history: formation, cycling, "

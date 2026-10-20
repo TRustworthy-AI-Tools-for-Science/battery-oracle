@@ -461,3 +461,37 @@ def test_save_to_csv(tmp_path):
     assert len(df) == 1
     assert df["circuit"].iloc[0] == DEFAULT_CIRCUIT
     assert "R1_charge_mean" in df.columns
+
+
+def test_radial_mesh_kwarg_builds_the_fit_mesh():
+    """The oracle replays protocols on the chain fit's converged particle mesh
+    (verify/radial_mesh_check.py: 40 points, clustered at the surface)."""
+    import pybamm
+
+    o = PyBaMMOracle(radial_mesh={"points": 40, "kind": "surface", "stretch": 3.0})
+    model = o._model_cls()
+    var_pts = o._model_var_pts(model)
+    assert var_pts["r_n"] == 40 and var_pts["r_p"] == 40
+    sub = o._model_submesh(model)
+    assert sub["positive particle"].submesh_type is pybamm.Exponential1DSubMesh
+    sim = pybamm.Simulation(model, parameter_values=o._pv, var_pts=var_pts, submesh_types=sub)
+    sim.build()
+    edges = sim.mesh["positive particle"].edges
+    assert len(edges) == 41
+    widths = np.diff(edges)
+    assert widths[-1] < widths[0] / 5          # clustered at the particle surface
+    assert PyBaMMOracle()._model_submesh(model) is None   # default: PyBaMM's mesh
+
+
+def test_radial_mesh_rejects_unknown_kind():
+    with pytest.raises(ValueError, match="radial mesh kind"):
+        PyBaMMOracle(radial_mesh={"points": 40, "kind": "bogus"})
+
+
+def test_mesh_setting_x_factor_refines_the_electrolyte_mesh():
+    o = PyBaMMOracle(radial_mesh={"points": 80, "kind": "uniform", "x_factor": 2})
+    model = o._model_cls()
+    vp = o._model_var_pts(model)
+    d = model.default_var_pts
+    assert vp["r_n"] == 80 and vp["x_n"] == 2 * d["x_n"] and vp["x_s"] == 2 * d["x_s"]
+    assert o._model_submesh(model) is None          # uniform: PyBaMM's submeshes
