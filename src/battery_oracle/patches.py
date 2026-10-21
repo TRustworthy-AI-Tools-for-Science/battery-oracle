@@ -469,7 +469,12 @@ def _install_harmonic_flux_coefficients() -> None:
     def process_binary_operators(self, bin_op, left, right, disc_left, disc_right):
         le = left.evaluates_on_edges("primary")
         re_ = right.evaluates_on_edges("primary")
-        if not isinstance(bin_op, pybamm.Inner) and le != re_:
+        # only a coefficient MULTIPLYING a flux gets the harmonic mean (as upstream PR #5856):
+        # an addend (e.g. a node term added to a flux in the EIS-wrapped model) has no series
+        # meaning, and is zero at rest, where its harmonic mean 1/(b/0 + (1-b)/0) is undefined
+        # (non-finite Jacobian at t = 0; found with a stoichiometry-dependent conductivity,
+        # 2026-10-21); division stays arithmetic (PyBaMM#5863)
+        if isinstance(bin_op, pybamm.Multiplication) and le != re_:
             if le and not isinstance(left, pybamm.Gradient) and _is_flux(left):
                 disc_right = self.node_to_edge(disc_right, method="harmonic")
                 return pybamm.simplify_if_constant(bin_op.create_copy([disc_left, disc_right]))
