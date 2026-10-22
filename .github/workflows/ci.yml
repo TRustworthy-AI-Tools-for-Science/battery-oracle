@@ -32,7 +32,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.12
-      - name: Sync (core + dev, no heavy extras)
-        run: uv sync --group dev
+      - name: Sync (core + dev + tune)
+        run: uv sync --group dev --extra tune
       - name: Fast tests (no slow PyBaMM sims, no autoeis)
         run: uv run pytest -m "not slow" -q
