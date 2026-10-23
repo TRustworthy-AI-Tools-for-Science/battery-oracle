@@ -416,6 +416,16 @@ NEG_THICKNESS_RATIO = "Negative / positive electrode thickness"
 #: lower end is widened to 0.7 because the OCV-fixed N:P with LiCoO2's high volumetric
 #: capacity can need a negative thinner than the positive (flagged by physicality)
 NEG_THICKNESS_RATIO_BOUNDS = (0.7, 1.4)
+POROSITY_P = "Positive electrode porosity"
+EPS_P = "Positive electrode active material volume fraction"
+#: Fitted electrode porosities with a closed solid volume fraction (user specification,
+#: 2026-10-22): active fraction = SOLID_FRACTION - porosity in each electrode (the rest is
+#: binder / conductive additive), porosities 0.25-0.35. With the OCV balance's N:P fixed, the
+#: negative thickness then follows from N:P (it is no longer fitted: NEG_THICKNESS_RATIO is
+#: dropped), and the electrode area from the positive capacity at the candidate's active
+#: fraction. Enabled by ORACLE_FIT_POROSITY=1.
+SOLID_FRACTION = {POROSITY_N: 0.90, POROSITY_P: 0.85}
+POROSITY_BOUNDS = {POROSITY_N: (0.25, 0.35), POROSITY_P: (0.25, 0.35)}
 
 
 def negative_porosity(pv_template, eps_n: float) -> float:
@@ -753,15 +763,24 @@ def geometry_overrides(pv_template, inputs: dict, measured_capacity_ah: float | 
     s = _f(inputs.get(THICKNESS_SCALE, 1.0))
     if THICKNESS_SCALE in inputs:
         ov.update({k: float(pv_template[k]) * s for k in THICKNESSES})
+    # fitted porosities, closed solid fraction (see SOLID_FRACTION)
+    for por, eps in ((POROSITY_N, EPS_N), (POROSITY_P, EPS_P)):
+        if por in inputs:
+            ov[por] = _f(inputs[por])
+            ov[eps] = SOLID_FRACTION[por] - ov[por]
+    eps_p = ov.get(EPS_P, float(pv_template[EPS_P]))
+    c_p = float(pv_template["Maximum concentration in positive electrode [mol.m-3]"])
+    c_n = float(pv_template["Maximum concentration in negative electrode [mol.m-3]"])
     if NEG_THICKNESS_RATIO in inputs:          # L_n = ratio x L_p
         L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
         ov["Negative electrode thickness [m]"] = _f(inputs[NEG_THICKNESS_RATIO]) * L_p
-    if NP_RATIO in inputs:                     # active fraction from the fixed N:P (OCV balance)
+    if NP_RATIO in inputs and POROSITY_N in inputs:   # porosity fixes eps_n: N:P fixes L_n
+        L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
+        ov["Negative electrode thickness [m]"] = _f(inputs[NP_RATIO]) * eps_p * L_p * c_p / (ov[EPS_N] * c_n)
+    elif NP_RATIO in inputs:                   # active fraction from the fixed N:P (OCV balance)
         L_n = ov.get("Negative electrode thickness [m]", float(pv_template["Negative electrode thickness [m]"]))
         L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
-        ov[EPS_N] = (_f(inputs[NP_RATIO]) * float(pv_template["Positive electrode active material volume fraction"])
-                     * L_p * float(pv_template["Maximum concentration in positive electrode [mol.m-3]"])
-                     / (L_n * float(pv_template["Maximum concentration in negative electrode [mol.m-3]"])))
+        ov[EPS_N] = _f(inputs[NP_RATIO]) * eps_p * L_p * c_p / (L_n * c_n)
         ov[POROSITY_N] = negative_porosity(pv_template, ov[EPS_N])
     elif EPS_N in inputs:
         ov[EPS_N] = _f(inputs[EPS_N])
@@ -774,8 +793,7 @@ def geometry_overrides(pv_template, inputs: dict, measured_capacity_ah: float | 
         ov[BRUGG_S] = -np.log(_f(inputs[MACMULLIN_S])) / np.log(eps_s)
     if Q_P_RATIO in inputs and measured_capacity_ah:
         L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
-        per_area = (float(pv_template["Positive electrode active material volume fraction"]) * L_p
-                    * float(pv_template["Maximum concentration in positive electrode [mol.m-3]"]) * F_AH)
+        per_area = eps_p * L_p * c_p * F_AH
         area = _f(inputs[Q_P_RATIO]) * float(measured_capacity_ah) / per_area
         side = float(np.sqrt(area))
         ov.update({"Electrode height [m]": side, "Electrode width [m]": side, N_PARALLEL: 1.0})
@@ -1195,7 +1213,7 @@ def fit_parameters_chain(pv, data: dict, warm: dict | None = None, *, bounds: di
 
     warm = dict(warm or {})
     bnd = {**LITERATURE_BOUNDS, **(bounds or {})}
-    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE, HYST_DELTA,
+    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, POROSITY_N, POROSITY_P, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE, HYST_DELTA,
               PSD_SD_N, PSD_SD_P}
     fit = {}
     for name, (lo, hi) in bnd.items():
@@ -1273,7 +1291,11 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
         fixed = {Q_P_RATIO: balance_report["Q_p_Ah"] / q_meas, NP_RATIO: balance_report["np_ratio"],
                  LI_FRACTION: balance_report["li_fraction"]}
         log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
-        bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
+        bounds = dict(bounds or {})
+        if os.environ.get("ORACLE_FIT_POROSITY") == "1":
+            bounds.update(POROSITY_BOUNDS)          # the negative thickness then follows from N:P
+        else:
+            bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     extra = {}
     if hysteresis:
         extra[HYST_DELTA] = HYST_BOUNDS
@@ -1451,7 +1473,11 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         fixed[c] = {Q_P_RATIO: rep["Q_p_Ah"] / q_meas, NP_RATIO: rep["np_ratio"], LI_FRACTION: rep["li_fraction"]}
         balances[c] = rep
         log.info("joint fit %s: OCV balance -> fixed %s", c, fixed[c])
-    bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
+    bounds = dict(bounds or {})
+    if os.environ.get("ORACLE_FIT_POROSITY") == "1":
+        bounds.update(POROSITY_BOUNDS)
+    else:
+        bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     if hysteresis:
         bounds[HYST_DELTA] = HYST_BOUNDS
     mode = psd_mode(size_distribution)
