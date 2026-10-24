@@ -203,32 +203,55 @@ PSD_ELECTRODES = ("both", "positive", "negative")
 ENVELOPE_MA = os.environ.get("ORACLE_FIT_ENVELOPE_MA")
 PROBE_NAME = "envelope probe"
 PROBE_STEP_S, PROBE_REST_S, PROBE_GAP_S, PROBE_SAMPLE_S = 3600.0, 1200.0, 600.0, 5.0
+#: two-stage probe charge (ORACLE_FIT_ENVELOPE_MA="c1;c2;discharge", 2026-10-24): each stage
+#: runs up to this long or to the 4.3 V cycler stop -- the oracle's demanding cycle
+#: (physicality.check_dfn_cycle: 3.8C then 2C for <= 0.25 h each, 3.8C discharge), which the
+#: single-stage probe did not cover (the second stage pushes in more lithium at high rate)
+PROBE_STAGE_S = 900.0
 
 
-def envelope_setting() -> tuple[float, float] | None:
-    """(charge mA, discharge mA) of the envelope probe set by ORACLE_FIT_ENVELOPE_MA."""
+def envelope_setting() -> tuple[float, ...] | None:
+    """Envelope probe set by ORACLE_FIT_ENVELOPE_MA: "charge;discharge" -> (charge mA,
+    discharge mA); "c1;c2;discharge" (two-stage charge) -> (c1 mA, discharge mA, c2 mA), the
+    argument order of :func:`with_envelope_probe`."""
     if not ENVELOPE_MA:
         return None
-    c, d = (float(x) for x in ENVELOPE_MA.replace(";", ",").split(","))
-    return c, d
+    vals = [float(x) for x in ENVELOPE_MA.replace(";", ",").split(",")]
+    if len(vals) == 2:
+        return vals[0], vals[1]
+    if len(vals) == 3:
+        return vals[0], vals[2], vals[1]
+    raise ValueError(f"ORACLE_FIT_ENVELOPE_MA needs 2 or 3 values, got {ENVELOPE_MA!r}")
 
 
-def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float) -> dict:
-    """``data`` with the envelope probe appended as a last (synthetic, unmeasured) group."""
+def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charge2_ma: float | None = None) -> dict:
+    """``data`` with the envelope probe appended as a last (synthetic, unmeasured) group.
+    ``charge2_ma``: a second charge stage (two-stage protocol, PROBE_STAGE_S each)."""
     if any(g.get("probe") for g in data["groups"]):
         return data
     d = dict(data)
     groups = [dict(g) for g in data["groups"]]
     r = EDGE_RAMP_S
     i_c, i_d = -float(charge_ma) / 1000.0, float(discharge_ma) / 1000.0     # PyBaMM sign: discharge > 0
-    t1 = PROBE_STEP_S
-    t2 = t1 + PROBE_REST_S
-    t3 = t2 + PROBE_STEP_S
-    t4 = t3 + PROBE_REST_S
-    tk = np.array([0.0, r, t1, t1 + r, t2, t2 + r, t3, t3 + r, t4])
-    ik = np.array([0.0, i_c, i_c, 0.0, 0.0, i_d, i_d, 0.0, 0.0])
+    if charge2_ma is None:
+        t1 = PROBE_STEP_S
+        t2 = t1 + PROBE_REST_S
+        t3 = t2 + PROBE_STEP_S
+        t4 = t3 + PROBE_REST_S
+        tk = np.array([0.0, r, t1, t1 + r, t2, t2 + r, t3, t3 + r, t4])
+        ik = np.array([0.0, i_c, i_c, 0.0, 0.0, i_d, i_d, 0.0, 0.0])
+    else:
+        i_c2 = -float(charge2_ma) / 1000.0
+        s1 = PROBE_STAGE_S
+        s2 = s1 + PROBE_STAGE_S
+        t2 = s2 + PROBE_REST_S
+        t3 = t2 + PROBE_STEP_S
+        t4 = t3 + PROBE_REST_S
+        tk = np.array([0.0, r, s1, s1 + r, s2, s2 + r, t2, t2 + r, t3, t3 + r, t4])
+        ik = np.array([0.0, i_c, i_c, i_c2, i_c2, 0.0, 0.0, i_d, i_d, 0.0, 0.0])
     groups.append({"name": PROBE_NAME, "duration_s": t4 + r, "gap_before": PROBE_GAP_S, "formation": False,
-                   "probe": True, "charge_ma": float(charge_ma), "discharge_ma": float(discharge_ma)})
+                   "probe": True, "charge_ma": float(charge_ma), "discharge_ma": float(discharge_ma),
+                   "charge2_ma": None if charge2_ma is None else float(charge2_ma)})
     d["groups"] = groups
     d["current"] = list(data["current"]) + [{"group": len(groups) - 1, "t": tk, "I": ik}]
     return d
@@ -426,6 +449,14 @@ EPS_P = "Positive electrode active material volume fraction"
 #: fraction. Enabled by ORACLE_FIT_POROSITY=1.
 SOLID_FRACTION = {POROSITY_N: 0.90, POROSITY_P: 0.85}
 POROSITY_BOUNDS = {POROSITY_N: (0.25, 0.35), POROSITY_P: (0.25, 0.35)}
+#: The solid volume fractions themselves as fitted parameters (ORACLE_FIT_SOLID_FRACTION=1, with
+#: ORACLE_FIT_POROSITY=1; user decision 2026-10-23): binder + conductive additive between the
+#: user's 15 % (0.85) and the Ai2020 template's 6 % (0.94), each electrode independently. A
+#: candidate's value replaces SOLID_FRACTION[...] for that electrode.
+SOLID_N = "Negative electrode solid volume fraction"
+SOLID_P = "Positive electrode solid volume fraction"
+SOLID_OF = {POROSITY_N: SOLID_N, POROSITY_P: SOLID_P}
+SOLID_BOUNDS = {SOLID_N: (0.85, 0.94), SOLID_P: (0.85, 0.94)}
 
 
 def negative_porosity(pv_template, eps_n: float) -> float:
@@ -767,7 +798,8 @@ def geometry_overrides(pv_template, inputs: dict, measured_capacity_ah: float | 
     for por, eps in ((POROSITY_N, EPS_N), (POROSITY_P, EPS_P)):
         if por in inputs:
             ov[por] = _f(inputs[por])
-            ov[eps] = SOLID_FRACTION[por] - ov[por]
+            solid = _f(inputs[SOLID_OF[por]]) if SOLID_OF[por] in inputs else SOLID_FRACTION[por]
+            ov[eps] = solid - ov[por]
     eps_p = ov.get(EPS_P, float(pv_template[EPS_P]))
     c_p = float(pv_template["Maximum concentration in positive electrode [mol.m-3]"])
     c_n = float(pv_template["Maximum concentration in negative electrode [mol.m-3]"])
@@ -1213,7 +1245,7 @@ def fit_parameters_chain(pv, data: dict, warm: dict | None = None, *, bounds: di
 
     warm = dict(warm or {})
     bnd = {**LITERATURE_BOUNDS, **(bounds or {})}
-    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, POROSITY_N, POROSITY_P, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE, HYST_DELTA,
+    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, POROSITY_N, POROSITY_P, SOLID_N, SOLID_P, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE, HYST_DELTA,
               PSD_SD_N, PSD_SD_P}
     fit = {}
     for name, (lo, hi) in bnd.items():
@@ -1294,6 +1326,8 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
         bounds = dict(bounds or {})
         if os.environ.get("ORACLE_FIT_POROSITY") == "1":
             bounds.update(POROSITY_BOUNDS)          # the negative thickness then follows from N:P
+            if os.environ.get("ORACLE_FIT_SOLID_FRACTION") == "1":
+                bounds.update(SOLID_BOUNDS)
         else:
             bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     extra = {}
@@ -1476,6 +1510,8 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     bounds = dict(bounds or {})
     if os.environ.get("ORACLE_FIT_POROSITY") == "1":
         bounds.update(POROSITY_BOUNDS)
+        if os.environ.get("ORACLE_FIT_SOLID_FRACTION") == "1":
+            bounds.update(SOLID_BOUNDS)
     else:
         bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     if hysteresis:

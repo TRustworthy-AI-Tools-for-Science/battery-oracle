@@ -52,3 +52,22 @@ def test_porosity_mode_swaps_the_thickness_ratio_for_the_porosities(monkeypatch)
     b.update(bc.POROSITY_BOUNDS)
     assert set(bc.POROSITY_BOUNDS) == {bc.POROSITY_N, bc.POROSITY_P}
     assert all(lo == 0.25 and hi == 0.35 for lo, hi in bc.POROSITY_BOUNDS.values())
+
+
+@pytest.mark.parametrize("solid_n, solid_p", [(0.85, 0.94), (0.94, 0.85), (0.90, 0.90)])
+def test_fitted_solid_fractions_replace_the_fixed_closure(solid_n, solid_p):
+    """With the solid fractions as inputs, active = solid - porosity per electrode, and the
+    balance (N:P, positive capacity) is still kept."""
+    inputs = {bc.POROSITY_N: 0.28, bc.POROSITY_P: 0.31, bc.SOLID_N: solid_n, bc.SOLID_P: solid_p,
+              bc.THICKNESS_SCALE: 1.0, bc.NP_RATIO: 0.6, bc.Q_P_RATIO: 2.2}
+    ov = bc.geometry_overrides(TEMPLATE, inputs, 0.040)
+    assert ov[bc.EPS_N] == pytest.approx(solid_n - 0.28)
+    assert ov[bc.EPS_P] == pytest.approx(solid_p - 0.31)
+    q_n, q_p = _capacities(ov)
+    assert q_n / q_p == pytest.approx(0.6, rel=1e-12)
+    assert q_p == pytest.approx(2.2 * 0.040, rel=1e-12)
+
+
+def test_solid_fraction_bounds_span_the_user_and_template_values():
+    for lo, hi in bc.SOLID_BOUNDS.values():
+        assert lo <= 0.85 and hi >= 0.94
