@@ -1,5 +1,6 @@
 """battery_oracle.validity helpers on synthetic fields."""
 import numpy as np
+import pytest
 
 from battery_oracle import validity
 
@@ -62,3 +63,61 @@ def test_measure_maps_each_continuity_record_to_its_own_field(monkeypatch):
     monkeypatch.setattr(validity, "check_solution", lambda sol, pv, cell="": recs)
     m = validity.measure(object(), None)
     assert {k: m[k] for k in names} == names        # phi_e must not overwrite i_e
+
+
+def test_time_derivative_is_exact_within_segments_and_never_spans_a_join():
+    """Two segments joined at a repeated time (as the segmented solve produces): the
+    derivative is exact inside each, and a jump across the join gives no spike."""
+    import pytest
+
+    t1 = np.linspace(0.0, 10.0, 11)
+    t2 = np.linspace(10.0 + 1e-13, 20.0, 11)
+    t = np.r_[t1, t2]
+    y = np.r_[2.0 * t1, 5.0 + 3.0 * t2]          # slope 2 then 3, value jumps by 5 at the join
+    d = validity.time_derivative(y, t)
+    assert np.allclose(d[:11], 2.0) and np.allclose(d[11:], 3.0)
+    assert np.allclose(validity.time_derivative(y, t, stride=2), d)      # linear: coarse estimate agrees
+    joins = validity._segment_joins(t)
+    assert joins.sum() == 2 and joins[10] and joins[11]
+    assert np.max(np.abs(d)) == pytest.approx(3.0)
+
+
+def test_step_mask_excludes_the_pre_step_sample_and_smoothed_onsets():
+    """A sharp step and a ramped onset (sub-threshold increments, far faster than cycling):
+    both are steps; the sample just before each and STEP_WINDOW_S after each are not judged,
+    slow cycling-rate changes are judged."""
+    i_1c = 1.0
+    t = np.r_[np.linspace(0.0, 10.0, 11), 10.0 + 1e-4 * np.arange(1, 6), np.linspace(11.0, 30.0, 20),
+              np.linspace(31.0, 60.0, 30)]
+    i = np.zeros(t.size)
+    ramp = (t > 10.0) & (t < 10.001)
+    i[ramp] = 0.005 * np.arange(1, ramp.sum() + 1)            # 0.005 i_1C per 1e-4 s: below 1 % per sample
+    i[(t >= 11.0) & (t < 31.0)] = 0.025
+    i[t >= 31.0] = 2.0 + 0.001 * (t[t >= 31.0] - 31.0)         # a sharp step, then a slow drift
+    steps, judged = validity._step_mask(t, i, i_1c)
+    k0 = 10                                                    # last rest sample before the ramped onset
+    assert not judged[k0] and judged[k0 - 1]
+    assert steps.min() == pytest.approx(t[k0 + 1])
+    k1 = int(np.flatnonzero(t == 31.0)[0])
+    assert not judged[k1 - 1] and not judged[k1]
+    assert judged[(t > 31.0 + validity.STEP_WINDOW_S)].all()   # slow drift is cycling, judged
+    assert judged[(t > 10.001 + validity.STEP_WINDOW_S) & (t < 30.0 - 1e-9)].all()
+
+
+def test_corrected_integral_charge_balance_holds_for_a_differential_dfn():
+    """A DFN with the double layer: the integral balance including a C_dl d(delta phi)/dt holds
+    to solver tolerance, through current steps and rests."""
+    import pybamm
+
+    pv = pybamm.ParameterValues("Marquis2019")
+    pv.update({"Negative electrode double-layer capacity [F.m-2]": 2.0,
+               "Positive electrode double-layer capacity [F.m-2]": 2.0})
+    model = pybamm.lithium_ion.DFN(options={"surface form": "differential"})
+    exp = pybamm.Experiment(["Discharge at 1C for 300 seconds", "Rest for 120 seconds",
+                             "Charge at 0.5C for 300 seconds"], period="2 seconds")
+    sol = pybamm.Simulation(model, parameter_values=pv, experiment=exp,
+                            solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)).solve()
+    checks = {c["name"]: c for c in validity.check_solution(sol, pv)}
+    integral = next(c for n, c in checks.items() if "integral charge balance" in n)
+    assert integral["value"] is not None and integral["value"] < 1e-5, integral
+    assert "double layer" in integral["note"]

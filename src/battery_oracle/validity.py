@@ -58,6 +58,8 @@ import numpy as np
 F = 96485.33212
 #: seconds after a step in the applied current excluded from the continuity checks
 STEP_WINDOW_S = 2.0
+#: a current change faster than this (C per second) is a (smoothed) step, not cycling
+STEP_RAMP_C_PER_S = 1.0
 
 #: noise levels the relevance tier is judged against (jones2022 instrument / EIS)
 VOLTAGE_NOISE_V = 1e-3
@@ -86,6 +88,71 @@ def _check(name, value, key, note=""):
 
 def _entries(sol, name):
     return np.asarray(sol[name].entries, dtype=float)
+
+
+#: two samples closer than this [s] are a join between solver segments (the segmented solve
+#: of exact cycler stops repeats the boundary time, ~1e-13 s apart): no time derivative across
+JOIN_DT_S = 1e-6
+
+
+def _segment_joins(t) -> np.ndarray:
+    """Mask of the samples on either side of a solver-segment join (near-repeated time)."""
+    t = np.asarray(t, float)
+    near = np.diff(t) < JOIN_DT_S
+    mask = np.zeros(t.size, bool)
+    mask[:-1] |= near
+    mask[1:] |= near
+    return mask
+
+
+def time_derivative(y, t, stride: int = 1) -> np.ndarray:
+    """d y / d t along the last axis, within each contiguous solver segment (one-sided at
+    segment ends; 0 for a one-sample segment), never across a join (see JOIN_DT_S).
+    ``stride`` > 1: differentiate on every stride-th sample of each segment and interpolate
+    back (the coarser estimate for an error bound)."""
+    y, t = np.asarray(y, float), np.asarray(t, float)
+    out = np.zeros_like(y)
+    cuts = np.flatnonzero(np.diff(t) < JOIN_DT_S) + 1
+    for a, b in zip(np.r_[0, cuts], np.r_[cuts, t.size]):
+        idx = np.arange(a, b)
+        sub = idx[::stride]
+        if sub[-1] != idx[-1]:
+            sub = np.r_[sub, idx[-1]]
+        if sub.size >= 2:
+            d = np.gradient(y[..., sub], t[sub], axis=-1)
+            if stride == 1:
+                out[..., a:b] = d
+            else:
+                for k in np.ndindex(y.shape[:-1]):
+                    out[k + (slice(a, b),)] = np.interp(t[a:b], t[sub], d[k])
+    return out
+
+
+def _surface_form(sol) -> str:
+    try:
+        return str(sol.all_models[0].options["surface form"])
+    except Exception:                                   # noqa: BLE001
+        return "false"
+
+
+def _double_layer_current(sol, pv, dom: str, t, dx) -> np.ndarray:
+    """Electrode-integrated double-layer current sum(a C_dl d(delta phi)/dt dx) [A.m-2] of the
+    differential surface form (same sign convention as the summed interfacial currents)."""
+    import pybamm
+
+    D = dom.capitalize()
+    dphi = _entries(sol, f"{D} electrode surface potential difference [V]")
+    a_s = _entries(sol, f"{D} electrode surface area to volume ratio [m-1]")
+    cdl = pv[f"{D} electrode double-layer capacity [F.m-2]"]
+    try:
+        cdl = float(cdl)
+    except TypeError:
+        cdl = float(np.ravel(pv.process_symbol(cdl(pybamm.Scalar(float(pv["Ambient temperature [K]"])))).evaluate())[0])
+    if a_s.shape != dphi.shape:
+        a_s = np.broadcast_to(np.asarray(a_s, float).reshape(-1, 1) if a_s.ndim == 1 else a_s, dphi.shape)
+    fine = (a_s * cdl * time_derivative(dphi, t) * dx).sum(axis=0)
+    coarse = (a_s * cdl * time_derivative(dphi, t, stride=2) * dx).sum(axis=0)
+    return fine, np.abs(fine - coarse)
 
 
 def _layout(sol, pv):
@@ -157,6 +224,24 @@ def _max_alternating_run(arr, tol):
     return best + 1 if best else 0
 
 
+def _step_mask(t, i_app, i_1c) -> tuple[np.ndarray, np.ndarray]:
+    """Current steps and the mask of samples judged outside them. A step is a jump of more than
+    1 % of i_1C between samples, or a change faster than ``STEP_RAMP_C_PER_S`` (a smoothed step:
+    the solver ramps a step onset in sub-threshold increments, 2026-10-27), or the first sample
+    of a solution starting under load. Not judged: ``STEP_WINDOW_S`` after each step, and the
+    sample just before it (a central difference or trapezoid there straddles the step)."""
+    t, i_app = np.asarray(t, float), np.asarray(i_app, float)
+    di, dt = np.abs(np.diff(i_app)), np.diff(t)
+    ramp = (dt >= JOIN_DT_S) & (di > STEP_RAMP_C_PER_S * i_1c * np.maximum(dt, JOIN_DT_S))
+    after = np.flatnonzero((di > 0.01 * i_1c) | ramp) + 1
+    if abs(i_app[0]) > 0.01 * i_1c:             # a solution starting under load: its start is a step too
+        after = np.r_[0, after]
+    judged = np.ones(t.size, bool)
+    for k in after:
+        judged &= ~((t >= t[max(k - 1, 0)]) & (t <= t[k] + STEP_WINDOW_S))
+    return t[after], judged
+
+
 def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
     """Validity checks of one solved history; ``pv`` the parameter values it was
     solved with."""
@@ -174,10 +259,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
     scale_i = np.maximum(np.abs(i_app), i_1c)
     c0 = float(pv["Initial concentration in electrolyte [mol.m-3]"])
     t = np.asarray(sol.t, float)
-    steps = t[1:][np.abs(np.diff(i_app)) > 0.01 * i_1c]
-    judged = np.ones(t.size, bool)
-    for ts_ in steps:
-        judged &= ~((t >= ts_ - 1e-9) & (t <= ts_ + STEP_WINDOW_S))
+    steps, judged = _step_mask(t, i_app, i_1c)
 
     fields = {}
     for key, name in (("i_e", "Electrolyte current density [A.m-2]"),
@@ -238,14 +320,29 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         try:
             edges = lay["edges"]
             worst_int = 0.0
+            differential = _surface_form(sol) == "differential"
+            joins = _segment_joins(t)
+            judged_int = judged & ~joins
             for dom, sl, sign in (("negative", slice(0, nn), 1.0), ("positive", slice(nn + ns, None), -1.0)):
+                dx = np.diff(edges)[sl][:, None]
                 aj = _entries(sol, f"Sum of {dom} electrode volumetric interfacial current densities [A.m-3]")
-                total = (aj * np.diff(edges)[sl][:, None]).sum(axis=0)
-                # judged outside the post-step window: with the differential surface form the
-                # double layer carries part of i_app transiently (not in the summed reactions)
-                worst_int = max(worst_int, float(np.max(np.where(judged, np.abs(total - sign * i_app) / scale_i, 0.0))))
+                total = (aj * dx).sum(axis=0)
+                err = 0.0
+                if differential:
+                    # the double layer carries part of i_app whenever the surface potential
+                    # changes (a C_dl d(delta phi)/dt), not only after steps: without it the
+                    # balance reads ~1e-4 of i_1C throughout a cycle (2026-10-26). The model
+                    # enforces it exactly; only our derivative of the sampled delta phi has
+                    # error, bounded by fine vs every-second-sample differences.
+                    dl, err = _double_layer_current(sol, pv, dom, t, dx)
+                    total = total + dl
+                excess = np.maximum(np.abs(total - sign * i_app) - err, 0.0) / scale_i
+                worst_int = max(worst_int, float(np.max(np.where(judged_int, excess, 0.0))))
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", worst_int, "charge balance",
-                              "max |sum over the electrode of a j (main + side reactions) -/+ i_app| / max(|i_app|, i_1C)"))
+                              "max |sum over the electrode of a j (main + side reactions)"
+                              + (" + a C_dl d(delta phi)/dt (double layer; beyond the error of its "
+                                 "sampled derivative)" if differential else "")
+                              + " -/+ i_app| / max(|i_app|, i_1C); solver-segment joins not judged"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", None, "charge balance",
                               f"{type(exc).__name__}: {str(exc)[:120]}"))

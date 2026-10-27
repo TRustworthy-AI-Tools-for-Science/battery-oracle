@@ -1641,16 +1641,19 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
     fit_res = chain.solve(inputs)               # on the fit mesh (usually cached)
     keep, xf = getattr(chain, "keep_solution", False), getattr(chain, "x_factor", 1)
 
-    def full(x_factor):
-        """Full-storage solve past the candidate cache on x ``x_factor``; returns the
-        result with the solution replaced by its validity measures."""
+    def full(x_factor, tol_scale=1.0):
+        """Full-storage solve past the candidate cache on x ``x_factor`` (tolerances x
+        ``tol_scale``); returns the result with the solution replaced by its validity measures."""
+        rtol, atol = chain.rtol, chain.atol
         chain.keep_solution, chain.x_factor = True, x_factor
+        chain.rtol, chain.atol = rtol * tol_scale, atol * tol_scale
         try:
             r = chain._solve({**chain.fixed, **inputs})
         except Exception as exc:                # noqa: BLE001
             r = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         finally:
             chain.keep_solution, chain.x_factor = keep, xf
+            chain.rtol, chain.atol = rtol, atol
         if "error" not in r:
             try:
                 r["measures"] = validity.measure(r.pop("solution"), r.pop("parameter_values"))
@@ -1669,8 +1672,15 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
         res["diag"]["validity"] = [{"name": f"validity[{cell}] two-mesh gate evaluated", "status": "fail",
                                     "value": None, "limit": None, "note": f"refined mesh: {why}"}]
     else:
-        res["diag"]["validity"] = (validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol,
-                                                  cell=cell, mesh=names)
+        laws = validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol, cell=cell, mesh=names)
+        if any(r["status"] == "fail" and "exact law" in r["name"] for r in laws):
+            # an exact law above its solver-tolerance limit: the 100x-tighter solve decides
+            # whether it is a tolerance error (shrinks) or a real violation (2026-10-27)
+            tight = full(VALIDATE_X_FACTOR, tol_scale=0.01)
+            if "measures" in tight:
+                laws = validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol, cell=cell,
+                                      mesh=names, tight=tight["measures"])
+        res["diag"]["validity"] = (laws
                                    + validity.relevance(res, fine, cell=cell, mesh=names)
                                    + [_mesh_agreement(fit_res, res, xf, cell)])
         res["diag"]["validity_measures"] = {names[0]: res["measures"], names[1]: fine["measures"]}
