@@ -1674,12 +1674,12 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
     else:
         laws = validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol, cell=cell, mesh=names)
         if any(r["status"] == "fail" and "exact law" in r["name"] for r in laws):
-            # an exact law above its solver-tolerance limit: the 100x-tighter solve decides
-            # whether it is a tolerance error (shrinks) or a real violation (2026-10-27)
-            tight = full(VALIDATE_X_FACTOR, tol_scale=0.01)
-            if "measures" in tight:
+            # an exact law above its solver-tolerance limit: solves 10x and 100x tighter decide
+            # whether it converges to the law (a tolerance error) or levels off (a real violation)
+            ladder = [full(VALIDATE_X_FACTOR, tol_scale=f) for f in validity.TOLERANCE_LADDER]
+            if all("measures" in r for r in ladder):
                 laws = validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol, cell=cell,
-                                      mesh=names, tight=tight["measures"])
+                                      mesh=names, ladder=[r["measures"] for r in ladder])
         res["diag"]["validity"] = (laws
                                    + validity.relevance(res, fine, cell=cell, mesh=names)
                                    + [_mesh_agreement(fit_res, res, xf, cell)])

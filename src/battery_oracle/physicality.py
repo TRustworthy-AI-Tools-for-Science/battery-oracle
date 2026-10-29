@@ -323,18 +323,19 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         fsol = fine._prev_solution
         names = (f"x{xf}", f"x{2 * xf}")
         m_dep = validity.measure(sol, oracle._pv)
-        tight_m = None
+        ladder = None
         if any((m_dep.get(k) or 0.0) > 10.0 * oracle._dfn_solver_rtol for k in ("charge", "charge_integral", "lithium")):
-            # an exact-law residual above 10 rtol: is it a tolerance error? (100x tighter solve)
-            tight_kw = {**kw, "dfn_solver_rtol": oracle._dfn_solver_rtol / 100.0,
-                        "dfn_solver_atol": oracle._dfn_solver_atol / 100.0}
-            tight = PyBaMMOracle(**tight_kw)
-            tight._real_cell_capacity_mah = nominal
-            tight._cap_scale = 1.0
-            tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
-            tight_m = validity.measure(tight._prev_solution, tight._pv)
+            # an exact-law residual above 10 rtol: is it a tolerance error? (10x and 100x tighter solves)
+            ladder = []
+            for f in validity.TOLERANCE_LADDER:
+                tight = PyBaMMOracle(**{**kw, "dfn_solver_rtol": oracle._dfn_solver_rtol * f,
+                                        "dfn_solver_atol": oracle._dfn_solver_atol * f})
+                tight._real_cell_capacity_mah = nominal
+                tight._cap_scale = 1.0
+                tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+                ladder.append(validity.measure(tight._prev_solution, tight._pv))
         out += validity.judge(m_dep, validity.measure(fsol, fine._pv), factor=2, cell=tag, mesh=names,
-                              rtol=oracle._dfn_solver_rtol, tight=tight_m)
+                              rtol=oracle._dfn_solver_rtol, ladder=ladder)
         t = np.asarray(sol.t, float)
         v_a = np.asarray(sol["Voltage [V]"].entries, float)
         v_b = np.interp(t, np.asarray(fsol.t, float), np.asarray(fsol["Voltage [V]"].entries, float))

@@ -1,5 +1,5 @@
-"""evaluate_chain's validity gate: an exact-law residual above its limit triggers a
-100x-tighter solve, and passes only if it shrinks (a tolerance error)."""
+"""evaluate_chain's validity gate: an exact-law residual above its limit triggers solves
+10x and 100x tighter, and passes only if it converges with the tolerance (a tolerance error)."""
 import numpy as np
 import pytest
 
@@ -8,8 +8,8 @@ from battery_oracle import validity
 
 
 class FakeChain:
-    """A chain whose integral charge-balance residual is ``k * rtol ** p`` (p = 1: a
-    tolerance error; p = 0: a real violation independent of the tolerance)."""
+    """A chain whose integral charge-balance residual is ``k * rtol ** p`` (p = 1 or a
+    sub-linear p = 0.44: a tolerance error; p = 0: a real violation independent of it)."""
 
     def __init__(self, power):
         self.power, self.rtol, self.atol = power, 1e-6, 1e-8
@@ -36,15 +36,15 @@ def fake_measures(monkeypatch):
     return chain_power
 
 
-@pytest.mark.parametrize("power, status", [(1.0, "pass"), (0.0, "fail")])
-def test_exact_law_above_limit_is_decided_by_a_tighter_solve(fake_measures, power, status):
+@pytest.mark.parametrize("power, status", [(1.0, "pass"), (0.44, "pass"), (0.0, "fail")])
+def test_exact_law_above_limit_is_decided_by_tighter_solves(fake_measures, power, status):
     fake_measures[0] = power
     chain = FakeChain(power)
     data = {"cell_id": "c", "records": [{"kind": "cc", "label": "a", "V": [3.9], "t": [0.0]}], "spectra": []}
     out = bc.evaluate_chain(data, None, {}, chain=chain)
     rec = next(r for r in out["diagnostics"]["validity"] if "integral charge balance" in r["name"])
     assert rec["status"] == status
-    assert min(chain.tols) == pytest.approx(1e-8)               # the 100x-tighter solve ran
+    assert sorted(set(chain.tols))[:2] == pytest.approx([1e-8, 1e-7])   # the 10x and 100x tighter solves ran
     assert (chain.rtol, chain.atol) == (1e-6, 1e-8)             # and the tolerances were restored
 
 
@@ -54,4 +54,4 @@ def test_no_tighter_solve_when_the_exact_laws_pass(fake_measures, monkeypatch):
     chain = FakeChain(1.0)
     data = {"cell_id": "c", "records": [{"kind": "cc", "label": "a", "V": [3.9], "t": [0.0]}], "spectra": []}
     bc.evaluate_chain(data, None, {}, chain=chain)
-    assert np.allclose(chain.tols, 1e-6)                        # only the two mesh solves, no tight one
+    assert np.allclose(chain.tols, 1e-6)                        # only the two mesh solves, no tighter ones

@@ -35,9 +35,9 @@ compares two meshes (the deployed one and one refined by ``factor``) in three ti
 1. exact laws -- limits from the solver tolerance, no tuning: charge balance
    <= 10 rtol; lithium drift <= 1 % of the lithium consumed by side reactions (the
    stage-B signal it would corrupt), or <= 10 rtol of the total when there is none.
-   Above the limit a residual still passes if it is a tolerance error: it shrinks
-   >= 10x when the solver tolerances are tightened 100x (an algebraic surface form
-   solves the current split only to the potential tolerance);
+   Above the limit a residual still passes if it is a tolerance error: solved again
+   with 10x and 100x tighter tolerances, it shrinks >= MIN_DECADE_RATIO per decade and
+   extrapolates to within the limit at zero tolerance; a real violation levels off;
 2. continuity -- converged if each jump shrinks at least first-order (by ``factor``)
    under refinement, or is already at round-off (<= 10 rtol); a jump that does not
    shrink is a real inconsistency and fails the fit;
@@ -60,6 +60,10 @@ F = 96485.33212
 STEP_WINDOW_S = 2.0
 #: a current change faster than this (C per second) is a (smoothed) step, not cycling
 STEP_RAMP_C_PER_S = 1.0
+#: tolerance factors of the extra solves that decide an exact-law residual above its limit,
+#: and the minimum shrink per decade of tolerance for it to count as a tolerance error
+TOLERANCE_LADDER = (0.1, 0.01)
+MIN_DECADE_RATIO = 2.0
 
 #: noise levels the relevance tier is judged against (jones2022 instrument / EIS)
 VOLTAGE_NOISE_V = 1e-3
@@ -389,46 +393,64 @@ def _rec(name, status, value, limit, note):
     return {"name": name, "status": status, "value": value, "limit": limit, "note": note}
 
 
-def _exact_law(tag, name, value, limit, tight, what):
-    """An exact law: pass at or below ``limit``; above it, pass only if the residual is
-    a solver-tolerance error, i.e. it shrinks >= 10x when the tolerances are tightened
-    100x (``tight``: the residual of that solve); fail if it does not (a real violation)."""
+def _tolerance_limit(seq) -> float | None:
+    """Zero-tolerance limit of a residual measured at tolerances x1, x0.1, x0.01 (Aitken's
+    delta-squared extrapolation of a geometrically converging sequence)."""
+    s0, s1, s2 = seq
+    d1, d2 = s0 - s1, s1 - s2
+    return s2 - d2 * d2 / (d1 - d2) if d1 > d2 else s2
+
+
+def _exact_law(tag, name, value, limit, ladder, what):
+    """An exact law: pass at or below ``limit``. Above it, pass only if the residual is a
+    solver-tolerance error, judged on ``ladder`` = its values at the solver tolerance and
+    10x and 100x tighter (deployed mesh): it must shrink by >= MIN_DECADE_RATIO per decade
+    of tolerance, and its extrapolated zero-tolerance limit must be within ``limit``. A real
+    violation levels off at a nonzero value, so it fails (2026-10-29: the residual near
+    cycler stops falls ~ rtol^0.44, so a fixed >= 10x per 100x test failed clear
+    tolerance errors)."""
     if value is None:
         return _rec(tag + name, "skip", None, limit, "not evaluable")
     if value <= limit:
         return _rec(tag + name, "pass", value, limit, what)
-    if tight is None:
-        return _rec(tag + name, "fail", value, limit, what + "; above the limit and no tighter-tolerance solve to "
+    if not ladder or len(ladder) != 3 or any(v is None for v in ladder):
+        return _rec(tag + name, "fail", value, limit, what + "; above the limit and no tighter-tolerance solves to "
                     "show it is a tolerance error")
-    ok = tight <= value / 10.0
+    ratios = [a / b if b > 0 else np.inf for a, b in zip(ladder, ladder[1:])]
+    est = _tolerance_limit(ladder)
+    ok = min(ratios) >= MIN_DECADE_RATIO and est <= limit
     return _rec(tag + name, "pass" if ok else "fail", value, limit,
-                what + f"; tolerances x100 tighter: {value:.2e} -> {tight:.2e} "
-                + ("(a solver-tolerance error)" if ok else "(does not shrink: a real violation)"))
+                what + f"; tolerances x1 / x0.1 / x0.01: {ladder[0]:.2e} -> {ladder[1]:.2e} -> {ladder[2]:.2e} "
+                f"(x{ratios[0]:.2f}, x{ratios[1]:.2f} per decade), zero-tolerance limit {est:.2e} "
+                + ("(a solver-tolerance error)" if ok else "(does not converge to the law: a real violation)"))
 
 
 def judge(coarse: dict, fine: dict, *, factor: int = 2, rtol: float = 1e-6, cell: str = "",
-          mesh: tuple[str, str] = ("deployed", "refined"), tight: dict | None = None) -> list[dict]:
+          mesh: tuple[str, str] = ("deployed", "refined"), ladder: list[dict] | None = None) -> list[dict]:
     """Validity records from the measures of the deployed (``coarse``) and refined
-    (``fine``) solutions (see the module doc for the three tiers); ``tight``: the
-    measures of the deployed mesh solved with 100x tighter tolerances, which decides
-    whether an exact-law residual above its limit is a tolerance error."""
+    (``fine``) solutions (see the module doc for the three tiers); ``ladder``: the
+    measures of the deployed mesh solved with TOLERANCE_LADDER x tighter tolerances,
+    which decide whether an exact-law residual above its limit is a tolerance error."""
     tag = f"validity[{cell}] " if cell else "validity "
     floor = 10.0 * rtol
-    tight = tight or {}
     out = []
+
+    def seq(key):
+        return [coarse.get(key)] + [m.get(key) for m in ladder] if ladder else None
+
     # 1. exact laws (both meshes)
     vals = [v for v in (coarse.get("charge"), fine.get("charge")) if v is not None]
-    out.append(_exact_law(tag, "charge balance (exact law)", max(vals) if vals else None, floor, tight.get("charge"),
+    out.append(_exact_law(tag, "charge balance (exact law)", max(vals) if vals else None, floor, seq("charge"),
                           "max |i_e + i_s - i_app| / max(|i_app|, i_1C), both meshes; limit 10 rtol"))
     vals = [v for v in (coarse.get("charge_integral"), fine.get("charge_integral")) if v is not None]
     out.append(_exact_law(tag, "integral charge balance (exact law)", max(vals) if vals else None, floor,
-                          tight.get("charge_integral"),
+                          seq("charge_integral"),
                           "max |sum of a j over each electrode (all reactions) -/+ i_app| / max(|i_app|, i_1C), "
                           "both meshes; limit 10 rtol"))
     vals = [v for v in (coarse.get("lithium"), fine.get("lithium")) if v is not None]
     side = coarse.get("side_loss_rel") or 0.0
     li_lim = max(0.01 * abs(side), floor)
-    out.append(_exact_law(tag, "lithium conserved (exact law)", max(vals) if vals else None, li_lim, tight.get("lithium"),
+    out.append(_exact_law(tag, "lithium conserved (exact law)", max(vals) if vals else None, li_lim, seq("lithium"),
                           f"max drift / total, both meshes; limit 1 % of the lithium consumed by side reactions "
                           f"({abs(side):.2e} of the total) or 10 rtol"))
     # 2. continuity: converges under refinement

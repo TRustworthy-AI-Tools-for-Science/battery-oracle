@@ -47,13 +47,34 @@ def test_judge_exact_laws_use_solver_tolerance_and_side_reactions():
     assert any(c["status"] == "fail" and "lithium" in c["name"] for c in bad)
 
 
-def test_exact_law_residual_passes_only_if_it_is_a_tolerance_error():
-    coarse = fine = _m(charge=5e-4)
-    shrinks = validity.judge(coarse, fine, tight={"charge": 5e-6})
-    stuck = validity.judge(coarse, fine, tight={"charge": 4e-4})
-    untested = validity.judge(coarse, fine)
-    status = lambda recs: [c["status"] for c in recs if "charge" in c["name"]][0]   # noqa: E731
-    assert status(shrinks) == "pass" and status(stuck) == "fail" and status(untested) == "fail"
+def test_exact_law_residual_passes_only_if_it_converges_with_the_tolerance():
+    """Above its limit, an exact-law residual passes only if it falls with the solver
+    tolerance (x1, x0.1, x0.01) toward a zero-tolerance limit inside the limit: first-order
+    and sub-linear convergence pass; a plateau or a stuck residual fails, as does no ladder."""
+    rtol = 1e-6
+    limit = 10 * rtol
+
+    def status(base, ladder):
+        recs = validity.judge(_m(charge=base), _m(charge=base), rtol=rtol,
+                              ladder=None if ladder is None else [_m(charge=v) for v in ladder])
+        return [c["status"] for c in recs if c["name"].endswith("charge balance (exact law)")][0]
+
+    first_order = [5e-4 * 0.1 ** k for k in (1, 2)]
+    sublinear = [5e-4 * 0.1 ** (0.44 * k) for k in (1, 2)]          # ~ rtol^0.44, ~2.75x per decade
+    plateau = [5e-4 * 0.1 ** k + 2e-4 for k in (1, 2)]             # converges, but to a violation
+    stuck = [4.6e-4, 4.3e-4]
+    assert status(5e-4, first_order) == "pass"
+    assert status(5e-4, sublinear) == "pass"
+    assert status(5e-4, plateau) == "fail"
+    assert status(5e-4, stuck) == "fail"
+    assert status(5e-4, None) == "fail"
+    assert status(0.5 * limit, None) == "pass"                     # within the limit: no ladder needed
+
+
+def test_tolerance_limit_extrapolates_a_geometric_sequence():
+    """Aitken extrapolation recovers the limit of s_k = L + c q^k exactly."""
+    for L, c, q in ((0.0, 1e-3, 0.3), (2e-4, 5e-4, 0.5), (-1e-5, 2e-4, 0.1)):
+        assert validity._tolerance_limit([L + c * q ** k for k in range(3)]) == pytest.approx(L, abs=1e-15)
 
 
 def test_measure_maps_each_continuity_record_to_its_own_field(monkeypatch):
