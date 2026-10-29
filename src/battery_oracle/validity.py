@@ -95,39 +95,6 @@ def _entries(sol, name):
 JOIN_DT_S = 1e-6
 
 
-def _segment_joins(t) -> np.ndarray:
-    """Mask of the samples on either side of a solver-segment join (near-repeated time)."""
-    t = np.asarray(t, float)
-    near = np.diff(t) < JOIN_DT_S
-    mask = np.zeros(t.size, bool)
-    mask[:-1] |= near
-    mask[1:] |= near
-    return mask
-
-
-def time_derivative(y, t, stride: int = 1) -> np.ndarray:
-    """d y / d t along the last axis, within each contiguous solver segment (one-sided at
-    segment ends; 0 for a one-sample segment), never across a join (see JOIN_DT_S).
-    ``stride`` > 1: differentiate on every stride-th sample of each segment and interpolate
-    back (the coarser estimate for an error bound)."""
-    y, t = np.asarray(y, float), np.asarray(t, float)
-    out = np.zeros_like(y)
-    cuts = np.flatnonzero(np.diff(t) < JOIN_DT_S) + 1
-    for a, b in zip(np.r_[0, cuts], np.r_[cuts, t.size]):
-        idx = np.arange(a, b)
-        sub = idx[::stride]
-        if sub[-1] != idx[-1]:
-            sub = np.r_[sub, idx[-1]]
-        if sub.size >= 2:
-            d = np.gradient(y[..., sub], t[sub], axis=-1)
-            if stride == 1:
-                out[..., a:b] = d
-            else:
-                for k in np.ndindex(y.shape[:-1]):
-                    out[k + (slice(a, b),)] = np.interp(t[a:b], t[sub], d[k])
-    return out
-
-
 def _surface_form(sol) -> str:
     try:
         return str(sol.all_models[0].options["surface form"])
@@ -135,9 +102,10 @@ def _surface_form(sol) -> str:
         return "false"
 
 
-def _double_layer_current(sol, pv, dom: str, t, dx) -> np.ndarray:
-    """Electrode-integrated double-layer current sum(a C_dl d(delta phi)/dt dx) [A.m-2] of the
-    differential surface form (same sign convention as the summed interfacial currents)."""
+def _double_layer_charge(sol, pv, dom: str, dx) -> np.ndarray:
+    """Electrode-integrated charge stored in the double layer, sum(a C_dl delta phi dx)
+    [C.m-2] per sample, of the differential surface form (its change over an interval is the
+    double layer's share of the applied charge; no derivative of the samples is needed)."""
     import pybamm
 
     D = dom.capitalize()
@@ -150,9 +118,7 @@ def _double_layer_current(sol, pv, dom: str, t, dx) -> np.ndarray:
         cdl = float(np.ravel(pv.process_symbol(cdl(pybamm.Scalar(float(pv["Ambient temperature [K]"])))).evaluate())[0])
     if a_s.shape != dphi.shape:
         a_s = np.broadcast_to(np.asarray(a_s, float).reshape(-1, 1) if a_s.ndim == 1 else a_s, dphi.shape)
-    fine = (a_s * cdl * time_derivative(dphi, t) * dx).sum(axis=0)
-    coarse = (a_s * cdl * time_derivative(dphi, t, stride=2) * dx).sum(axis=0)
-    return fine, np.abs(fine - coarse)
+    return (a_s * cdl * dphi * dx).sum(axis=0)
 
 
 def _layout(sol, pv):
@@ -321,28 +287,28 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
             edges = lay["edges"]
             worst_int = 0.0
             differential = _surface_form(sol) == "differential"
-            joins = _segment_joins(t)
-            judged_int = judged & ~joins
+            # judged per sample interval, in charge form (2026-10-28): the reactions' charge
+            # (trapezoid) plus the change of the charge stored in the double layer equals the
+            # applied charge. The rate form needed d(delta phi)/dt from the samples, which is
+            # inaccurate where the solver's step size jumps (a ~100x step ratio gave a
+            # residual that did not shrink with the tolerances, while the charge form did).
+            dt = np.diff(t)
+            ok = (dt >= JOIN_DT_S) & judged[:-1] & judged[1:]
+            q_app = 0.5 * (i_app[1:] + i_app[:-1]) * dt
+            per_s = np.maximum(scale_i[1:], scale_i[:-1]) * np.where(ok, dt, 1.0)
             for dom, sl, sign in (("negative", slice(0, nn), 1.0), ("positive", slice(nn + ns, None), -1.0)):
                 dx = np.diff(edges)[sl][:, None]
                 aj = _entries(sol, f"Sum of {dom} electrode volumetric interfacial current densities [A.m-3]")
                 total = (aj * dx).sum(axis=0)
-                err = 0.0
+                q = 0.5 * (total[1:] + total[:-1]) * dt
                 if differential:
-                    # the double layer carries part of i_app whenever the surface potential
-                    # changes (a C_dl d(delta phi)/dt), not only after steps: without it the
-                    # balance reads ~1e-4 of i_1C throughout a cycle (2026-10-26). The model
-                    # enforces it exactly; only our derivative of the sampled delta phi has
-                    # error, bounded by fine vs every-second-sample differences.
-                    dl, err = _double_layer_current(sol, pv, dom, t, dx)
-                    total = total + dl
-                excess = np.maximum(np.abs(total - sign * i_app) - err, 0.0) / scale_i
-                worst_int = max(worst_int, float(np.max(np.where(judged_int, excess, 0.0))))
+                    q = q + np.diff(_double_layer_charge(sol, pv, dom, dx))
+                resid = np.abs(q - sign * q_app) / per_s
+                worst_int = max(worst_int, float(np.max(np.where(ok, resid, 0.0))))
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", worst_int, "charge balance",
-                              "max |sum over the electrode of a j (main + side reactions)"
-                              + (" + a C_dl d(delta phi)/dt (double layer; beyond the error of its "
-                                 "sampled derivative)" if differential else "")
-                              + " -/+ i_app| / max(|i_app|, i_1C); solver-segment joins not judged"))
+                              "max over sample intervals of |charge of all reactions (main + side)"
+                              + (" + change of the double-layer charge a C_dl delta phi" if differential else "")
+                              + " -/+ applied charge| / (max(|i_app|, i_1C) dt); solver-segment joins not judged"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", None, "charge balance",
                               f"{type(exc).__name__}: {str(exc)[:120]}"))

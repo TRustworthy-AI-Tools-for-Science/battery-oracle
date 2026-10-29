@@ -65,23 +65,6 @@ def test_measure_maps_each_continuity_record_to_its_own_field(monkeypatch):
     assert {k: m[k] for k in names} == names        # phi_e must not overwrite i_e
 
 
-def test_time_derivative_is_exact_within_segments_and_never_spans_a_join():
-    """Two segments joined at a repeated time (as the segmented solve produces): the
-    derivative is exact inside each, and a jump across the join gives no spike."""
-    import pytest
-
-    t1 = np.linspace(0.0, 10.0, 11)
-    t2 = np.linspace(10.0 + 1e-13, 20.0, 11)
-    t = np.r_[t1, t2]
-    y = np.r_[2.0 * t1, 5.0 + 3.0 * t2]          # slope 2 then 3, value jumps by 5 at the join
-    d = validity.time_derivative(y, t)
-    assert np.allclose(d[:11], 2.0) and np.allclose(d[11:], 3.0)
-    assert np.allclose(validity.time_derivative(y, t, stride=2), d)      # linear: coarse estimate agrees
-    joins = validity._segment_joins(t)
-    assert joins.sum() == 2 and joins[10] and joins[11]
-    assert np.max(np.abs(d)) == pytest.approx(3.0)
-
-
 def test_step_mask_excludes_the_pre_step_sample_and_smoothed_onsets():
     """A sharp step and a ramped onset (sub-threshold increments, far faster than cycling):
     both are steps; the sample just before each and STEP_WINDOW_S after each are not judged,
@@ -105,8 +88,9 @@ def test_step_mask_excludes_the_pre_step_sample_and_smoothed_onsets():
 
 
 def test_corrected_integral_charge_balance_holds_for_a_differential_dfn():
-    """A DFN with the double layer: the integral balance including a C_dl d(delta phi)/dt holds
-    to solver tolerance, through current steps and rests."""
+    """A DFN with the double layer: the integral balance in charge form (reactions + change of
+    the double-layer charge a C_dl delta phi = applied charge) holds to solver tolerance,
+    through current steps and rests."""
     import pybamm
 
     pv = pybamm.ParameterValues("Marquis2019")
@@ -120,4 +104,4 @@ def test_corrected_integral_charge_balance_holds_for_a_differential_dfn():
     checks = {c["name"]: c for c in validity.check_solution(sol, pv)}
     integral = next(c for n, c in checks.items() if "integral charge balance" in n)
     assert integral["value"] is not None and integral["value"] < 1e-5, integral
-    assert "double layer" in integral["note"]
+    assert "double-layer charge" in integral["note"]
