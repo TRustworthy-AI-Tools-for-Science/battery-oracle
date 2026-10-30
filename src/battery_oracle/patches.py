@@ -5,15 +5,6 @@ verified and reused as is; but two of its assumptions do not hold for cells meas
 out of equilibrium (jones2022: ~1C formation, 290 s / 20 min rests, ~300 s EIS
 sweeps on a relaxing cell):
 
-``eis_nonstationary``
-    ``pybop.pybamm.EISSimulator._solve`` linearises the model once at the fully
-    relaxed initial state. Patched: when a measurement history is set on the
-    simulator (``simulator.set_measurement(...)``), the impedance comes from
-    :func:`battery_oracle.eis_nonstationary.nonstationary_impedance` -- the DFN
-    integrated through the real current history, linearised per frequency at the
-    state where that frequency was measured, plus lock-in drift leakage. Without a
-    measurement set the stock path runs unchanged.
-
 ``graded_failure``
     ``pybop.ErrorMeasure.evaluate_batch`` gives any simulation that stops early
     (voltage/stoichiometry event) one flat failure cost, so a population of
@@ -52,8 +43,6 @@ Usage::
 
     from battery_oracle import patches
     patches.apply()                      # all patches
-    sim = pybop.pybamm.EISSimulator(model, f_eval=f, parameter_values=pv)
-    sim.set_measurement(history, sweep_times=t_sweep, amplitude_a=5e-3)
 """
 from __future__ import annotations
 
@@ -100,66 +89,6 @@ def _require_signature(fn, names: list[str], where: str) -> None:
 # ---------------------------------------------------------------------------
 # Patch 1: non-stationary EIS
 # ---------------------------------------------------------------------------
-
-def _install_eis_nonstationary() -> None:
-    from pybop.pybamm.eis_simulator import EISSimulator
-
-    _require_signature(EISSimulator._solve, ["self", "inputs"], "EISSimulator._solve")
-    for attr in ("_f_eval", "_simulator", "parameter_values"):
-        # _f_eval and _simulator are instance attributes; parameter_values a property
-        if attr == "parameter_values" and not hasattr(EISSimulator, attr):
-            raise PatchError("EISSimulator.parameter_values missing")
-    original = EISSimulator._solve
-    _ORIGINALS["EISSimulator._solve"] = original
-
-    def set_measurement(self, history, *, sweep_times=None, n_periods: float = 1.0,
-                        amplitude_a: float = 5e-3, drift_leakage: bool = True,
-                        per_frequency: bool = True) -> None:
-        """Make this simulator compute non-stationary impedance (see module doc)."""
-        self._measurement = dict(history=history, sweep_times=sweep_times, n_periods=n_periods,
-                                 amplitude_a=amplitude_a, drift_leakage=drift_leakage,
-                                 per_frequency=per_frequency)
-
-    def clear_measurement(self) -> None:
-        self._measurement = None
-
-    def _solve(self, inputs):
-        meas = getattr(self, "_measurement", None)
-        if meas is None:
-            return original(self, inputs)
-        from pybop.simulators.base_simulator import Solution
-
-        from battery_oracle.eis_nonstationary import nonstationary_impedance
-
-        pv = self.parameter_values.copy()
-        pv.update(inputs or {})
-        model = self._simulator._model
-        try:
-            z = nonstationary_impedance(type(model), dict(model.options), pv,
-                                        np.asarray(self._f_eval, float), **meas)
-        except Exception as exc:
-            # PyBOP turns RuntimeError/ValueError/ZeroDivisionError into a failed
-            # candidate; PyBaMM's SolverError/ModelError (an extreme parameter set
-            # the DFN cannot integrate) would otherwise abort the whole fit.
-            raise RuntimeError(f"non-stationary EIS failed: {type(exc).__name__}: "
-                               f"{str(exc)[:200]}") from exc
-        solution = Solution()
-        solution.set_solution_variable("Impedance", data=np.asarray(z, dtype=complex))
-        return solution
-
-    EISSimulator._solve = _solve
-    EISSimulator.set_measurement = set_measurement
-    EISSimulator.clear_measurement = clear_measurement
-
-
-def _remove_eis_nonstationary() -> None:
-    from pybop.pybamm.eis_simulator import EISSimulator
-
-    EISSimulator._solve = _ORIGINALS.pop("EISSimulator._solve")
-    for name in ("set_measurement", "clear_measurement"):
-        if hasattr(EISSimulator, name):
-            delattr(EISSimulator, name)
-
 
 # ---------------------------------------------------------------------------
 # Patch 2: graded cost for truncated trajectories
@@ -476,7 +405,6 @@ def _remove_harmonic_flux_coefficients() -> None:
 # ---------------------------------------------------------------------------
 
 _PATCHES = {
-    "eis_nonstationary": (_install_eis_nonstationary, _remove_eis_nonstationary),
     "graded_failure": (_install_graded_failure, _remove_graded_failure),
     "parallel_batches": (_install_parallel_batches, _remove_parallel_batches),
     "harmonic_flux_coefficients": (_install_harmonic_flux_coefficients, _remove_harmonic_flux_coefficients),

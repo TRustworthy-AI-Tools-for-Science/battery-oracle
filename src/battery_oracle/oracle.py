@@ -1163,7 +1163,7 @@ class PyBaMMOracle:
         # -- Beginning-of-life (BOL) fit (config_oracle_defaults.yml: bol.*) --
         # Multipliers / absolute values applied to the PyBaMM parameter set after
         # the degradation preset (see battery_oracle.params). Produced by
-        # battery_oracle.bol_fit (PyBOP fit to the real cell's first cycles).
+        # the stage-A chain fit (battery_oracle.bol_chain) to the real cell's first cycles.
         parameter_scales: dict | None = None,
         parameter_overrides: dict | None = None,
         # Series contact resistance [Ohm] in the 5 Ah PyBaMM frame; None = off.
@@ -3289,3 +3289,14 @@ def make_pybamm_candidates(
         np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h, t], dtype=np.float64)
         for c, t in zip(c_rates, temps)
     ]
+
+
+def oracle_parameter_values(**oracle_kwargs):
+    """The parameter values a :class:`PyBaMMOracle` built with ``oracle_kwargs`` simulates:
+    the degradation preset's edits and ``kinetics_scale`` included, with the oracle's own
+    voltage limits as the cut-offs (so fitted values are relative to exactly that)."""
+    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, **oracle_kwargs)
+    pv = oracle._pv.copy()
+    pv.update({"Upper voltage cut-off [V]": oracle._V_CHARGE_MAX,
+               "Lower voltage cut-off [V]": oracle._V_DISCHARGE_MIN})
+    return pv

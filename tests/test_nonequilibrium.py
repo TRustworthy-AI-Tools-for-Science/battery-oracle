@@ -58,24 +58,18 @@ def clean_patch_state():
 def test_patches_apply_and_revert_cleanly():
     pybop = pytest.importorskip("pybop")
     from pybop.costs.error_measures import ErrorMeasure
-    from pybop.pybamm.eis_simulator import EISSimulator
 
     from battery_oracle import patches
 
-    stock_solve, stock_eval = EISSimulator._solve, ErrorMeasure.evaluate_batch
+    stock_eval = ErrorMeasure.evaluate_batch
     try:
         got = set(patches.apply())
-        # the PyBOP / EIS / flux patches always install; the edge patch only where upstream lacks the fix
-        assert {"eis_nonstationary", "graded_failure", "parallel_batches", "harmonic_flux_coefficients"} <= got
+        assert {"graded_failure", "parallel_batches", "harmonic_flux_coefficients"} <= got
         assert got <= set(patches._PATCHES)
-        assert EISSimulator._solve is not stock_solve
-        assert hasattr(EISSimulator, "set_measurement")
         assert ErrorMeasure.evaluate_batch is not stock_eval
     finally:
         patches.revert()
-    assert EISSimulator._solve is stock_solve
     assert ErrorMeasure.evaluate_batch is stock_eval
-    assert not hasattr(EISSimulator, "set_measurement")
     assert patches.applied() == set()
     _ = pybop
 
@@ -178,62 +172,6 @@ def test_relaxing_state_changes_low_frequency_impedance_only():
     assert np.all(np.abs(info2.leakage_ohm) < 0.05 * np.abs(z_ns))
 
 
-@pytest.mark.slow
-def test_patched_eis_simulator_uses_the_measurement_history():
-    import pybop
-
-    from battery_oracle import patches
-    from battery_oracle.eis_nonstationary import nonstationary_impedance
-
-    cls, options, pv = _setup()
-    f = np.logspace(-1, 2, 6)
-    t = np.concatenate([np.linspace(0, 600, 21), [601.0, 1200.0]])
-    hist = History(t=t, I=np.concatenate([np.full(21, 0.042), [0.0, 0.0]]), initial_voltage=4.1)
-    patches.apply(["eis_nonstationary"])
-    try:
-        sim = pybop.pybamm.EISSimulator(cls(options=dict(options)), f_eval=f, parameter_values=pv.copy())
-        stationary = np.asarray(sim.solve()["Impedance"].data)
-        sim.set_measurement(hist, n_periods=1.0, drift_leakage=False)
-        via_patch = np.asarray(sim.solve()["Impedance"].data)
-        sim.clear_measurement()
-        assert np.allclose(np.asarray(sim.solve()["Impedance"].data), stationary)
-    finally:
-        patches.revert()
-    direct = nonstationary_impedance(cls, options, pv, f, history=hist, n_periods=1.0,
-                                     drift_leakage=False)
-    assert np.allclose(via_patch, direct, rtol=1e-8)
-    assert not np.allclose(via_patch, stationary, rtol=1e-3)     # the history matters
-
-
-def test_patched_eis_turns_solver_failures_into_failed_candidates(monkeypatch):
-    """PyBaMM SolverError during the history solve must not abort a PyBOP fit."""
-    pytest.importorskip("pybop")
-    import pybamm
-    from pybop.simulators.failed_solution import FailedSolution
-
-    from battery_oracle import eis_nonstationary, patches
-
-    def boom(*a, **k):
-        raise pybamm.SolverError("IDAGetDky: IDA_BAD_K")
-
-    monkeypatch.setattr(eis_nonstationary, "nonstationary_impedance", boom)
-    import pybop
-    from battery_oracle.parameter_sets import lir2032
-
-    pv = lir2032()
-    pv.update({"Contact resistance [Ohm]": 0.05}, check_already_exists=False)
-    patches.apply(["eis_nonstationary"])
-    try:
-        sim = pybop.pybamm.EISSimulator(
-            pybamm.lithium_ion.DFN(options={"surface form": "differential", "contact resistance": "true"}),
-            f_eval=np.array([1.0, 10.0]), parameter_values=pv)
-        sim.set_measurement(History(t=np.array([0.0, 10.0]), I=np.zeros(2), initial_voltage=4.0))
-        out = sim.solve({})      # a dict, as the optimiser passes (PyBOP's failure branch needs .keys())
-    finally:
-        patches.revert()
-    assert isinstance(out, FailedSolution)
-
-
 def test_relative_sweep_times_rebase_absolute_stamps_and_guard():
     from battery_oracle.eis_nonstationary import relative_sweep_times
 
@@ -323,46 +261,3 @@ def test_parallel_batches_kill_a_runaway_candidate_and_keep_the_rest(monkeypatch
 
     assert list(__import__("inspect").signature(_MP.evaluate_batch).parameters)[:3] == [
         "self", "inputs", "calculate_sensitivities"]
-
-
-@pytest.mark.slow
-def test_joint_fit_recovers_known_parameters_from_synthetic_data():
-    """Round trip: formation-like + cycling + non-stationary EIS data generated from known
-    parameters with the patched DFN; the joint fit (3 free parameters, perturbed start)
-    must cut the cost and recover them."""
-    from battery_oracle import patches
-    from battery_oracle.bol_joint import (CONTACT_R, _eis_problem, _time_problem, fit_cell_joint,
-                                          fit_parameters)
-    from battery_oracle.params import scale_parameter_name
-
-    cls, options, pv = _setup()
-    pv = pv.copy()
-    patches.apply()
-    free = [scale_parameter_name("Negative electrode exchange-current density [A.m-2]"),
-            scale_parameter_name("Positive particle diffusivity [m2.s-1]"), CONTACT_R]
-    truth = {free[0]: 2.0, free[1]: 0.5, free[2]: 0.15}
-    amp = 5e-3
-
-    # one record: rest, 1C discharge, rest, 1C charge, 20 min rest (a cycling-like history)
-    t = np.concatenate([np.arange(0, 60, 20.0), np.arange(60, 660, 20.0), np.arange(660, 960, 30.0),
-                        np.arange(960, 1560, 20.0), np.arange(1560, 2760, 60.0)])
-    i = np.zeros_like(t)
-    i[(t >= 60) & (t < 660)] = 0.042
-    i[(t >= 960) & (t < 1560)] = -0.042
-    rec = {"t": t, "I": i, "V": np.full(t.size, 3.9), "label": "syn"}
-    f = np.logspace(2, -1, 8)
-    spec = {"f": f, "Z": np.ones(f.size, complex), "sweep_t": np.cumsum(1.0 / f) + 2.0, "n_periods": 1.0}
-    fit = fit_parameters(pv, {}, free=free)
-    tp = _time_problem(rec, pv, fit)
-    rec["V"] = np.asarray(tp.simulator.solve(inputs=truth)["Voltage [V]"].data)
-    ep = _eis_problem(rec, spec, pv, fit, amp)
-    spec["Z"] = np.asarray(ep.simulator.solve(inputs=truth)["Impedance"].data)
-    rec["spectrum"] = spec
-    data = {"formation": {**rec, "label": "syn/formation"}, "cycles": [rec]}
-
-    out = fit_cell_joint("syn", data, pv, warm={CONTACT_R: 0.05}, max_iterations=30, max_unchanged=15,
-                         amplitude_a=amp, seed=1, free=free)
-    best = out["best_inputs"]
-    assert out["cost"] < 1.0, out["cost"]                       # started well above this
-    for name in free:
-        assert 0.6 * truth[name] < best[name] < 1.6 * truth[name], (name, best[name], truth[name])

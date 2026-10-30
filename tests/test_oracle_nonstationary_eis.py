@@ -10,7 +10,7 @@ _ORACLE_OPTS = {**_BASE_OPTS, "thermal": "lumped", "use lumped thermal capacity"
 
 
 def _oracle_pv():
-    from battery_oracle.bol_fit import oracle_parameter_values
+    from battery_oracle.oracle import oracle_parameter_values
 
     pv = oracle_parameter_values(degradation_preset="accelerated", kinetics_scale=1.0,
                                  chemistry="LiR2032", temperature_K=296.15)

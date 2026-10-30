@@ -48,38 +48,6 @@ def test_check_tune_flags_bounds_gains_and_failed_targets():
     assert rep["status"] == "fail"
 
 
-def test_check_balance_flags_invalid_window_negative_r0_and_bounds():
-    pybamm = pytest.importorskip("pybamm")
-    from battery_oracle.parameter_sets import lir2032
-    from battery_oracle.physicality import check_balance
-
-    pv = lir2032()
-    side = float(pv["Electrode height [m]"])
-    report = {
-        "fit": {"balance": {"PJ1": {
-            "window_valid": False, "window": {"x_100": 1.2},
-            "theoretical_capacity_ah": {"negative": 0.063, "positive": 0.050},
-            "bounds": {"theoretical_capacity_ah": [0.042, 0.063], "min_stoichiometry": [0, 0.4],
-                       "series_resistance_ohm": [-1, 1]},
-            "series_resistance_ohm": -0.2,
-            "branches": [{"direction": "charge", "Q_soc_ah": 0.041, "min_sto_n": 0.1,
-                          "min_sto_p": 0.399}],
-        }}},
-        "parameter_overrides": {"Electrode height [m]": side, "Electrode width [m]": side,
-                                "Negative electrode thickness [m]":
-                                    3.0 * float(pv["Negative electrode thickness [m]"])},
-    }
-    by = {c["name"]: c["status"] for c in check_balance(report, pv)}
-    assert by["balance[PJ1] stoichiometry window in [0, 1]"] == "fail"
-    assert by["balance[PJ1] negative theoretical capacity not at bound"] == "warn"
-    assert by["balance[PJ1] positive theoretical capacity not at bound"] == "pass"
-    assert by["balance[PJ1] series resistance >= 0"] == "warn"
-    assert by["balance[PJ1] series resistance not at bound"] == "pass"
-    assert by["balance[PJ1] charge min_sto_p not at bound"] == "warn"
-    assert by["geometry: electrode area / template"] == "pass"
-    assert by["geometry: negative thickness / template"] == "warn"
-
-
 def test_fitted_values_and_esoh_on_the_template_pass():
     pytest.importorskip("pybamm")
     from battery_oracle.parameter_sets import lir2032

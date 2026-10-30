@@ -1,6 +1,6 @@
 """Stage A, one continuous measured history per cell (the measurement as performed).
 
-Replaces :mod:`battery_oracle.bol_joint`, which simulated every record on its own,
+Earlier fits simulated every record on its own,
 starting from a relaxed cell at the record's first voltage. The jones2022 records
 run back to back (a cycling record starts ~5 min after the previous record's
 20 min rest and EIS sweep, while the voltage still drifts ~10 uV/s), so that
@@ -53,16 +53,53 @@ from typing import Any
 
 import numpy as np
 
-from battery_oracle.bol_fit import EIS_SCALES
 from battery_oracle.parameter_sets import ocp_data_range
+
+N_PARALLEL = "Number of electrodes connected in parallel to make a cell"
+EPS_N = "Negative electrode active material volume fraction"
+CONTACT_R = "Contact resistance [Ohm]"
+OCV0, OCV100 = "Open-circuit voltage at 0% SOC [V]", "Open-circuit voltage at 100% SOC [V]"
+#: Typical misfit that counts as 1 in the combined cost (voltage 10 mV; impedance
+#: 5% of |Z|): keeps the time-domain and EIS parts comparable.
+SIGMA_V = 0.010
+SIGMA_Z_REL = 0.05
+#: Voltage window of the fit model, wider than the cycler's, so the cycler stops (not
+#: the model's own cut-offs) end each step.
+WIDE_WINDOW = (2.5, 4.6)
+#: Multiplied kinetic / transport / double-layer parameters fitted to the EIS and steps.
+EIS_SCALES: tuple[str, ...] = (
+    "Negative electrode exchange-current density [A.m-2]",
+    "Positive electrode exchange-current density [A.m-2]",
+    "Negative particle diffusivity [m2.s-1]",
+    "Positive particle diffusivity [m2.s-1]",
+    "Electrolyte conductivity [S.m-1]",
+    "Negative electrode double-layer capacity [F.m-2]",
+    "Positive electrode double-layer capacity [F.m-2]",
+)
 
 #: Multiplied parameters of the chain fit: the EIS set plus electrolyte diffusivity
 #: (the 1-4C coin-cell steps are electrolyte-transport limited; without it the fit
 #: drives the electrolyte to ~2% of its initial concentration on 3C discharges).
 CHAIN_SCALES = tuple(EIS_SCALES) + ("Electrolyte diffusivity [m2.s-1]",)
-from battery_oracle.bol_joint import (CONTACT_R, EPS_N, N_PARALLEL, OCV0, OCV100, SIGMA_V, SIGMA_Z_REL,
-                                      _centred, widened)
 from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales, scale_parameter_name
+
+
+def widened(pv):
+    """``pv`` with the fit model's wide voltage window (WIDE_WINDOW)."""
+    pv = pv.copy()
+    pv.update({"Lower voltage cut-off [V]": WIDE_WINDOW[0], "Upper voltage cut-off [V]": WIDE_WINDOW[1]})
+    return pv
+
+
+def _centred(bounds, value, min_factor=1.5):
+    """Log-bounds whose geometric mean is ``value`` (and inside ``bounds``). PyBOP's
+    population optimisers start from the mean of the prior and ignore ``initial_value``;
+    for a LogUniform prior that is the geometric midpoint of the bounds, so centring the
+    bounds on the warm value makes the warm start effective."""
+    lo, hi = bounds
+    v = float(np.clip(value, lo, hi))
+    f = max(min(v / lo, hi / v), min_factor)
+    return (v / f, v * f)
 
 log = logging.getLogger(__name__)
 
