@@ -24,7 +24,6 @@ from battery_oracle import (
 from battery_oracle._circuit import ACTION_FEATURE_NAMES
 from battery_oracle._eis.noise import (
     add_flicker_noise,
-    add_relaxation_drift,
     add_white_noise,
 )
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES
@@ -158,19 +157,6 @@ def test_add_flicker_noise_seed_determinism():
     assert np.array_equal(out1, out2)
     assert not np.array_equal(out1, out3)
     out_none = add_flicker_noise(freq, Z, 0.05, rng=None)
-    assert out_none.shape == Z.shape
-    assert np.all(np.isfinite(out_none))
-
-
-def test_add_relaxation_drift_seed_determinism():
-    freq, Z = _sample_spectrum()
-    kwargs = dict(rest_s=10.0, drift_scale=0.01)
-    out1 = add_relaxation_drift(freq, Z, rng=np.random.default_rng(42), **kwargs)
-    out2 = add_relaxation_drift(freq, Z, rng=np.random.default_rng(42), **kwargs)
-    out3 = add_relaxation_drift(freq, Z, rng=np.random.default_rng(43), **kwargs)
-    assert np.array_equal(out1, out2)
-    assert not np.array_equal(out1, out3)
-    out_none = add_relaxation_drift(freq, Z, rng=None, **kwargs)
     assert out_none.shape == Z.shape
     assert np.all(np.isfinite(out_none))
 

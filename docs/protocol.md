@@ -192,6 +192,4 @@ Synthesized spectra carry measurement noise controlled by `eis.noise_level`
 To suppress low-frequency scatter: switch to `white`, lower $\epsilon$, raise
 `freq_min_hz` (drop the worst decade), or screen points post-hoc with
 Kramers–Kronig validation {cite:p}`luo2021` — every oracle record stores a
-`linkk_rmse`. Non-stationary relaxation drift {cite:p}`hallemans2023`
-(`eis_drift_scale`, default 0) is a separate low-frequency effect coupled to
-`rest_s`; enable it only when explicitly modelling operando measurement conditions.
+`linkk_rmse`.

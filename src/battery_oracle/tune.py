@@ -1,7 +1,7 @@
 """Oracle calibration ("tune-oracle") engine.
 
 Calibrates :class:`PyBaMMOracle` hyperparameters — kinetics_scale,
-sei_rate_scale, dead_li_decay_scale, plating_rate_scale (+ optional EIS drift) —
+sei_rate_scale, dead_li_decay_scale, plating_rate_scale —
 against a real cell's measured EIS/capacity behaviour, via Optuna Bayesian
 optimisation over a 4-D log-space.
 
@@ -24,7 +24,6 @@ Two calibration modes, selected automatically by the cache contents (see
 Public API
 ----------
 calibrate_oracle    — run the BO; returns best params + all trial results
-calibrate_drift     — fit eis_drift_scale to a real linKK low/high ratio
 write_oracle_config — write a config_oracle_*.yml with calibration provenance
 compute_real_targets, score_candidate, run_oracle_candidate, ... — engine pieces
 
@@ -63,7 +62,6 @@ from battery_oracle._circuit import (
     _param_labels_from_circuit,
     randles_pairs_from_circuit,
 )
-from battery_oracle._eis.kk import linkk_residuals
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
 from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
 
@@ -751,112 +749,9 @@ def run_crate_sensitivity_probe(
     }
 
 
-def run_crate2_slope_probe(
-    cache: dict,
-    kinetics_scale: float,
-    sei_rate_scale: float,
-    dead_li_decay_scale: float,
-    plating_rate_scale: float,
-    preset: str,
-    capacity_check: bool,
-    probe_cycles: int = 5,
-    c2_levels_mult: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
-    circuit: str | None = None,
-    chemistry: str = "Chen2020",
-    dod_lam_scale: float = 0.0,
-    oracle_kwargs: dict | None = None,
-    protocol_key: str = "protocol",
-    calibration_model: str = CALIBRATION_MODEL,
-) -> dict[str, Any]:
-    """Oracle-side analogue of the real multi-cell C_rate_2 slope.
-
-    Fits the oracle's OWN slope d(capacity_fade_mAh)/d(C_rate_2_mA) from
-    *c2_levels_mult* synthetic protocols (varying only C_rate_2, index 1 of the
-    6-D action vector, holding the cache's median protocol otherwise fixed), in
-    the SAME units as the real-data slope so the two compare directly. A fresh
-    oracle is built per level. ``circuit`` (``None`` -> loaded from the YAML
-    config) sets the oracle's ECM structure.
-    """
-    circuit = _resolve_circuit(circuit)
-    protocols = np.array([cache["data"][c].get(protocol_key) or cache["data"][c]["protocol"]
-                          for c in cache["cycles"]], dtype=np.float64)
-    base_protocol = np.median(protocols, axis=0)
-    real_cap_mah = float(cache["real_cell_capacity_mah"])
-    c2_levels_ma = [m * real_cap_mah for m in c2_levels_mult]
-
-    fade_mAh: list[float] = []
-    for c2_ma in c2_levels_ma:
-        oracle = PyBaMMOracle(
-            model=calibration_model,
-            chemistry=chemistry,
-            degradation_preset=preset,
-            capacity_check=capacity_check,
-            real_cell_capacity_mah=real_cap_mah,
-            kinetics_scale=kinetics_scale,
-            sei_rate_scale=sei_rate_scale,
-            dead_li_decay_scale=dead_li_decay_scale,
-            plating_rate_scale=plating_rate_scale,
-            dod_lam_scale=dod_lam_scale,
-            circuit=circuit,
-            # Probes read only SOH, never the ECM fit: the analytic stub avoids
-            # an AutoEIS MCMC fit per probe cycle.
-            ecm_model_fn=_randles_stub_ecm,
-            **_extra_oracle_kwargs(oracle_kwargs),
-        )
-        oracle.reset()
-        proto = base_protocol.copy()
-        proto[1] = c2_ma
-        soh = [1.0]
-        for _ in range(probe_cycles):
-            try:
-                oracle(proto)
-            except OracleFailure as exc:
-                log.warning("  [crate2-slope-probe @ C2=%.0f mA] EOL/solver failure "
-                            "after %d cycle(s): %s", c2_ma, len(soh) - 1, exc)
-                break
-            soh.append(float(oracle._history[-1]["end_soh"]))
-        if len(soh) < 2:
-            fade_mAh.append(float("nan"))
-            continue
-        mean_loss_frac_per_cycle = (soh[0] - soh[-1]) / (len(soh) - 1)
-        fade_mAh.append(mean_loss_frac_per_cycle * real_cap_mah)
-
-    c2_arr = np.asarray(c2_levels_ma)
-    fade_arr = np.asarray(fade_mAh)
-    valid = np.isfinite(fade_arr)
-    slope = None
-    if valid.sum() >= 2 and len(np.unique(c2_arr[valid])) >= 2:
-        slope = float(np.polyfit(c2_arr[valid], fade_arr[valid], 1)[0])
-
-    return {
-        "oracle_slope_mAh_per_mA": slope,
-        "c2_levels_mA":            c2_levels_ma,
-        "fade_mAh":                fade_mAh,
-    }
-
-
-def slope_match_error(oracle_slope: float | None, real_slope: dict) -> float:
-    """Error term for how well *oracle_slope* matches the real bootstrap CI.
-
-    Zero inside [ci_lo, ci_hi]; outside, grows linearly in units of CI
-    half-widths past the nearer edge. inf if the oracle slope is unavailable.
-    """
-    if oracle_slope is None or not np.isfinite(oracle_slope):
-        return float("inf")
-    lo, hi = real_slope["ci_lo"], real_slope["ci_hi"]
-    if not (np.isfinite(lo) and np.isfinite(hi)):
-        return 0.0  # bootstrap CI unavailable -- don't penalize on missing data
-    if lo <= oracle_slope <= hi:
-        return 0.0
-    half_width = max((hi - lo) / 2.0, 1e-12)
-    center = (hi + lo) / 2.0
-    return abs(oracle_slope - center) / half_width - 1.0
-
-
 def score_candidate(
     result: dict, real_targets: dict, preset: str = "accelerated",
     crate_sensitivity_min: float = 3.0,
-    real_crate2_slope: dict | None = None,
     step_weight: float = 0.0,
     fit_fade: bool = False,
 ) -> float:
@@ -875,8 +770,8 @@ def score_candidate(
 
     A term whose real target IS present but whose oracle value is missing scores
     inf (that candidate failed to produce a comparable metric). The legacy
-    C_rate_1 sensitivity term (skipped when the probe wasn't run) and the C_rate_2
-    slope-matching term (see :func:`slope_match_error`) are added in both modes.
+    C_rate_1 sensitivity term (skipped when the probe wasn't run) is added in both
+    modes.
 
     ``fit_fade=True`` also adds the capacity-fade term in EIS/ECM mode (by default
     jones2022 only *reports* it). ``step_weight > 0`` adds ``step_weight`` times
@@ -920,131 +815,12 @@ def score_candidate(
         terms.append(max(0.0, math.log(crate_sensitivity_min / ratio)))
     elif not result.get("crate_probe_skipped", False):
         terms.append(float("inf"))
-    if real_crate2_slope is not None:
-        terms.append(slope_match_error(
-            result.get("oracle_slope_mAh_per_mA"), real_crate2_slope))
     if step_weight > 0:
         step_err = result.get("step_match_error")
         if step_err is not None:
             terms.append(step_weight * step_err)
 
     return sum(terms)
-
-
-# ---------------------------------------------------------------------------
-# EIS non-stationarity drift calibration (oracle-side; real target passed in)
-# ---------------------------------------------------------------------------
-
-def _linkk_lowhigh_ratio(freq, Z, c: float = 0.85, max_M: int = 50) -> float:
-    """linKK low/high-freq residual ratio — the non-stationarity signature.
-
-    A spectrum that drifts during the sweep has KK residuals elevated at low
-    frequency; returns mean|res|(low tercile) / mean|res|(high tercile). The
-    linKK call itself (input sanitizing, NumPy-2.x fix, stdout suppression)
-    lives in ``_eis/kk.py``'s :func:`linkk_residuals`.
-
-    ``c``/``max_M`` default to the same values as ``_eis/kk.py``'s
-    ``linkk_rmse`` (config_oracle_defaults.yml's ``eis.linkk`` section).
-    """
-    out = linkk_residuals(freq, Z, c=c, max_M=max_M)
-    if out is None:
-        return float("nan")
-    f, res_real, res_imag = out
-    res = np.sqrt(res_real ** 2 + res_imag ** 2)
-    q1, q2 = np.quantile(f, 1 / 3), np.quantile(f, 2 / 3)
-    lo, hi = res[f < q1].mean(), res[f > q2].mean()
-    return float(lo / max(hi, 1e-12))
-
-
-def calibrate_drift(
-    *,
-    real_lowhigh: float,
-    kinetics_scale: float,
-    sei_rate_scale: float,
-    dead_li_decay_scale: float,
-    plating_rate_scale: float,
-    preset: str,
-    capacity_check: bool,
-    real_cap_mah: float,
-    rest_s: float = 1200.0,
-    tau_relax_s: float = 600.0,
-    n_periods: float = 4.0,
-    probe_cycles: int = 3,
-    scale_grid: list[float] | None = None,
-    chemistry: str = "Chen2020",
-) -> dict[str, Any]:
-    """Fit ``eis_drift_scale`` to match a real cell's linKK low/high-freq ratio.
-
-    The real target ratio *real_lowhigh* is supplied by the caller (compute it
-    from real reference spectra with :func:`_linkk_lowhigh_ratio`), keeping this
-    routine dataset-free. For each candidate ``drift_scale`` a fresh oracle is
-    built at ``rest_s`` and the same ratio measured on its spectra; the closest
-    match is returned, along with the ratio at a very long rest (rest-response).
-
-    KNOWN LIMITATION (default OFF). Only the ``v0(t)`` drift-leakage part of
-    Hallemans et al. 2023 Eq (43) is modelled and integer-period single-sine
-    extraction rejects slow drift, so the oracle ratio barely moves with
-    ``drift_scale`` and normally cannot reach the real target; this typically
-    returns drift_scale≈0. Retained for provenance.
-    """
-    if scale_grid is None:
-        scale_grid = [0.0, 0.02, 0.05, 0.1, 0.2, 0.4]
-
-    def _oracle_ratio(drift_scale: float, rest: float) -> float:
-        oracle = PyBaMMOracle(
-            model=CALIBRATION_MODEL,
-            chemistry=chemistry,
-            degradation_preset=preset,
-            capacity_check=capacity_check,
-            real_cell_capacity_mah=real_cap_mah,
-            kinetics_scale=kinetics_scale,
-            sei_rate_scale=sei_rate_scale,
-            dead_li_decay_scale=dead_li_decay_scale,
-            plating_rate_scale=plating_rate_scale,
-            rest_s=rest,
-            eis_drift_scale=drift_scale,
-            eis_drift_tau_s=tau_relax_s,
-            eis_drift_n_periods=n_periods,
-        )
-        oracle.reset()
-        proto = np.array([real_cap_mah, 0.75 * real_cap_mah, 0.16, 0.08, real_cap_mah, 0.38])
-        ratios = []
-        for _ in range(probe_cycles):
-            try:
-                oracle(proto)
-            except OracleFailure:
-                break
-            r = _linkk_lowhigh_ratio(oracle.frequencies, oracle._last_Z)
-            if np.isfinite(r):
-                ratios.append(r)
-        return float(np.median(ratios)) if ratios else float("nan")
-
-    grid = []
-    for s in scale_grid:
-        ratio = _oracle_ratio(s, rest_s)
-        grid.append({"drift_scale": s, "oracle_lowhigh": ratio})
-        log.info("  [drift-cal] drift_scale=%.3g -> oracle low/high linKK=%.2f (real target %.2f)",
-                 s, ratio, real_lowhigh)
-
-    finite = [g for g in grid if np.isfinite(g["oracle_lowhigh"])]
-    if finite and np.isfinite(real_lowhigh):
-        best = min(finite, key=lambda g: abs(g["oracle_lowhigh"] - real_lowhigh))
-    else:
-        best = {"drift_scale": 0.0, "oracle_lowhigh": grid[0]["oracle_lowhigh"]}
-        log.warning("  [drift-cal] no finite match (real=%.3g); leaving drift disabled", real_lowhigh)
-
-    wellrested = (_oracle_ratio(best["drift_scale"], 1e6)
-                  if best["drift_scale"] > 0.0 else best["oracle_lowhigh"])
-
-    return {
-        "drift_scale": best["drift_scale"],
-        "drift_tau_s": tau_relax_s,
-        "drift_n_periods": n_periods,
-        "real_lowhigh": real_lowhigh,
-        "oracle_lowhigh": best["oracle_lowhigh"],
-        "oracle_lowhigh_wellrested": wellrested,
-        "grid": grid,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1143,15 +919,9 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
             chemistry=cfg["chemistry"], dod_lam_scale=dl,
             oracle_kwargs=okw, protocol_key=pkey, calibration_model=cm))
         result["crate_probe_skipped"] = False
-    if not cfg["skip_crate2_slope"]:
-        result.update(run_crate2_slope_probe(
-            cache, ks, srs, dds, prs, cfg["preset"], cfg["capacity_check"],
-            probe_cycles=cfg["crate2_probe_cycles"], c2_levels_mult=tuple(cfg["crate2_levels"]),
-            circuit=cfg["circuit"], chemistry=cfg["chemistry"], dod_lam_scale=dl,
-            oracle_kwargs=okw, protocol_key=pkey, calibration_model=cm))
     result["runtime_s"] = round(time.time() - t0, 1)
     score = score_candidate(result, cfg["real_targets"], cfg["preset"],
-                            cfg["crate_sensitivity_min"], cfg["real_crate2_slope"],
+                            cfg["crate_sensitivity_min"],
                             step_weight=cfg.get("step_weight", 0.0),
                             fit_fade=cfg.get("fit_fade", False))
     result["score"] = score if math.isfinite(score) else None
@@ -1271,7 +1041,7 @@ def _calibrate_oracle_parallel(cache, real_targets, *, n_trials, n_jobs, sampler
             "failed or was pruned). Re-run with n_jobs=1 to see per-trial logs.")
     scored = sorted(
         [(r, score_candidate(r, real_targets, cfg["preset"],
-                             cfg["crate_sensitivity_min"], cfg["real_crate2_slope"],
+                             cfg["crate_sensitivity_min"],
                              step_weight=cfg["step_weight"], fit_fade=cfg["fit_fade"]))
          for r in results],
         key=lambda x: x[1])
@@ -1300,11 +1070,7 @@ def calibrate_oracle(
     crate_probe_cycles: int = 4,
     crate_probe_low_c: float = 1.0,
     crate_probe_high_c: float = 8.0,
-    skip_crate2_slope: bool = False,
-    crate2_probe_cycles: int = 5,
-    crate2_levels: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
     crate_sensitivity_min: float = 3.0,
-    real_crate2_slope: dict | None = None,
     warm_start_ks: list[float] | None = None,
     warm_start_srs: list[float] | None = None,
     circuit: str | None = None,
@@ -1330,8 +1096,7 @@ def calibrate_oracle(
     durations instead of the observed ones; ``fit_fade`` adds the capacity-fade
     term in EIS mode.
 
-    Pure engine: operates on *cache* + precomputed *real_targets* (and optional
-    *real_crate2_slope*); no dataset access. Returns a dict with ``best``,
+    Pure engine: operates on *cache* + precomputed *real_targets*; no dataset access. Returns a dict with ``best``,
     ``best_score``, ``results`` (all trials) and ``scored`` (ranked).
 
     ``circuit`` is the ECM structure the candidate oracles fit and the metrics
@@ -1363,9 +1128,7 @@ def calibrate_oracle(
         "capacity_check": capacity_check,
         "skip_crate_probe": skip_crate_probe, "crate_probe_cycles": crate_probe_cycles,
         "crate_probe_low_c": crate_probe_low_c, "crate_probe_high_c": crate_probe_high_c,
-        "skip_crate2_slope": skip_crate2_slope, "crate2_probe_cycles": crate2_probe_cycles,
-        "crate2_levels": tuple(crate2_levels), "crate_sensitivity_min": crate_sensitivity_min,
-        "real_crate2_slope": real_crate2_slope, "real_targets": real_targets,
+        "crate_sensitivity_min": crate_sensitivity_min, "real_targets": real_targets,
         "oracle_kwargs": dict(oracle_kwargs or {}), "protocol_key": protocol_key,
         "real_step_summary": real_step_summary, "extra_caches": list(extra_caches or []),
         "step_weight": float(step_weight), "fit_fade": bool(fit_fade),
@@ -1395,10 +1158,9 @@ def calibrate_oracle(
         result["trial_number"] = trial.number
         results.append(result)
         ratio = result.get("crate_sensitivity_ratio")
-        oracle_slope = result.get("oracle_slope_mAh_per_mA")
         log.info(
             "  arc_ratio=%s (real=%s)  r1_growth=%s (real=%s)  eol_cycle~%s (target=%s)  "
-            "fade/cyc=%s (real=%s)  crate_ratio=%s (min=%.1f)  c2_slope=%s (real_CI=%s)  "
+            "fade/cyc=%s (real=%s)  crate_ratio=%s (min=%.1f)  "
             "step_err=%s  score=%.3f  %.0fs",
             f"{result['oracle_arc_ratio']:.2f}" if result["oracle_arc_ratio"] is not None else "n/a",
             f"{real_targets['mean_arc_ratio']:.2f}" if real_targets["mean_arc_ratio"] else "?",
@@ -1410,8 +1172,6 @@ def calibrate_oracle(
             f"{real_targets['soh_fade_per_cycle']:.4g}" if real_targets.get("soh_fade_per_cycle") else "?",
             f"{ratio:.2f}" if ratio is not None else "n/a",
             crate_sensitivity_min,
-            f"{oracle_slope:.5f}" if oracle_slope is not None else "n/a",
-            f"[{real_crate2_slope['ci_lo']:.5f}, {real_crate2_slope['ci_hi']:.5f}]" if real_crate2_slope else "n/a",
             f"{result['step_match_error']:.3f}" if result.get("step_match_error") is not None else "n/a",
             score if math.isfinite(score) else float("nan"),
             result["runtime_s"],
@@ -1441,7 +1201,7 @@ def calibrate_oracle(
                    show_progress_bar=show_progress_bar)
 
     scored = sorted(
-        [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min, real_crate2_slope,
+        [(r, score_candidate(r, real_targets, preset, crate_sensitivity_min,
                              step_weight=cfg["step_weight"], fit_fade=cfg["fit_fade"]))
          for r in results],
         key=lambda x: x[1],
@@ -1460,7 +1220,6 @@ def print_summary(
     cell_id: str,
     sampler: str,
     crate_sensitivity_min: float,
-    real_crate2_slope: dict | None,
 ) -> None:
     """Print the ranked top-15 calibration trials (shared by both CLIs)."""
     arc_real_str = f"{real_targets['mean_arc_ratio']:.2f}" if real_targets["mean_arc_ratio"] else "n/a"
@@ -1472,7 +1231,7 @@ def print_summary(
     print(f"  Real targets:  arc_ratio={arc_real_str}   r1_growth={r1_real_str}   eol_cycle~{eol_target_str}")
     print(f"{'='*75}")
     header = (f"{'ks':>8}  {'srs':>8}  {'dds':>8}  {'prs':>8}  {'dl':>8}  {'arc_ratio':>10}  "
-               f"{'r1_growth%':>11}  {'eol_cyc':>8}  {'crate_x':>8}  {'c2_slope':>10}  "
+               f"{'r1_growth%':>11}  {'eol_cyc':>8}  {'crate_x':>8}  "
                f"{'score':>8}  {'eol?':>5}")
     print(header)
     print("-" * len(header))
@@ -1482,7 +1241,6 @@ def print_summary(
         marker = " <<" if r is best_row else ""
         eol_cyc = r.get("implied_eol_cycle")
         crate_x = r.get("crate_sensitivity_ratio")
-        c2_slope = r.get("oracle_slope_mAh_per_mA")
         print(
             f"{r['kinetics_scale']:>8.4f}  {r['sei_rate_scale']:>8.4f}  {r['dead_li_decay_scale']:>8.2f}"
             f"  {r.get('plating_rate_scale', 1.0):>8.4f}"
@@ -1491,7 +1249,6 @@ def print_summary(
             f"  {r['oracle_r1_growth_pct'] or float('nan'):>10.1f}%"
             f"  {eol_cyc if eol_cyc is not None else float('nan'):>8.0f}"
             f"  {crate_x if crate_x is not None else float('nan'):>8.2f}"
-            f"  {c2_slope if c2_slope is not None else float('nan'):>10.5f}"
             f"  {sc:>8.3f}  {eol:>5}{marker}"
         )
     if len(scored) > 15:
@@ -1513,8 +1270,6 @@ def write_oracle_config(
     real_targets: dict,
     all_results: list[dict],
     crate_sensitivity_min: float = 3.0,
-    real_crate2_slope: dict | None = None,
-    drift_result: dict | None = None,
     chemistry: str = "Chen2020",
     oracle_kwargs: dict | None = None,
     real_step_summary: dict | None = None,
@@ -1595,25 +1350,11 @@ def write_oracle_config(
     else:
         crate_status = f"FAILED — ratio below required minimum {crate_sensitivity_min:.2g}"
 
-    c2_slope        = best.get("oracle_slope_mAh_per_mA")
-    c2_slope_skipped = real_crate2_slope is None
-    if c2_slope_skipped:
-        c2_slope_status = "skipped (--skip-crate2-slope; NOT validated against real C_rate_2 data)"
-    elif c2_slope is not None and real_crate2_slope["ci_lo"] <= c2_slope <= real_crate2_slope["ci_hi"]:
-        c2_slope_status = "validated (within real multi-cell 95% bootstrap CI)"
-    else:
-        c2_slope_status = "FAILED — outside real multi-cell 95% bootstrap CI"
-
     def fmt(v):
         return f"{v:.2f}" if v is not None else "n/a"
 
     def fmt_fade(v):
         return f"{v:.4g}" if v is not None else "n/a"
-
-    _dr = drift_result or {}
-    _drift_scale = _dr.get("drift_scale", 0.0)
-    _drift_tau = _dr.get("drift_tau_s", 600.0)
-    _drift_np = _dr.get("drift_n_periods", 4.0)
 
     lines = [
         f"# {dataset} oracle calibration (preset: {preset}).",
@@ -1654,12 +1395,6 @@ def write_oracle_config(
         f"  noise_model: {_od_eis.get('noise_model', 'combined')}",
         *([f"  mode: {okw['eis_mode']}   # measured as performed (sweep after the rest); see oracle._nonstationary_spectrum"]
           if okw.get("eis_mode") else []),
-        "  # Non-stationarity drift (EIS measured while the OCP still relaxes); coupled to",
-        "  # cycling.rest_s. Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126)",
-        "  # Eqs (40)/(43). 0.0 disables. See _calibration.drift below.",
-        f"  drift_scale: {_drift_scale:.4g}",
-        f"  drift_tau_s: {_drift_tau:.4g}",
-        f"  drift_n_periods: {_drift_np:.4g}",
         "",
         "degradation:",
         f"  preset: {preset}",
@@ -1750,18 +1485,6 @@ def write_oracle_config(
         '           means this run used --skip-crate-probe-legacy and the config has NOT been',
         '           checked for this."',
         "",
-        "  crate2_slope:",
-        f'    status: "{c2_slope_status}"',
-        '    target_metric: "d(capacity_fade_mAh)/d(C_rate_2_mA), oracle vs real multi-cell slope"',
-        f'    real_slope_mAh_per_mA: "{fmt(real_crate2_slope["slope_mAh_per_mA"]) if real_crate2_slope else "n/a"}"',
-        f'    real_95pct_ci: "[{fmt(real_crate2_slope["ci_lo"]) if real_crate2_slope else "n/a"}, '
-        f'{fmt(real_crate2_slope["ci_hi"]) if real_crate2_slope else "n/a"}]"',
-        f'    real_n_cells: {real_crate2_slope["n_cells"] if real_crate2_slope else "n/a"}',
-        f'    achieved_slope_mAh_per_mA: "{fmt(c2_slope)}"',
-        '    note: "Primary, real-data-calibrated replacement for the engineering-guessed',
-        '           crate_sensitivity term above. Requires the oracle.py _C2_MAX_mA clip',
-        '           fix (0.5C -> 2C)."',
-        "",
         "  step_shape:",
         f'    status: "{step_status}"',
         '    target_metric: "per-C-rate-bin median/p90 step throughput (fraction of capacity) + rest-voltage window, real GCPL vs oracle"',
@@ -1770,23 +1493,6 @@ def write_oracle_config(
         f'    real_rest_v_p5_p95: "{_fmt_rest(real_step_summary)}"',
         f'    oracle_rest_v_p5_p95: "{_fmt_rest(best.get("oracle_step_summary"))}"',
         '    note: "0 = identical step-throughput distributions; see battery_oracle.tune.step_match_error."',
-        "",
-        "  drift:",
-        f'    status: "{"calibrated" if _drift_scale > 0 else "disabled (drift_scale=0)"}"',
-        '    target_metric: "linKK low/high-freq residual ratio (non-stationarity signature)"',
-        f'    real_target_ratio: "{fmt(_dr.get("real_lowhigh"))}"',
-        f'    achieved_ratio: "{fmt(_dr.get("oracle_lowhigh"))}"',
-        f'    ratio_when_well_rested: "{fmt(_dr.get("oracle_lowhigh_wellrested"))}"',
-        f'    tau_relax_s: {_drift_tau:.4g}',
-        f'    n_periods: {_drift_np:.4g}',
-        '    basis: >',
-        '      EIS measured while the OCP still relaxes -> a time-varying impedance whose',
-        '      drift v0(t) leaks into the low-frequency, KK-violating residual. Model:',
-        '      Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126) Eqs (40)/(43).',
-        '    limitation: >',
-        '      PARKED default-OFF. Only the v0(t) drift-leakage part of Eq (43) is',
-        '      implemented; integer-period single-sine extraction rejects slow drift, so',
-        '      the oracle ratio cannot reach the real target at any scale/tau.',
         "",
         '  method: "Optuna TPE/GP Bayesian optimisation over (ks, srs, dds, prs) 4D log-space"',
         f'  n_trials: {len(all_results)}',
@@ -1842,10 +1548,8 @@ def write_calibration_summary(
     n_cycles: int,
     crate_sensitivity_min: float,
     real_targets: dict,
-    real_crate2_slope: dict | None,
     best: dict,
     best_score: float,
-    drift_result: dict | None = None,
 ) -> Path:
     """Write the machine-readable calibration summary JSON sidecar.
 
@@ -1865,10 +1569,8 @@ def write_calibration_summary(
         "crate_sensitivity_min": crate_sensitivity_min,
         "eol_target_cycles": _eol_target_cycles(preset),
         "real_targets": real_targets,
-        "real_crate2_slope": real_crate2_slope,
         "best": best,
         "best_score": best_score,
-        "drift_result": drift_result,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -1894,9 +1596,6 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--targets", type=Path, default=None,
                    help="Optional real-targets JSON {mean_arc_ratio, r1_growth_pct}. "
                         "Computed from the cache when omitted.")
-    p.add_argument("--crate2-slope", type=Path, default=None,
-                   help="Optional real C_rate_2 slope JSON "
-                        "{slope_mAh_per_mA, ci_lo, ci_hi, n_cells, n_pairs}.")
     p.add_argument("--dataset", default="custom", help="Label written into the config provenance.")
     p.add_argument("--chemistry", default="Chen2020",
                    choices=["Chen2020", "Xu2019", "Prada2013"],
@@ -1924,7 +1623,6 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--prs-min", type=float, default=0.01)
     p.add_argument("--prs-max", type=float, default=10.0)
     p.add_argument("--no-capacity-check", action="store_true", default=False)
-    p.add_argument("--skip-crate2-slope", action="store_true", default=False)
     p.add_argument("--crate-sensitivity-min", type=float, default=3.0)
     p.add_argument("--plots-dir", type=Path, default=None,
                    help="Directory for auto-generated calibration plots (default: "
@@ -1950,11 +1648,6 @@ def main(argv=None) -> None:
     else:
         real_targets = compute_real_targets(cache)
 
-    real_crate2_slope = None
-    if not args.skip_crate2_slope and args.crate2_slope is not None:
-        with open(args.crate2_slope) as f:
-            real_crate2_slope = json.load(f)
-
     out = calibrate_oracle(
         cache, real_targets,
         preset=args.preset,
@@ -1965,22 +1658,18 @@ def main(argv=None) -> None:
         n_trials=args.n_trials, n_jobs=args.n_jobs,
         sampler=args.sampler, seed=args.seed,
         capacity_check=not args.no_capacity_check,
-        skip_crate2_slope=(args.skip_crate2_slope or real_crate2_slope is None),
         crate_sensitivity_min=args.crate_sensitivity_min,
-        real_crate2_slope=real_crate2_slope,
         chemistry=args.chemistry,
     )
     print_summary(
         out["scored"], out["best"], real_targets,
         dataset=args.dataset, preset=args.preset, cell_id=cell_id,
         sampler=args.sampler, crate_sensitivity_min=args.crate_sensitivity_min,
-        real_crate2_slope=real_crate2_slope,
     )
     write_oracle_config(
         args.output_config, args.dataset, args.preset, cell_id,
         len(cache["cycles"]), out["best"], real_targets, out["results"],
         crate_sensitivity_min=args.crate_sensitivity_min,
-        real_crate2_slope=real_crate2_slope,
         chemistry=args.chemistry,
     )
     print(f"Config written to: {args.output_config}")
@@ -1990,7 +1679,7 @@ def main(argv=None) -> None:
             dataset=args.dataset, preset=args.preset, cell_id=cell_id,
             n_trials=len(out["results"]), n_cycles=len(cache["cycles"]),
             crate_sensitivity_min=args.crate_sensitivity_min,
-            real_targets=real_targets, real_crate2_slope=real_crate2_slope,
+            real_targets=real_targets,
             best=out["best"], best_score=out["best_score"],
         )
         print(f"Calibration summary written to: {args.summary_json}")

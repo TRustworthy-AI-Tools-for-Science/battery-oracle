@@ -47,9 +47,6 @@ from battery_oracle._eis.kk import linkk_rmse as _linkk_rmse
 from battery_oracle._eis.noise import (
     add_flicker_noise as _add_flicker_noise,
 )
-from battery_oracle._eis.noise import (
-    add_relaxation_drift as _add_relaxation_drift,
-)
 
 # DRT (get_drt_impedance) needs hybrid-drt (the optional [drt] extra); it is
 # imported lazily inside build_record's try/except so DRT peaks are simply
@@ -1065,7 +1062,7 @@ class PyBaMMOracle:
         0.02). See ``eis_noise_model`` for the noise mixture.
     seed : int, optional
         Seeds the synthetic EIS noise generator (``_eis/noise.py``'s white/
-        flicker/relaxation-drift terms). When the default ``ecm_model_fn``
+        flicker terms). When the default ``ecm_model_fn``
         (:func:`_autoeis_ecm`) is used, each fit also draws a fresh int seed
         from this same RNG stream and forwards it to AutoEIS's
         ``perform_bayesian_inference(..., seed=...)``, so a fixed ``seed``
@@ -1137,9 +1134,6 @@ class PyBaMMOracle:
         E_a_electrolyte_J_per_mol: float = 15e3,
         eis_noise_level: float = 0.02,
         eis_noise_model: str = "combined",
-        eis_drift_scale: float = 0.0,
-        eis_drift_tau_s: float = 600.0,
-        eis_drift_n_periods: float = 4.0,
         # -- EIS measurement model: "equilibrium" (stock, linearised at a relaxed
         #    state) | "nonstationary" (the cycling model itself linearised at the
         #    simulated states inside the sweep that follows each 20 min rest; see
@@ -1156,9 +1150,6 @@ class PyBaMMOracle:
         sei_rate_scale: float = 1.0,
         dead_li_decay_scale: float = 1.0,
         plating_rate_scale: float = 1.0,
-        c2_stress_scale: float = 0.0,
-        c2_stress_slope_mah_per_ma: float = 0.0794,
-        c2_stress_ref_ma: float = 75.27,
         dod_lam_scale: float = 0.0,
         # -- Beginning-of-life (BOL) fit (config_oracle_defaults.yml: bol.*) --
         # Multipliers / absolute values applied to the PyBaMM parameter set after
@@ -1284,41 +1275,6 @@ class PyBaMMOracle:
         # once the parameter values are resolved below; see _protocol_to_experiment.
         self._real_cell_capacity_mah = float(real_cell_capacity_mah)
 
-        # C_rate_2 stress term: an explicit, additive capacity-loss increment,
-        # separate from the physics-based SEI/plating pathways. DISABLED BY
-        # DEFAULT (c2_stress_scale=0.0) -- see below.
-        #
-        # The original motivation: a 4D BO search over (kinetics_scale,
-        # sei_rate_scale, dead_li_decay_scale, plating_rate_scale) never got
-        # the oracle's own d(fade)/d(C_rate_2) within 100x of a real-data
-        # slope (0.0794 mAh/mA) fit by OLS on jones2022 variable-discharge
-        # cells. That OLS slope was then found to be an artifact: the
-        # per-cycle real capacity-fade values it was fit on have mean 0.097
-        # mAh but std 11.0 mAh (swings to +-30 mAh on a ~42 mAh cell --
-        # physically impossible as true fade, consistent with the dataset's
-        # own "computed capacity does not match integral of C-rate" loader
-        # warnings). Re-fit with Theil-Sen and with outlier filtering at every
-        # threshold from 0.5-5 mAh of single-cycle fade (the physically
-        # plausible range for this cell size), the slope is small and not
-        # significant (p in [0.45, 0.77], CI spans zero). Only including the
-        # implausible >10 mAh swings recovers a "significant" slope -- i.e.
-        # the original C_rate_2 finding (project_crate_real_data_finding
-        # memory) was driven by measurement noise, not a real relationship.
-        #
-        # The mechanism below is kept (it is correctly implemented: additive,
-        # zero at c2_stress_ref_ma so it doesn't perturb PJ121's own
-        # sei_rate_scale/arc_ratio calibration, floored at the cumulative
-        # level so it cannot net-heal the battery) in case a future, properly
-        # validated C-rate-dependent target is found -- e.g. from nasa/ngen,
-        # or from jones2022 data cleaned of the capacity-computation artifact
-        # rather than just outlier-filtered. c2_stress_scale=0.0 means this
-        # term contributes nothing; set to 1.0 to use c2_stress_slope_mah_per_ma
-        # as-is once such a target exists.
-        self._c2_stress_scale = float(c2_stress_scale)
-        self._c2_stress_slope_mah_per_ma = float(c2_stress_slope_mah_per_ma)
-        self._c2_stress_ref_ma = float(c2_stress_ref_ma)
-        self._cumulative_c2_stress_ah = 0.0
-
         # Depth-of-discharge / charge-induced-stress LAM term: an explicit,
         # additive capacity-loss pathway that makes degradation respond to DoD
         # and the (charge-rate x DoD) coupling, the lever the dynamic-cycling
@@ -1354,8 +1310,7 @@ class PyBaMMOracle:
         # PyBaMM 26.6.2.0 OCP regression forces off (see _build_degradation_config).
         # dod_lam_scale must be calibrated
         # to a literature magnitude or a deep-DoD dataset BEFORE enabling --
-        # jones2022's shallow range cannot fix it, and fitting to its noisy
-        # slope would repeat the c2_stress mistake. 0.0 = contributes nothing.
+        # jones2022's shallow range cannot fix it. 0.0 = contributes nothing.
         self._dod_lam_scale = float(dod_lam_scale)
         self._cumulative_dod_lam_frac = 0.0   # dimensionless cumulative loss fraction
         self._cumulative_dod_lam_ah = 0.0     # = frac * nominal_cap (eol_loss budget)
@@ -1381,9 +1336,6 @@ class PyBaMMOracle:
             self._pv["Ambient temperature [K]"] = self._temperature_K
         self._eis_noise_level = float(eis_noise_level)
         self._eis_noise_model = eis_noise_model
-        self._eis_drift_scale = float(eis_drift_scale)
-        self._eis_drift_tau_s = float(eis_drift_tau_s)
-        self._eis_drift_n_periods = float(eis_drift_n_periods)
         if eis_mode not in ("equilibrium", "nonstationary"):
             raise ValueError(f"Unknown eis_mode {eis_mode!r}; choose 'equilibrium' or 'nonstationary'.")
         self._eis_mode = str(eis_mode)
@@ -1816,7 +1768,6 @@ class PyBaMMOracle:
         self._last_Z  = None
         self._initial_capacity_ah = None
         self._initial_lli_ah = None
-        self._cumulative_c2_stress_ah = 0.0
         self._cumulative_dod_lam_frac = 0.0
         self._cumulative_dod_lam_ah = 0.0
         self._cumulative_dod_throughput_ah = 0.0
@@ -2531,16 +2482,6 @@ class PyBaMMOracle:
             if delta_R_ohmic > 0.0:
                 Z = (Z.real + delta_R_ohmic) + 1j * Z.imag
             Z = self._add_eis_noise(Z)
-            # Non-stationarity drift: EIS measured while the OCP still relaxes
-            # (Hallemans et al. 2023, Eqs 40/43). Coupled to self._rest_s, so it
-            # vanishes for well-rested cells; disabled at scale 0.0.
-            if self._eis_drift_scale > 0.0:
-                Z = _add_relaxation_drift(
-                    self.frequencies, Z, self._rest_s, self._eis_drift_scale,
-                    tau_relax_s=self._eis_drift_tau_s,
-                    n_periods=self._eis_drift_n_periods,
-                    rng=self._rng,
-                )
             return Z
 
         _steps = last_cycle.steps if last_cycle is not None else None
@@ -2629,29 +2570,6 @@ class PyBaMMOracle:
         # Conservative upper bound: full lam_frac × Q_nominal (graphite-limited cell).
         lam_cap_loss = lam_frac * nominal_cap
 
-        # C_rate_2 stress term (see __init__ docstring comment): an explicit,
-        # real-data-calibrated capacity-loss increment, additive to and
-        # independent of the SEI/plating pathways above. Computed in the REAL
-        # cell's own mAh/SOH-fraction terms, then mapped onto the oracle's
-        # internal nominal_cap so it represents the same fractional SOH loss
-        # regardless of which reference-cell scale the simulation runs at.
-        #
-        # The per-cycle increment is signed (negative when C_rate_2 is below
-        # the reference, matching the real regression line's slope on both
-        # sides) -- clamping it to >= 0 would silently zero out the entire
-        # term for any C_rate_2 below the reference, which is half of the
-        # real jones2022 variable-discharge range. Only the CUMULATIVE total
-        # is floored at 0, so this pathway's contribution can shrink back
-        # toward (but never below) "no added stress" -- it cannot make the
-        # battery net-heal relative to its formation-cycle baseline.
-        c2_mA_raw = float(np.asarray(protocol)[1])
-        c2_stress_fraction_this_cycle = (self._c2_stress_scale
-            * self._c2_stress_slope_mah_per_ma * (c2_mA_raw - self._c2_stress_ref_ma)
-            / self._real_cell_capacity_mah)
-        self._cumulative_c2_stress_ah = max(
-            0.0, self._cumulative_c2_stress_ah + c2_stress_fraction_this_cycle * nominal_cap
-        )
-
         # DoD / charge-induced-stress LAM term: the per-cycle increment and its
         # cumulative loss FRACTION are computed earlier (before the EIS step, so
         # it also reduces ε_s and grows R3+R5). Here we just map that dimensionless
@@ -2660,10 +2578,7 @@ class PyBaMMOracle:
         # the running total only grows -> irreversible active-material loss.
         self._cumulative_dod_lam_ah = self._cumulative_dod_lam_frac * nominal_cap
 
-        eol_loss = (
-            delta_lli + lam_cap_loss
-            + self._cumulative_c2_stress_ah + self._cumulative_dod_lam_ah
-        )
+        eol_loss = delta_lli + lam_cap_loss + self._cumulative_dod_lam_ah
         soh = 1.0 - eol_loss / nominal_cap
 
         if soh < self.eol_capacity_fraction:
@@ -2671,7 +2586,6 @@ class PyBaMMOracle:
                 f"Battery reached end-of-life: SOH {soh:.1%} < "
                 f"{self.eol_capacity_fraction:.0%} threshold "
                 f"(LLI {delta_lli:.3f} Ah + LAM {lam_cap_loss:.3f} Ah "
-                f"+ C2-stress {self._cumulative_c2_stress_ah:.3f} Ah "
                 f"+ DoD-LAM {self._cumulative_dod_lam_ah:.3f} Ah "
                 f"= {eol_loss:.3f} Ah = {eol_loss / nominal_cap:.1%} of nominal)",
                 protocol=np.asarray(protocol).copy(),
@@ -2710,7 +2624,6 @@ class PyBaMMOracle:
             "cumulative_plating_ah":    _try_get("Loss of capacity to negative lithium plating [A.h]"),
             "cumulative_lli_total_ah":  cumulative_sei_loss,
             "delta_lli_ah":             delta_lli,
-            "cumulative_c2_stress_ah":  self._cumulative_c2_stress_ah,
             "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
             "cumulative_dod_throughput_ah": self._cumulative_dod_throughput_ah,
             # Per-step throughput / duration / end voltage (see _step_stats) --
@@ -3126,16 +3039,11 @@ class PyBaMMOracle:
                 plating_ah  = _arr("cumulative_plating_ah")
                 lam_ah      = _arr("lam_cap_loss_ah")
                 dod_lam_ah  = _arr("cumulative_dod_lam_ah")
-                c2_stress_ah = _arr("cumulative_c2_stress_ah")
 
                 # Only show mechanisms that are active in this oracle's degradation
                 # config — e.g. SEI on cracks is absent for nominal/accelerated presets.
-                # dod_lam/c2_stress are oracle-level additive stress terms (not PyBaMM
-                # model_options), gated on their own scale being nonzero instead of
-                # _deg_opts membership — both feed eol_loss/SOH directly (see __call__)
-                # so omitting them here previously made the stack under-represent total
-                # degradation whenever either was calibrated on (e.g. jones2022's
-                # variable-discharge c2_stress_scale).
+                # DoD LAM is an oracle-level additive term (not a PyBaMM model option),
+                # gated on its own scale; it feeds eol_loss/SOH directly (see __call__).
                 _deg = self._deg_opts
                 _all = [
                     (sei_ah,       "SEI",           True),
@@ -3143,7 +3051,6 @@ class PyBaMMOracle:
                     (plating_ah,   "Li plating",    "lithium plating" in _deg),
                     (lam_ah,       "LAM",           "particle mechanics" in _deg),
                     (dod_lam_ah,   "DoD LAM",       self._dod_lam_scale != 0.0),
-                    (c2_stress_ah, "C-rate2 stress", self._c2_stress_scale != 0.0),
                 ]
                 active_arrs   = [a for a, _, flag in _all if flag]
                 active_labels = [l for _, l, flag in _all if flag]

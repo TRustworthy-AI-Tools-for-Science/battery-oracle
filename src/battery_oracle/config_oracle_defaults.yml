@@ -95,7 +95,7 @@ eis:
   E_a_electrolyte_J_per_mol: 15000.0  # electrolyte/ohmic intercept activation energy
   noise_level: 0.02                # fractional amplitude; mimics ~2% potentiostat noise typical of lab EIS
   noise_model: combined            # white | flicker | combined | none
-  # Seeds the synthetic EIS noise generator (white/flicker/relaxation-drift
+  # Seeds the synthetic EIS noise generator (white/flicker
   # terms) and, when the default AutoEIS ecm fitter is used, its MCMC sampler
   # too -- see PyBaMMOracle(seed=...). null (default) leaves both unseeded.
   seed: null
@@ -106,14 +106,8 @@ eis:
   # particle-concentration singularities at the extremes).
   soc_clip_min: 0.05
   soc_clip_max: 0.99
-  # Non-stationarity drift (EIS measured while the OCP still relaxes); coupled
-  # to cycling.rest_s. Hallemans, Howey, Widanage et al. 2023 (arXiv:2304.08126)
-  # Eqs (40)/(43). 0.0 disables (default -- see oracle.py's known-limitation note).
-  drift_scale: 0.0
-  drift_tau_s: 600.0
-  drift_n_periods: 4.0
   # Kramers-Kronig linKK validation (impedance.py), used both for the oracle's
-  # per-cycle linkk_rmse diagnostic and the tune engine's drift calibration.
+  # per-cycle linkk_rmse diagnostic.
   linkk:
     c: 0.85
     max_M: 50
@@ -170,15 +164,6 @@ degradation:
   ec_diffusivity_base_factor: 0.25 # Chen2020 EC diffusivity x this, before protocol_scaling.sei_rate_scale is also applied
 
   lam_ceiling: 0.95        # max allowed loss-of-active-material fraction fed into the EIS linearisation
-
-  # DISABLED BY DEFAULT (scale=0.0). Explicit, additive C_rate_2 capacity-loss
-  # term, kept for provenance -- see oracle.py's c2_stress docstring for why it
-  # is off (the fitted real-data slope was found to be a measurement-noise
-  # artifact, not a validated relationship).
-  c2_stress:
-    scale: 0.0
-    slope_mah_per_ma: 0.0794
-    ref_ma: 75.27
 
   # DISABLED BY DEFAULT (0.0). Explicit, additive depth-of-discharge /
   # charge-induced-stress LAM term -- see oracle.py's dod_lam_scale docstring.

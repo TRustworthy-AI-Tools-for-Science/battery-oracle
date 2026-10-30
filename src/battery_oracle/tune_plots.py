@@ -173,16 +173,14 @@ def plot_alignment_summary(summary: dict, save_path=None):
     """Real vs achieved comparison for each calibration target metric.
 
     One panel per metric the winning candidate was scored against: EIS arc
-    ratio, R1 growth rate, implied EOL cycle, and (if the slope probe ran)
-    the C_rate_2 fade-slope, with the real multi-cell 95% bootstrap CI shown
-    as an error bar. Panels are omitted (not left blank) when a metric wasn't
-    computed for this run (e.g. --skip-crate2-slope).
+    ratio, R1 growth rate and implied EOL cycle. Panels are omitted (not left
+    blank) when a metric wasn't computed for this run.
 
     Parameters
     ----------
     summary : dict
         calibration_summary.json's content (real_targets, best,
-        real_crate2_slope, eol_target_cycles).
+        eol_target_cycles).
     save_path : str or None
 
     Returns
@@ -191,7 +189,6 @@ def plot_alignment_summary(summary: dict, save_path=None):
     """
     real_targets = summary.get("real_targets", {}) or {}
     best = summary.get("best", {}) or {}
-    real_c2 = summary.get("real_crate2_slope")
     eol_target = summary.get("eol_target_cycles")
 
     panels = []  # (title, real, achieved, ci_lo, ci_hi)
@@ -204,11 +201,6 @@ def plot_alignment_summary(summary: dict, save_path=None):
     eol_ach = best.get("implied_eol_cycle")
     if eol_target is not None and eol_ach is not None:
         panels.append(("Implied EOL (cycles)", eol_target, eol_ach, None, None))
-    if real_c2 is not None:
-        c2_ach = best.get("oracle_slope_mAh_per_mA")
-        panels.append(("C_rate_2 slope\nd(fade)/d(C_rate_2) (mAh/mA)",
-                        real_c2.get("slope_mAh_per_mA"), c2_ach,
-                        real_c2.get("ci_lo"), real_c2.get("ci_hi")))
 
     n = max(len(panels), 1)
     ncols = 2 if n > 1 else 1

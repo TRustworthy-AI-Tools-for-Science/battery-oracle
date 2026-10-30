@@ -59,6 +59,5 @@ Calibration
    :nosignatures:
 
    battery_oracle.calibrate_oracle
-   battery_oracle.calibrate_drift
    battery_oracle.write_oracle_config
    battery_oracle.compute_real_targets

@@ -84,11 +84,8 @@ def _synthetic_summary(df):
         "crate_sensitivity_min": 3.0,
         "eol_target_cycles": 55.0,
         "real_targets": {"mean_arc_ratio": 0.85, "r1_growth_pct": 12.0},
-        "real_crate2_slope": {"slope_mAh_per_mA": 0.08, "ci_lo": 0.02,
-                              "ci_hi": 0.14, "n_cells": 10, "n_pairs": 900},
-        "best": {**best_row.to_dict(), "oracle_slope_mAh_per_mA": 0.07},
+        "best": best_row.to_dict(),
         "best_score": float(best_row["score"]),
-        "drift_result": None,
     }
 
 

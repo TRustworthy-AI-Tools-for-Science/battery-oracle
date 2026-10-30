@@ -46,9 +46,6 @@ degradation:
   plating_rate_scale: 1.0    # -> plating_rate_scale
   # Optional, disabled by default (see config_oracle_defaults.yml for why):
   dod_lam_scale: 0.0                 # -> dod_lam_scale
-  c2_stress_scale: 0.0               # -> c2_stress_scale
-  c2_stress_slope_mah_per_ma: 0.0794 # -> c2_stress_slope_mah_per_ma
-  c2_stress_ref_ma: 75.27            # -> c2_stress_ref_ma
 
 eis:
   freq_min_hz: 0.01          # -> frequencies = np.logspace(log10(min), log10(max), n)
@@ -56,10 +53,6 @@ eis:
   n_freq_points: 60
   noise_level: 0.02          # -> eis_noise_level  (fractional amplitude; ~2% lab EIS noise)
   noise_model: combined      # -> eis_noise_model  (white | flicker | combined | none)
-  # Optional, disabled by default (see config_oracle_defaults.yml eis.drift_*):
-  drift_scale: 0.0           # -> eis_drift_scale
-  drift_tau_s: 600.0         # -> eis_drift_tau_s
-  drift_n_periods: 4.0       # -> eis_drift_n_periods
 
 # Equivalent-circuit model fitted to each EIS spectrum. Optional section:
 ecm:

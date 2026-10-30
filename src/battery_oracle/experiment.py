@@ -204,7 +204,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     cpe_seeds = ecm.get("cpe_seeds", {}) or {}
     autoeis = ecm.get("autoeis", {}) or {}
     degradation = oracle_cfg.get("degradation", {}) or {}
-    c2_stress = degradation.get("c2_stress", {}) or {}
     preset_constants_all = degradation.get("preset_constants", {}) or {}
     protocol_scaling = oracle_cfg.get("protocol_scaling", {}) or {}
     bol = oracle_cfg.get("bol", {}) or {}
@@ -250,9 +249,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "ec_diffusivity_base_factor": float(degradation.get("ec_diffusivity_base_factor", 0.25)),
         "lam_ceiling": float(degradation.get("lam_ceiling", 0.95)),
         "dod_lam_scale": float(degradation.get("dod_lam_scale", 0.0)),
-        "c2_stress_scale": float(c2_stress.get("scale", 0.0)),
-        "c2_stress_slope_mah_per_ma": float(c2_stress.get("slope_mah_per_ma", 0.0794)),
-        "c2_stress_ref_ma": float(c2_stress.get("ref_ma", 75.27)),
         "preset_constants": preset_constants_all.get(resolved_preset),
         "kinetics_scale": float(protocol_scaling.get("kinetics_scale", 1.0)),
         "sei_rate_scale": float(protocol_scaling.get("sei_rate_scale", 1.0)),
@@ -267,9 +263,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "seed": int(eis["seed"]) if eis.get("seed") is not None else None,
         "E_a_J_per_mol": float(eis.get("E_a_J_per_mol", 30e3)),
         "E_a_electrolyte_J_per_mol": float(eis.get("E_a_electrolyte_J_per_mol", 15e3)),
-        "eis_drift_scale": float(eis.get("drift_scale", 0.0)),
-        "eis_drift_tau_s": float(eis.get("drift_tau_s", 600.0)),
-        "eis_drift_n_periods": float(eis.get("drift_n_periods", 4.0)),
         "eis_mode": eis.get("mode", "equilibrium"),
         "noise_combined_flicker_frac": float(eis.get("noise_combined_flicker_frac", 0.75)),
         "noise_combined_white_frac": float(eis.get("noise_combined_white_frac", 0.25)),
@@ -423,15 +416,6 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     )
     kwargs["capacity_check"] = bool(degradation.get("capacity_check", kwargs["capacity_check"]))
     kwargs["dod_lam_scale"] = float(degradation.get("dod_lam_scale", kwargs["dod_lam_scale"]))
-    kwargs["c2_stress_scale"] = float(
-        degradation.get("c2_stress_scale", kwargs["c2_stress_scale"])
-    )
-    kwargs["c2_stress_slope_mah_per_ma"] = float(
-        degradation.get("c2_stress_slope_mah_per_ma", kwargs["c2_stress_slope_mah_per_ma"])
-    )
-    kwargs["c2_stress_ref_ma"] = float(
-        degradation.get("c2_stress_ref_ma", kwargs["c2_stress_ref_ma"])
-    )
     for field in _SCALE_FIELDS:
         kwargs[field] = float(degradation.get(field, kwargs[field]))
 
@@ -449,9 +433,6 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     kwargs["E_a_electrolyte_J_per_mol"] = float(
         eis.get("E_a_electrolyte_J_per_mol", kwargs["E_a_electrolyte_J_per_mol"])
     )
-    kwargs["eis_drift_scale"] = float(eis.get("drift_scale", kwargs["eis_drift_scale"]))
-    kwargs["eis_drift_tau_s"] = float(eis.get("drift_tau_s", kwargs["eis_drift_tau_s"]))
-    kwargs["eis_drift_n_periods"] = float(eis.get("drift_n_periods", kwargs["eis_drift_n_periods"]))
     kwargs["eis_mode"] = eis.get("mode", kwargs.get("eis_mode", "equilibrium"))
 
     # Carried as a string (like parameter_set); build_oracle_from_config

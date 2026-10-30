@@ -71,7 +71,6 @@ from battery_oracle.oracle import (
 )
 from battery_oracle.protocol import Protocol
 from battery_oracle.tune import (
-    calibrate_drift,
     calibrate_oracle,
     compute_real_targets,
     write_calibration_summary,
@@ -99,7 +98,6 @@ __all__ = [
     "ECM_PARAM_NAMES",
     "ACTION_FEATURE_NAMES",
     "calibrate_oracle",
-    "calibrate_drift",
     "write_oracle_config",
     "write_calibration_summary",
     "compute_real_targets",

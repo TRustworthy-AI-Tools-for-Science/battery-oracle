@@ -118,8 +118,8 @@ Three behaviours differ from a naïve `sim.solve()` (details and reproductions i
 Stock PyBaMM produces a noiseless impedance. The oracle layers on: white and/or
 $1/f$ flicker noise (amplitude $\propto |Z|/\sqrt{f}$ — the source of realistic
 low-frequency scatter; see [protocol.md](protocol.md), "EIS noise"),
-and optionally Hallemans-style OCV-relaxation drift {cite:p}`hallemans2023` coupled
-to the protocol's rest duration. The AutoEIS Bayesian ECM fit is itself modified.
+and, with `eis_mode="nonstationary"`, the lock-in leakage of the simulated voltage
+drift during the sweep {cite:p}`hallemans2023`. The AutoEIS Bayesian ECM fit is itself modified.
 
 - **Scale-equivariant rescaling ("Option B").** The 5 Ah simulation cell's
   impedance is ~16× smaller than the ~43 mAh coin cells the downstream featurisation

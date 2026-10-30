@@ -35,7 +35,7 @@ def test_check_tune_flags_bounds_gains_and_failed_targets():
     best = {"sei_rate_scale": 0.01005, "plating_rate_scale": 0.5, "kinetics_scale": 1.0}
     ranges = {"srs_min": 0.01, "srs_max": 1.0, "prs_min": 0.01, "prs_max": 10.0,
               "ks_min": 1.0, "ks_max": 1.0}
-    rep = check_tune(best, ranges, {"crate2_slope": "FAILED — outside CI",
+    rep = check_tune(best, ranges, {"step_shape": "FAILED — outside CI",
                                     "capacity_fade": "partial — off"},
                      soh_history=[1.0, 0.999, 0.9995])
     by = {c["name"]: c["status"] for c in rep["checks"]}
@@ -43,7 +43,7 @@ def test_check_tune_flags_bounds_gains_and_failed_targets():
     assert by["plating_rate_scale not at search bound"] == "pass"
     assert "kinetics_scale not at search bound" not in by          # pinned range skipped
     assert by["no capacity gain between cycles (max SOH increase)"] == "warn"
-    assert by["calibration target: crate2_slope"] == "fail"
+    assert by["calibration target: step_shape"] == "fail"
     assert by["calibration target: capacity_fade"] == "warn"
     assert rep["status"] == "fail"
 

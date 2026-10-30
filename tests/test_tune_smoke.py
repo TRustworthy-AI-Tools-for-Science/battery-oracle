@@ -20,7 +20,6 @@ from battery_oracle.tune import (
     collect_eis_comparison,
     compute_real_targets,
     score_candidate,
-    slope_match_error,
     write_calibration_summary,
     write_oracle_config,
 )
@@ -149,9 +148,8 @@ def _stub_candidate_result(cache, ks, srs, dds, prs, preset, capacity_check,
 _STUB_CFG = {
     "preset": "accelerated", "circuit": "R1-[R2,P3]-[R4,P5]", "chemistry": "Chen2020",
     "capacity_check": True, "skip_crate_probe": True, "crate_probe_cycles": 4,
-    "crate_probe_low_c": 1.0, "crate_probe_high_c": 8.0, "skip_crate2_slope": True,
-    "crate2_probe_cycles": 5, "crate2_levels": (0.5, 1.0), "crate_sensitivity_min": 3.0,
-    "real_crate2_slope": None, "real_targets": {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
+    "crate_probe_low_c": 1.0, "crate_probe_high_c": 8.0,
+    "crate_sensitivity_min": 3.0, "real_targets": {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
 }
 _STUB_RANGES = {"ks_min": 0.1, "ks_max": 0.5, "srs_min": 0.01, "srs_max": 1.0,
                 "dds_min": 0.1, "dds_max": 1000.0, "prs_min": 0.01, "prs_max": 10.0}
@@ -201,8 +199,7 @@ def test_calibrate_oracle_sequential_path(monkeypatch):
     monkeypatch.setattr("battery_oracle.tune.run_oracle_candidate", _stub_candidate_result)
     out = calibrate_oracle({"circuit": "R1-[R2,P3]-[R4,P5]"},
                            {"mean_arc_ratio": 0.85, "r1_growth_pct": 10.0},
-                           n_trials=3, n_jobs=1, skip_crate_probe=True,
-                           skip_crate2_slope=True, seed=1)
+                           n_trials=3, n_jobs=1, skip_crate_probe=True, seed=1)
     assert math.isfinite(out["best_score"])
     assert len(out["results"]) == 3
     assert out["best"]["score"] is not None
@@ -218,13 +215,6 @@ def test_collect_eis_comparison_none_when_no_ecm():
     best = {"kinetics_scale": 0.3, "sei_rate_scale": 0.1,
             "dead_li_decay_scale": 10.0, "plating_rate_scale": 1.0}
     assert collect_eis_comparison(cache, best, preset="accelerated") is None
-
-
-def test_slope_match_error():
-    ci = {"ci_lo": 0.05, "ci_hi": 0.15}
-    assert slope_match_error(0.10, ci) == 0.0        # inside CI
-    assert slope_match_error(0.25, ci) > 0.0         # outside CI
-    assert slope_match_error(None, ci) == float("inf")
 
 
 def test_eol_target_cycles_from_range():
@@ -277,7 +267,7 @@ def test_write_calibration_summary(tmp_path):
         out,
         dataset="mydata", preset="accelerated", cell_id="C01",
         n_trials=2, n_cycles=10, crate_sensitivity_min=3.0,
-        real_targets=real, real_crate2_slope=None,
+        real_targets=real,
         best=best, best_score=0.42,
     )
     assert path == out and out.exists()
