@@ -21,16 +21,17 @@ cell, the only truly relaxed state. From that one solution:
 Model (``CHAIN_OPTIONS``): DFN with the EIS voltage/current variables (PyBOP's
 ``EISSimulator.set_up_for_eis``); double layer (``surface form: differential``);
 contact resistance; lumped thermal with the coin cell's whole-cell heat capacity
-(:mod:`battery_oracle.parameter_sets`); SEI ``constant`` -- the SEI film
-resistance the oracle's SEI model has at beginning of life, without growth.
+(:mod:`battery_oracle.parameter_sets`); the oracle's EC reaction-limited SEI
+growth; the jones2022 cycler's voltage limits (``CYCLER_V_MIN``).
 
-Fitted (PyBOP ``Parameter``; bounds centred on the warm start because PyBOP's
-population optimisers start at the prior mean): the seven kinetic/transport/
-double-layer multipliers and electrolyte diffusivity, contact resistance, electrode
-area (parallel-layer count), negative active fraction (N:P; the porosity follows so
-the volume fractions sum to 1), electrode thickness (both electrodes),
-cyclable lithium (independent of N:P), heat-transfer coefficient, and the length
-of each unrecorded rest between formation and cycling sequences.
+Two steps. The electrode balance (positive capacity, N:P, cyclable lithium) is
+fixed first by the closed-form OCV fit to the measured rest voltages and the
+formation dQ/dV feature (``ocv_balance``). Then fitted (PyBOP ``Parameter``; bounds
+centred on the warm start because PyBOP's population optimisers start at the prior
+mean): the seven kinetic/transport/double-layer multipliers and electrolyte
+diffusivity, contact resistance, electrode area (parallel-layer count), electrode
+thickness and the negative/positive thickness ratio, heat-transfer coefficient, and
+the length of each unrecorded rest between formation and cycling sequences.
 
 Initial state: the cell's first voltage (as received, after storage) is an open-
 circuit voltage; with the cyclable lithium it fixes both electrode stoichiometries
@@ -108,16 +109,12 @@ CHAIN_OPTIONS = {
     "contact resistance": "true",
     "thermal": "lumped",
     "use lumped thermal capacity": "true",
-    "SEI": "constant",
+    # the oracle's SEI growth model (oracle._build_degradation_config), so the fitted
+    # balance carries the lithium the SEI consumes
+    "SEI": ("ec reaction limited", "none"),
 }
-#: SEI submodels for stage A. "constant": beginning-of-life film resistance, no
-#: growth. "ec reaction limited": the oracle's growth model (oracle.py
-#: _build_degradation_config), so the fitted balance carries the lithium the SEI
-#: consumes -- with "constant" the fit can leave no lithium margin and the oracle's
-#: SEI growth then empties the graphite at the end of a discharge (R1 finding).
-SEI_MODES = ("constant", "ec reaction limited")
 #: default electrolyte floor (fraction of c0) for the depletion stop; env ORACLE_FIT_CE_FLOOR
-CE_FLOOR_DEFAULT = 0.0
+CE_FLOOR_DEFAULT = 0.1
 #: oracle EC-diffusivity factor = 0.25 (commercial-electrolyte correction) x sei_rate_scale
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 
@@ -267,13 +264,6 @@ def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charg
     d["groups"] = groups
     d["current"] = list(data["current"]) + [{"group": len(groups) - 1, "t": tk, "I": ik}]
     return d
-
-
-def chain_options(sei: str = "constant") -> dict:
-    """Stage-A model options with the given SEI submodel (negative electrode only)."""
-    if sei not in SEI_MODES:
-        raise ValueError(f"sei must be one of {SEI_MODES}, got {sei!r}")
-    return {**CHAIN_OPTIONS, "SEI": sei if sei == "constant" else (sei, "none")}
 
 
 def apply_voltage_limits(model, width: float = VOLTAGE_LIMIT_WIDTH):
@@ -775,15 +765,13 @@ def candidate_values(pv_base, inputs: dict, initial_voltage: float,
 
 
 def chain_for_fit(data: dict, pv, fit: dict) -> "ChainModel":
-    """The ChainModel a saved fit report was made with (ambient, SEI model and EC
-    diffusivity factor, fixed inputs), for diagnostics and re-evaluation."""
+    """The ChainModel of a saved fit report (ambient, EC diffusivity factor, fixed
+    inputs), for diagnostics and re-evaluation."""
     pv_base = base_values(pv, fit.get("ambient_k"))
-    sei = fit.get("sei", "constant")
     factor = float(fit.get("ec_diffusivity_factor", 1.0))
-    if sei != "constant" and factor != 1.0:
+    if factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * factor
-    return ChainModel(data, pv_base, fixed=fit.get("fixed_inputs") or {}, sei=sei,
-                      voltage_limits=bool(fit.get("voltage_limits")))
+    return ChainModel(data, pv_base, fixed=fit.get("fixed_inputs") or {})
 
 
 def base_values(pv, ambient_k: float | None = None):
@@ -803,12 +791,10 @@ class ChainModel:
     """Simulates one cell's continuous history for a candidate; caches results."""
 
     def __init__(self, data: dict, pv_base, *, cache_size: int = 256, rtol: float = 1e-6,
-                 atol: float = 1e-6, fixed: dict | None = None, sei: str = "constant",
-                 voltage_limits: bool = False):
+                 atol: float = 1e-6, fixed: dict | None = None):
         env = envelope_setting()
         self.data = with_envelope_probe(data, *env) if env else data
-        self.voltage_limits = bool(voltage_limits)
-        self.options = chain_options(sei)
+        self.options = dict(CHAIN_OPTIONS)
         r_pts, self.submesh_types = radial_mesh(R_POINTS, R_MESH, R_MESH_STRETCH)
         self.var_pts = r_pts or None
         self.x_factor = X_FACTOR
@@ -855,8 +841,7 @@ class ChainModel:
 
             from battery_oracle.eis_nonstationary import eis_model
             self._model = eis_model(pybamm.lithium_ion.DFN, self.options)
-            if self.voltage_limits:
-                apply_voltage_limits(self._model)
+            apply_voltage_limits(self._model)
             # electrolyte floor as a solver EVENT: a candidate whose electrolyte runs out
             # stops at the floor instead of crawling on with ever smaller steps (a joint fit
             # spent > 100 min per candidate there); the truncated history is penalised below
@@ -965,8 +950,7 @@ class ChainModel:
         if t_end > tk[-1]:          # e.g. a final EIS sweep after the last GCPL file: rest
             tk, ik = np.r_[tk, t_end + 1.0], np.r_[ik, 0.0]
         pv["Current function [A]"] = pybamm.Interpolant(tk, ik, pybamm.t, interpolator="linear")
-        if self.voltage_limits:
-            pv[V_HI_PARAM], pv[CV_PARAM] = limit_schedule(self.data["groups"], off, t_end)
+        pv[V_HI_PARAM], pv[CV_PARAM] = limit_schedule(self.data["groups"], off, t_end)
         probe_g = [k for k, g in enumerate(self.data["groups"]) if g.get("probe")]
         t_probe = float(off[probe_g[0]]) if probe_g else None
         probe_t = [np.arange(t_probe, t_end, PROBE_SAMPLE_S)] if probe_g else []
@@ -978,16 +962,12 @@ class ChainModel:
         submesh = {**self.model().default_submesh_types, **self.submesh_types} if self.submesh_types else None
         # a fit candidate stores only OUTPUT_VARS and the states at the EIS linearisation
         # times; a kept solution (diagnostics, validity checks) stores everything
-        lean = self.voltage_limits and not getattr(self, "keep_solution", False)
+        lean = not getattr(self, "keep_solution", False)
         capture = np.concatenate(sp_lin) if (lean and sp_lin) else None
         sim = pybamm.Simulation(self.model(), parameter_values=pv, var_pts=var_pts, submesh_types=submesh,
                                 solver=single_thread_solver(self.rtol, self.atol,
                                                             output_variables=list(OUTPUT_VARS) if lean else None))
-        states: dict = {}
-        if self.voltage_limits:
-            sol, n_cuts, states = self._solve_segments(sim, t_eval, capture)
-        else:
-            sol, n_cuts = sim.solve(t_eval=t_eval), 0
+        sol, n_cuts, states = self._solve_segments(sim, t_eval, capture)
         ts = np.asarray(sol.t)
         v_all = np.asarray(sol["Voltage [V]"].entries)
         t_last = float(ts[-1])
@@ -1080,7 +1060,7 @@ class ChainModel:
                 idx = np.clip(np.searchsorted(ts, t_lin), 0, ts.size - 1)
                 t_at, ys = ts[idx], state_at(t_lin)
             z = linearised_impedance(sim, t_at, ys, s["f"], z_scale,
-                                     inputs={CUT_INPUT: 0.0} if self.voltage_limits else None)
+                                     inputs={CUT_INPUT: 0.0})
             dvdt = (np.interp(hi, ts, v_all) - np.interp(lo, ts, v_all)) / np.maximum(hi - lo, 1e-9)
             z = z - 2.0 * dvdt / (2 * np.pi * np.asarray(s["f"], float) * amp)
             spectra.append(z)
@@ -1201,20 +1181,27 @@ def build_chain_problems(data: dict, pv_base, fit: dict, chain: ChainModel | Non
     return out, chain
 
 
+def _fit_model_report(ec_diffusivity_factor: float) -> dict:
+    """The fitted model's settings, as recorded in a fit report."""
+    return {"balance_mode": "ocv_features", "sei": CHAIN_OPTIONS["SEI"][0],
+            "ec_diffusivity_factor": float(ec_diffusivity_factor),
+            "radial_mesh": radial_mesh_setting(), "envelope_probe_ma": envelope_setting(),
+            "voltage_limits": {"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
+                               "v_max_formation_cv": CYCLER_V_MAX_FORMATION}}
+
+
 def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                    max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                    free: list[str] | None = None, ambient_k: float | None = None,
-                   bounds: dict | None = None, balance: str = "free", sei: str = "constant",
-                   ec_diffusivity_factor: float = 1.0, voltage_limits: bool = False) -> dict[str, Any]:
+                   bounds: dict | None = None, ec_diffusivity_factor: float = 1.0) -> dict[str, Any]:
     """Chain fit of one cell (module docstring); returns a JSON-able report.
     ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
-    ``balance="ocv"``: two-step stage A -- the electrode balance (positive capacity,
-    N:P, cyclable lithium) is fixed by the closed-form OCV fit to the measured rest
-    voltages (``ocv_balance``); the DFN fit then adjusts kinetics, transport and
-    architecture only, with the negative/positive thickness ratio replacing the
-    negative active fraction (which follows from the fixed N:P).
-    ``sei``: SEI submodel (SEI_MODES); for growth, ``ec_diffusivity_factor``
-    multiplies the template EC diffusivity as the oracle does (0.25 x sei_rate_scale)."""
+    Two-step stage A: the electrode balance (positive capacity, N:P, cyclable lithium)
+    is fixed by the closed-form OCV fit to the measured rest voltages and dQ/dV feature
+    (``ocv_balance``); the DFN fit then adjusts kinetics, transport and architecture
+    only, with the negative/positive thickness ratio replacing the negative active
+    fraction (which follows from the fixed N:P). ``ec_diffusivity_factor`` multiplies
+    the template EC diffusivity as the oracle does (0.25 x sei_rate_scale)."""
     import os
 
     import pybop
@@ -1223,17 +1210,14 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
 
     patches.apply()
     pv_base = base_values(pv, ambient_k)
-    if sei != "constant" and ec_diffusivity_factor != 1.0:
+    if ec_diffusivity_factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * float(ec_diffusivity_factor)
-    fixed, balance_report = {}, None
-    if balance in ("ocv", "ocv_features"):
-        balance_report = ocv_balance(data, pv_base, features=balance == "ocv_features")
-        q_meas = float(data["cell_capacity_mah"]) / 1000.0
-        fixed = {Q_P_RATIO: balance_report["Q_p_Ah"] / q_meas, NP_RATIO: balance_report["np_ratio"],
-                 LI_FRACTION: balance_report["li_fraction"]}
-        log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
-        bounds = dict(bounds or {})
-        bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
+    balance_report = ocv_balance(data, pv_base, features=True)
+    q_meas = float(data["cell_capacity_mah"]) / 1000.0
+    fixed = {Q_P_RATIO: balance_report["Q_p_Ah"] / q_meas, NP_RATIO: balance_report["np_ratio"],
+             LI_FRACTION: balance_report["li_fraction"]}
+    log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
+    bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
     # warm start (ORACLE_FIT_WARM_JSON: a report or checkpoint with best_inputs): CMA-ES
     # starts at those values with a step ORACLE_FIT_WARM_SIGMA x the prior's, and every
     # parameter not freed (ORACLE_FIT_FREE, ";"-separated names) is held at its warm
@@ -1261,7 +1245,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                 prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
         log.info("%s: warm start from %s; free %s; held %s", cell_id, os.environ["ORACLE_FIT_WARM_JSON"],
                  sorted(fit), sorted(held))
-    chain = ChainModel(data, pv_base, fixed=fixed, sei=sei, voltage_limits=voltage_limits)
+    chain = ChainModel(data, pv_base, fixed=fixed)
     problems, chain = build_chain_problems(data, pv_base, fit, chain=chain)
     meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
     meta.set_workers(int(os.environ.get("ORACLE_FIT_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", 1))))
@@ -1296,12 +1280,8 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
     fitted = dict(best)
     best = {**fixed, **best}                   # the full candidate (fixed balance included)
     return {"cell_id": cell_id, "method": "chain", "best_inputs": best, "fitted_inputs": fitted,
-            "fixed_inputs": fixed, "ocv_balance": balance_report, "balance_mode": balance,
-            "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
-            "radial_mesh": radial_mesh_setting(),
-            "envelope_probe_ma": envelope_setting(),
-            "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
-                                "v_max_formation_cv": CYCLER_V_MAX_FORMATION} if voltage_limits else None),
+            "fixed_inputs": fixed, "ocv_balance": balance_report,
+            **_fit_model_report(ec_diffusivity_factor),
             "seed": seed,
             "warm_start": ({"from": os.environ["ORACLE_FIT_WARM_JSON"], "free": sorted(fit),
                             "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}
@@ -1338,9 +1318,7 @@ def _unprefixed(inputs: dict, cell_id: str) -> dict:
 def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
                           max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                           ambient_k: float | None = None, bounds: dict | None = None,
-                          balance: str = "ocv_features", sei: str = "constant",
-                          ec_diffusivity_factor: float = 1.0,
-                          voltage_limits: bool = False) -> dict[str, dict]:
+                          ec_diffusivity_factor: float = 1.0) -> dict[str, dict]:
     """Joint chain fit of several cells: ONE set of kinetic, transport and geometric
     parameters shared by all cells, scored on every cell's records and spectra.
 
@@ -1358,16 +1336,14 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     from battery_oracle import patches
 
     patches.apply()
-    if balance not in ("ocv", "ocv_features"):
-        raise ValueError("a joint fit needs a per-cell OCV balance (balance='ocv' or 'ocv_features')")
     pv_base = base_values(pv, ambient_k)
-    if sei != "constant" and ec_diffusivity_factor != 1.0:
+    if ec_diffusivity_factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * float(ec_diffusivity_factor)
     cells = list(datas)
     jdata = {c: _joint_data(d, c) for c, d in datas.items()}
     fixed, balances = {}, {}
     for c in cells:
-        rep = ocv_balance(jdata[c], pv_base, features=balance == "ocv_features")
+        rep = ocv_balance(jdata[c], pv_base, features=True)
         q_meas = float(jdata[c]["cell_capacity_mah"]) / 1000.0
         fixed[c] = {Q_P_RATIO: rep["Q_p_Ah"] / q_meas, NP_RATIO: rep["np_ratio"], LI_FRACTION: rep["li_fraction"]}
         balances[c] = rep
@@ -1394,7 +1370,7 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     chains, problems = {}, []
     for c in cells:
         own = {k: v for k, v in fit.items() if not k.startswith("Rest before ") or f"{c}:" in k}
-        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c], sei=sei, voltage_limits=voltage_limits)
+        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c])
         probs, _ = build_chain_problems(jdata[c], pv_base, own, chain=chains[c])
         problems += probs
     shared = sorted(k for k in fit if not k.startswith("Rest before "))
@@ -1435,12 +1411,8 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         mine = _unprefixed(best, c)
         reports[c] = {
             "cell_id": c, "method": "chain-joint", "best_inputs": {**fixed[c], **mine}, "fitted_inputs": mine,
-            "fixed_inputs": fixed[c], "ocv_balance": balances[c], "balance_mode": balance,
-            "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
-            "radial_mesh": radial_mesh_setting(),
-            "envelope_probe_ma": envelope_setting(),
-            "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
-                                "v_max_formation_cv": CYCLER_V_MAX_FORMATION} if voltage_limits else None),
+            "fixed_inputs": fixed[c], "ocv_balance": balances[c],
+            **_fit_model_report(ec_diffusivity_factor),
             "seed": seed,
             "warm_start": ({"from": os.environ["ORACLE_FIT_WARM_JSON"],
                             "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}

@@ -136,39 +136,6 @@ def test_chain_simulates_history_with_heating_and_spectrum():
 
 
 @pytest.mark.slow
-def test_chain_fit_recovers_known_parameters_from_synthetic_data():
-    """Round trip: data simulated by the chain model at known parameters; the fit
-    (5 free parameters incl. lithium inventory and the unrecorded gap, perturbed
-    start) recovers them. The discharge reaches the LiCoO2 wall, where the thermodynamic-
-    factor diffusivity is felt: doubling D0 moves the voltage by ~50 mV there, against
-    ~4 mV for a 600 s discharge on the plateau (probe 2026-10-30)."""
-    from battery_oracle.bol_chain import (CONTACT_R, LI_FRACTION, ChainModel, fit_cell_chain, gap_name,
-                                          lithium_fraction)
-    from battery_oracle.params import scale_parameter_name
-
-    pv = _pv()
-    data = _synthetic_data(discharge_s=1800.0)
-    f_li0 = lithium_fraction(pv)
-    free = [scale_parameter_name("Negative electrode exchange-current density [A.m-2]"),
-            scale_parameter_name("Positive particle diffusivity [m2.s-1]"), CONTACT_R, LI_FRACTION,
-            gap_name("002")]
-    truth = {free[0]: 2.0, free[1]: 0.5, free[2]: 0.15, free[3]: f_li0 + 0.03, free[4]: 1800.0}
-    res = ChainModel(data, pv).solve(truth)
-    assert "error" not in res, res.get("error")
-    for r, v in zip(data["records"], res["records"]):
-        r["V"] = np.asarray(v)
-    data["spectra"][0]["Z"] = res["spectra"][0]
-
-    out = fit_cell_chain("syn", data, pv, warm={CONTACT_R: 0.05, gap_name("002"): 3600.0},
-                         max_iterations=60, max_unchanged=20, seed=1, free=free, ambient_k=296.15)
-    best = out["best_inputs"]
-    assert out["cost"] < 1.0, out["cost"]
-    for name in free[:3]:
-        assert 0.6 * truth[name] < best[name] < 1.6 * truth[name], (name, best[name], truth[name])
-    assert abs(best[LI_FRACTION] - truth[LI_FRACTION]) < 0.02, (best[LI_FRACTION], truth[LI_FRACTION])
-
-
-@pytest.mark.slow
 def test_oracle_lumped_thermal_uses_coin_cell_heat_capacity():
     from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
 
