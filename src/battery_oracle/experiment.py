@@ -57,11 +57,7 @@ _YAML_FIELD_NAME_BY_SLOT = {
     "discharge_duration_h": "dur_d_h",
 }
 _PROTOCOL_FIELDS = tuple(_YAML_FIELD_NAME_BY_SLOT[slot] for slot in PROTOCOL_FIELD_NAMES)
-_VALID_MODELS = ("DFN",)                # SPMe and SPM removed 2026-10-16 (oracle.REMOVED_MODELS)
 _VALID_PRESETS = ("nominal", "accelerated", "severe")
-# Packaged per-dataset calibration configs (#12), selectable via config_dataset=.
-# Each ships as config_oracle_{name}.yml alongside config_oracle_defaults.yml.
-_VALID_DATASETS = ("calce", "oxford", "matr")
 # ECM fitter. 'randles' is the fast analytic stub (available on the core install);
 # 'autoeis' is the Bayesian fit and needs the [autoeis] extra. Default 'randles'
 # so a bare `run_experiment` works out of the box.
@@ -142,38 +138,6 @@ def load_oracle_config(path: str | Path | None = None) -> dict:
         return yaml.safe_load(fh) or {}
 
 
-def _resolve_dataset_config(name: str) -> dict:
-    """Load a packaged per-dataset calibration config (#12) by short name.
-
-    ``name`` is one of :data:`_VALID_DATASETS` (calce/oxford/matr); resolves to
-    the packaged ``config_oracle_{name}.yml`` via ``importlib.resources`` (same
-    mechanism as :func:`load_oracle_config`). PyYAML only — no PyBaMM import.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``name`` is valid but the calibration YAML for it isn't shipped in
-        this release — fails loudly rather than silently falling back to
-        defaults, since a caller requesting a specific dataset's calibration
-        should not silently get the generic defaults instead.
-    """
-    if name not in _VALID_DATASETS:
-        raise ValueError(
-            f"Unknown config_dataset {name!r}; choose one of {_VALID_DATASETS}."
-        )
-    try:
-        with resources.files("battery_oracle").joinpath(
-            f"config_oracle_{name}.yml"
-        ).open("r") as fh:
-            return yaml.safe_load(fh) or {}
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"calibration config 'config_oracle_{name}.yml' is not shipped in this "
-            "release; omit config_dataset to use the packaged defaults, or pass a "
-            "custom oracle_config path"
-        ) from None
-
-
 def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None) -> dict:
     """Map an oracle-defaults YAML dict to a full ``PyBaMMOracle(**kwargs)`` dict.
 
@@ -191,10 +155,8 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     PyBaMM-free (PyYAML/numpy only), matching :func:`oracle_kwargs_from_config`'s
     design.
     """
-    model_cfg = oracle_cfg.get("model", {}) or {}
     cycling = oracle_cfg.get("cycling", {}) or {}
     solver = oracle_cfg.get("solver", {}) or {}
-    solver_primary = solver.get("primary", {}) or {}
     solver_emergency = solver.get("emergency", {}) or {}
     solver_dfn = solver.get("dfn", {}) or {}
     bounds = oracle_cfg.get("protocol_bounds", {}) or {}
@@ -216,7 +178,6 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
     n_freq = int(eis.get("n_freq_points", 60))
 
     return {
-        "model": model_cfg.get("type", "DFN"),
         "n_cycles": int(cycling.get("n_cycles", 1)),
         "temperature_K": float(cycling.get("temperature_K", 298.15)),
         "parameter_set": cycling.get("parameter_set", "Chen2020"),
@@ -280,12 +241,8 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         "autoeis_num_warmup": int(autoeis.get("num_warmup", 500)),
         "autoeis_num_samples": int(autoeis.get("num_samples", 200)),
 
-        "solver_rtol": float(solver_primary.get("rtol", 1e-3)),
-        "solver_atol": float(solver_primary.get("atol", 1e-6)),
-        "solver_dt_max_s": float(solver_primary.get("dt_max_s", 60.0)),
         "emergency_solver_rtol": float(solver_emergency.get("rtol", 1e-2)),
         "emergency_solver_atol": float(solver_emergency.get("atol", 1e-5)),
-        "emergency_solver_dt_max_s": float(solver_emergency.get("dt_max_s", 10.0)),
         "dfn_solver_rtol": float(solver_dfn.get("rtol", 1e-6)),
         "dfn_solver_atol": float(solver_dfn.get("atol", 1e-8)),
         "dfn_solver_dt_max_s": float(solver_dfn.get("dt_max_s", 1.0)),
@@ -327,15 +284,9 @@ def _validate_config(cfg: dict) -> None:
     if not isinstance(cfg, dict):
         raise ValueError("Experiment config must be a mapping (YAML dict).")
 
-    for section in ("model", "cycling", "degradation", "eis", "protocols"):
+    for section in ("cycling", "degradation", "eis", "protocols"):
         if section not in cfg:
             raise KeyError(f"Experiment config missing required section: {section!r}")
-
-    model_type = cfg["model"].get("type")
-    if model_type not in _VALID_MODELS:
-        raise ValueError(
-            f"Unknown model.type {model_type!r}; choose one of {_VALID_MODELS}."
-        )
 
     preset = cfg["degradation"].get("preset")
     if preset not in _VALID_PRESETS:
@@ -375,7 +326,7 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
     ``config_oracle_defaults.yml`` if not supplied), then overlays every field
     the experiment config ``cfg`` actually specifies. Fields ``cfg`` omits fall
     back to the base layer's value rather than raising, so a minimal
-    experiment YAML (just the five required sections) still works.
+    experiment YAML (just the four required sections) still works.
 
     PyBaMM-free: the parameter set and ECM fitter are carried as plain strings
     (``"parameter_set"`` e.g. ``"Chen2020"``; ``"ecm_fitter"`` e.g. ``"randles"``)
@@ -391,7 +342,6 @@ def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict
         oracle_cfg = load_oracle_config()
     kwargs = oracle_kwargs_from_oracle_config(oracle_cfg, preset=degradation.get("preset"))
 
-    kwargs["model"] = cfg["model"]["type"]
     kwargs["n_cycles"] = int(cycling.get("n_cycles", kwargs["n_cycles"]))
     kwargs["temperature_K"] = float(cycling.get("temperature_K", kwargs["temperature_K"]))
     kwargs["parameter_set"] = cycling.get("parameter_set", kwargs["parameter_set"])
@@ -456,38 +406,19 @@ def protocols_from_config(cfg: dict) -> list[np.ndarray]:
     ]
 
 
-def build_oracle_from_config(
-    cfg: dict | str | Path, config_dataset: str | None = None
-) -> "PyBaMMOracle":
+def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     """Construct a :class:`PyBaMMOracle` from a config dict (or a path to load first).
 
-    The base oracle layer is resolved in this order:
-      * ``config_dataset`` (this kwarg, or the experiment YAML's top-level
-        ``config_dataset`` field) -> the packaged ``config_oracle_{name}.yml``
-        for one of :data:`_VALID_DATASETS` (#12); OR
-      * ``cfg``'s optional top-level ``oracle_config`` field -> a custom
-        ``config_oracle_*.yml`` (e.g. a tune-oracle calibration output); OR
-      * the packaged ``config_oracle_defaults.yml``.
-
-    ``config_dataset`` and ``oracle_config`` are mutually exclusive (both select
-    the base layer) -- setting both raises. Resolves the ``parameter_set`` string
+    The base oracle layer is ``cfg``'s optional top-level ``oracle_config`` field
+    (a ``config_oracle_*.yml``, e.g. a tune-oracle calibration output), or else the
+    packaged ``config_oracle_defaults.yml``. Resolves the ``parameter_set`` string
     to a ``pybamm.ParameterValues`` and imports :class:`PyBaMMOracle` lazily so the
     parse/mapping layer stays PyBaMM-free.
     """
     if not isinstance(cfg, dict):
         cfg = load_experiment_config(cfg)
 
-    config_dataset = config_dataset or cfg.get("config_dataset")
-    oracle_config_path = cfg.get("oracle_config")
-    if config_dataset and oracle_config_path:
-        raise ValueError(
-            "config_dataset and oracle_config both select the oracle base layer; "
-            "set only one."
-        )
-    if config_dataset:
-        oracle_cfg = _resolve_dataset_config(config_dataset)
-    else:
-        oracle_cfg = load_oracle_config(oracle_config_path)
+    oracle_cfg = load_oracle_config(cfg.get("oracle_config"))
     kwargs = oracle_kwargs_from_config(cfg, oracle_cfg)
     pset = kwargs.pop("parameter_set", None)
 
@@ -528,15 +459,12 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
 
     Unlike :func:`build_oracle_from_config`, this needs no experiment YAML /
     protocols list -- it is the convenient entry point for tooling that just wants
-    a calibrated oracle. ``source`` is a packaged dataset name (one of
-    :data:`_VALID_DATASETS`), a path to a ``config_oracle_*.yml``, or an already-
-    parsed dict. The three-layer precedence collapses to a single oracle-config
+    a calibrated oracle. ``source`` is a path to a ``config_oracle_*.yml``
+    or an already-parsed dict. The three-layer precedence collapses to a single oracle-config
     layer here (no experiment overlay).
     """
     if isinstance(source, dict):
         oracle_cfg = source
-    elif isinstance(source, str) and source in _VALID_DATASETS:
-        oracle_cfg = _resolve_dataset_config(source)
     else:
         oracle_cfg = load_oracle_config(source)
 
@@ -610,7 +538,6 @@ def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> lis
             fk = exc.failure_kind
             oracle.history.append({
                 "call_idx":     len(oracle.history),
-                "model":        getattr(oracle, "_model", None),
                 "failed":       True,
                 "failure_kind": fk,
                 "fidelity":     "failed",

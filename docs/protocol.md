@@ -50,8 +50,6 @@ maps 1:1 onto a {class}`~battery_oracle.PyBaMMOracle` constructor kwarg via
 PyBaMM-free and independently testable. Schema (defaults shown):
 
 ```yaml
-model:
-  type: SPMe                     # SPMe | SPM | DFN         -> model=
 cycling:
   n_cycles: 1                    #                          -> n_cycles=
   temperature_K: 298.15          # isothermal ambient T     -> temperature_K=

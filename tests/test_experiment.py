@@ -22,17 +22,15 @@ from battery_oracle.experiment import (
 
 def test_load_packaged_default():
     cfg = load_experiment_config(None)
-    for section in ("model", "cycling", "degradation", "eis", "protocols"):
+    for section in ("cycling", "degradation", "eis", "protocols"):
         assert section in cfg
-    assert cfg["model"]["type"] == "DFN"
     assert len(cfg["protocols"]) >= 1
 
 
 def test_oracle_kwargs_mapping():
     cfg = load_experiment_config(None)
     kw = oracle_kwargs_from_config(cfg)
-    # model passthrough + core fields
-    assert kw["model"] == cfg["model"]["type"]
+    # core fields
     assert kw["degradation_preset"] == cfg["degradation"]["preset"]
     assert kw["n_cycles"] == int(cfg["cycling"]["n_cycles"])
     assert kw["temperature_K"] == float(cfg["cycling"]["temperature_K"])
@@ -54,15 +52,6 @@ def test_scale_defaults_when_omitted():
     kw = oracle_kwargs_from_config(cfg)
     for f in ("kinetics_scale", "sei_rate_scale", "dead_li_decay_scale", "plating_rate_scale"):
         assert kw[f] == 1.0
-
-
-@pytest.mark.parametrize("name", ["SPM", "SPMe"])
-def test_reduced_model_config_is_rejected(name):
-    """SPM and SPMe were removed (2026-10-16): a config asking for one fails loudly."""
-    cfg = load_experiment_config(None)
-    cfg["model"]["type"] = name
-    with pytest.raises(ValueError):
-        _validate_config(cfg)
 
 
 def test_ecm_fitter_default_and_mapping():
@@ -98,7 +87,6 @@ def test_protocols_shape_and_order():
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda c: c["model"].__setitem__("type", "XYZ"),        # unknown model
         lambda c: c["degradation"].__setitem__("preset", "boom"),  # unknown preset
         lambda c: c.__setitem__("protocols", []),               # empty protocols
         lambda c: c["protocols"][0].pop("dur_1_h"),             # missing field
@@ -117,7 +105,7 @@ def test_load_oracle_config_packaged_default():
     for section in ("cycling", "solver", "protocol_bounds", "eis", "ecm", "degradation",
                     "protocol_scaling"):
         assert section in oc
-    assert "primary" in oc["solver"] and "emergency" in oc["solver"]
+    assert "dfn" in oc["solver"] and "emergency" in oc["solver"]
     assert set(oc["degradation"]["preset_constants"]) == {"nominal", "accelerated", "severe"}
 
 
@@ -139,9 +127,7 @@ def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
         "soc_clip_min": 0.05, "soc_clip_max": 0.99, "linkk_c": 0.85, "linkk_max_M": 50,
         "cpe_w_default": 0.1, "cpe_n_default": 0.80, "ecm_rescale_target_r0": 0.1334,
         "autoeis_num_warmup": 500, "autoeis_num_samples": 200,
-        "solver_rtol": 1e-3, "solver_atol": 1e-6, "solver_dt_max_s": 60.0,
         "emergency_solver_rtol": 1e-2, "emergency_solver_atol": 1e-5,
-        "emergency_solver_dt_max_s": 10.0,
         "c_min_mA": 50.0, "c_max_mA": 10_000.0, "c2_min_mA": 20.0, "c2_max_mA": 10_000.0,
         "dur_min_s": 60.0, "dur_max_s": 28_800.0, "v_charge_max": 4.3,
         "v_discharge_min": 3.0, "charge_stage_max_s": 900.0,
@@ -156,12 +142,6 @@ def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
     assert kw["cpe_n_seed"] == {"P3n": 0.80, "P5n": 0.75,
                                 "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}
     assert kw["preset_constants"]["plating_kinetic_rate_constant_m_s"] == pytest.approx(1e-8)
-
-
-def test_base_oracle_yaml_emits_model():
-    """#1: model is now in the base oracle YAML layer (was only in the experiment YAML)."""
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["model"] == "DFN"
 
 
 def test_base_oracle_yaml_emits_dfn_solver_settings():
@@ -194,7 +174,6 @@ def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
     """#14: an LFP-declared calibration YAML must not pair with an NMC parameter set."""
     from battery_oracle.experiment import build_oracle_from_config
     cfg = {
-        "model": {"type": "DFN"},
         "cycling": {"parameter_set": "Chen2020", "chemistry": "Prada2013"},
         "degradation": {"preset": "accelerated"},
         "eis": {}, "ecm": {},
@@ -203,35 +182,6 @@ def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
     }
     with pytest.raises(ValueError, match="does not match"):
         build_oracle_from_config(cfg)
-
-
-@pytest.mark.parametrize("dataset", ["calce", "oxford", "matr"])
-def test_resolve_dataset_config_raises_when_unshipped(dataset):
-    """#12: none of the per-dataset calibration YAMLs are shipped yet (Tier 2,
-    still on the TODO list) -- resolving a valid dataset name must fail loudly
-    with an informative FileNotFoundError, not silently fall back to defaults."""
-    from battery_oracle.experiment import _resolve_dataset_config
-    with pytest.raises(FileNotFoundError, match="not shipped in this release"):
-        _resolve_dataset_config(dataset)
-
-
-def test_config_dataset_and_oracle_config_are_mutually_exclusive():
-    """#12: both select the base layer, so setting both must raise."""
-    from battery_oracle.experiment import build_oracle_from_config
-    cfg = {
-        "model": {"type": "DFN"}, "cycling": {}, "degradation": {"preset": "nominal"},
-        "eis": {}, "ecm": {}, "oracle_config": "somewhere.yml",
-        "protocols": [{"C_rate_1": 100, "C_rate_2": 50, "duration_1": 1,
-                       "duration_2": 0.5, "D_rate": 100, "duration_d": 1}],
-    }
-    with pytest.raises(ValueError, match="only one"):
-        build_oracle_from_config(cfg, config_dataset="matr")
-
-
-def test_resolve_dataset_config_rejects_unknown():
-    from battery_oracle.experiment import _resolve_dataset_config
-    with pytest.raises(ValueError):
-        _resolve_dataset_config("nope")
 
 
 def test_oracle_kwargs_from_oracle_config_preset_resolution():
@@ -262,8 +212,8 @@ def test_built_oracle_matches_resolved_kwargs():
     kw = oracle_kwargs_from_config(cfg, oc)
     o = build_oracle_from_config(cfg)
     attr_to_kwarg = {
-        "_solver_rtol": "solver_rtol", "_solver_atol": "solver_atol",
-        "_solver_dt_max_s": "solver_dt_max_s",
+        "_dfn_solver_rtol": "dfn_solver_rtol", "_dfn_solver_atol": "dfn_solver_atol",
+        "_dfn_solver_dt_max_s": "dfn_solver_dt_max_s",
         "_emergency_solver_rtol": "emergency_solver_rtol",
         "_C_MIN_mA": "c_min_mA", "_C_MAX_mA": "c_max_mA",
         "_C2_MIN_mA": "c2_min_mA", "_C2_MAX_mA": "c2_max_mA",
@@ -299,13 +249,13 @@ def test_oracle_config_pointer_overrides_defaults(tmp_path):
         "protocol_scaling:\n"
         "  kinetics_scale: 0.42\n"
         "solver:\n"
-        "  primary:\n"
+        "  dfn:\n"
         "    rtol: 1.0e-4\n"
     )
     cfg = load_experiment_config(None)
     cfg["oracle_config"] = str(custom_oracle)
     o = build_oracle_from_config(cfg)
-    assert o._solver_rtol == pytest.approx(1e-4)
+    assert o._dfn_solver_rtol == pytest.approx(1e-4)
     # Fields the custom oracle YAML omits (e.g. protocol_bounds entirely) fall
     # back to PyBaMMOracle's own Python-literal defaults, not an error.
     assert o._C_MAX_mA == pytest.approx(10_000.0)
@@ -322,4 +272,3 @@ def test_run_experiment_default():
     history = run_experiment(path)
     assert isinstance(history, list)
     assert len(history) >= 1
-    assert history[0].get("model") == "DFN"

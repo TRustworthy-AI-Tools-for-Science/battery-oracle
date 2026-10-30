@@ -10,10 +10,6 @@
 # top-level `oracle_config:` field at one to use it (see that skill for the
 # calibration workflow).
 
-model:
-  type: DFN                        # DFN only -> PyBaMMOracle(model=...); SPMe and SPM removed 2026-10-16. Base layer; an
-                                   # experiment YAML's `model.type` overlays this (see experiment.py).
-
 cycling:
   n_cycles: 1
   parameter_set: Chen2020          # pybamm.ParameterValues("Chen2020"), 5 Ah NMC/graphite pouch cell
@@ -47,23 +43,16 @@ bol:
   contact_resistance_ohm: null
 
 solver:
-  # PyBaMM solver tolerances. IDAKLUSolver (primary) ignores dt_max_s; it only
-  # applies to the CasadiSolver fallback used when IDAKLU is unavailable.
-  primary:
-    rtol: 1.0e-3
-    atol: 1.0e-6
-    dt_max_s: 60.0
   # Deliberately a different solver family (not just looser primary tolerances):
   # CasadiSolver(mode="safe") integrates through the CC->CV control-mode switch
   # that reproducibly trips IDAKLUSolver. See oracle.py:_build_native_state.
   emergency:
     rtol: 1.0e-2
     atol: 1.0e-5
-    dt_max_s: 10.0
-  # DFN is a stiff coupled DAE: tighter IDAKLU tolerances than SPMe, and a low
-  # dt_max on its Casadi fallback tier(s) so IDA can backstep before a hard
-  # failure at the CC->CV switch instead of silently truncating. Only used when
-  # PyBaMMOracle(model="DFN"). See oracle.py:_build_native_state.
+  # DFN is a stiff coupled DAE: tight IDAKLU tolerances, and a low dt_max on the
+  # Casadi solvers (primary fallback when IDAKLU is unavailable, and emergency) so
+  # IDA can backstep before a hard failure at the CC->CV switch instead of silently
+  # truncating. See oracle.py:_build_native_state.
   dfn:
     rtol: 1.0e-6
     atol: 1.0e-8

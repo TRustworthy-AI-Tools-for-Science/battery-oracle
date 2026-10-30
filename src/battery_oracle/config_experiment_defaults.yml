@@ -12,7 +12,7 @@
 #
 # Every field below maps directly onto a PyBaMMOracle constructor kwarg; the
 # mapping is documented in experiment.oracle_kwargs_from_config. Every field
-# is optional except the five top-level sections below (model/cycling/
+# is optional except the four top-level sections below (cycling/
 # degradation/eis/protocols) -- anything omitted falls back to
 # config_oracle_defaults.yml's value, which itself falls back to
 # PyBaMMOracle's own Python-literal default.
@@ -22,9 +22,6 @@
 # packaged config_oracle_defaults.yml as the base layer for every field below.
 # null (default) uses the packaged defaults.
 oracle_config: null
-
-model:
-  type: DFN                  # DFN only -> PyBaMMOracle(model=...)  (SPMe and SPM removed 2026-10-16)
 
 cycling:
   n_cycles: 1                # -> n_cycles

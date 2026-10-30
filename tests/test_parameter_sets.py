@@ -107,7 +107,7 @@ def test_dfn_lir2032_oracle_applies_real_cell_currents_unscaled():
     from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
 
     q = ps.nominal_capacity_mah("LiR2032")
-    o = PyBaMMOracle(chemistry="LiR2032", model="DFN", ecm_model_fn=_randles_stub_ecm,
+    o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=_randles_stub_ecm,
                      real_cell_capacity_mah=q, discharge_mode="protocol",
                      c_min_mA=0.01 * q, c2_min_mA=0.01 * q, c_max_mA=4.5 * q, c2_max_mA=4.5 * q,
                      dfn_max_crate=4.5, dur_min_s=1.0, ecm_rescale_target_r0=None)

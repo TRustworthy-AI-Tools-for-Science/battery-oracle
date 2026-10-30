@@ -145,42 +145,13 @@ they are regenerable from the `sweep_results.csv` + `calibration_summary.json`
 sidecars via {func}`~battery_oracle.plot_tune_oracle_summary` (or the
 `battery-oracle-tune-plot` CLI), without re-running the search.
 
-## Multi-dataset & multi-chemistry calibration (#12, #14)
+## Other datasets and chemistries
 
-The package ships **placeholder** per-dataset calibration configs alongside
-`config_oracle_defaults.yml`:
-
-| File | Dataset | Chemistry (`parameter_set`) | Notes |
-|------|---------|-----------------------------|-------|
-| `config_oracle_calce.yml`  | CALCE CS2         | `Chen2020` (NMC proxy) | 1C CC-CV / 0.5C, cycles 1–100 |
-| `config_oracle_oxford.yml` | Oxford Kokam      | `Chen2020` (NMC proxy) | 1C, 40 °C, 740 mAh |
-| `config_oracle_matr.yml`   | MATR (Severson 2019) | `Prada2013` (**LFP**) | 2.0–3.65 V window, ~1.1 Ah |
-
-They carry the four calibration scales at their **chemistry defaults** (all `1.0`)
-and a `_calibration.status: PLACEHOLDER` marker: the scales are **not yet
-calibrated**. All three datasets ship capacity/cycling but no EIS, so they calibrate
-through the engine's [capacity-fade mode](#targets-and-scoring) — a real, supported
-path, not a stub (see the adapter procedure below). The only remaining step is the
-data itself: download the dataset, build the cache, and run the `battery-oracle-tune`
-command in each file's header.
-
-Select one by name (no experiment YAML needed):
-
-```python
-from battery_oracle import build_oracle_from_oracle_config
-oracle = build_oracle_from_oracle_config("matr")   # LFP oracle with the 3.65 V window
-```
-
-…or as the base layer of an experiment config (mutually exclusive with
-`oracle_config`):
-
-```python
-from battery_oracle import build_oracle_from_config
-oracle = build_oracle_from_config(experiment_cfg, config_dataset="calce")
-```
-
-The config's `chemistry` is validated against its `parameter_set` at build time,
-so an LFP-calibrated YAML cannot be silently paired with an NMC cell.
+A calibration for another dataset is its own `config_oracle_*.yml`, built from that
+dataset's cache and selected as an experiment config's `oracle_config` (or passed to
+{func}`~battery_oracle.build_oracle_from_oracle_config`). The config's `chemistry` is
+validated against its `parameter_set` at build time, so an LFP-calibrated YAML cannot
+be silently paired with an NMC cell.
 
 ### Dataset → cache adapter (procedure)
 
@@ -199,7 +170,7 @@ SOH-loss rate to the dataset's, leaving `kinetics_scale` near its chemistry defa
 3. Write the cache JSON, then:
    ```bash
    battery-oracle-tune --cache matr.json --chemistry Prada2013 --preset nominal \
-       --output-config src/battery_oracle/config_oracle_matr.yml
+       --output-config config_oracle_matr.yml
    ```
 
 The written config records the fit under `_calibration.capacity_fade`

@@ -173,22 +173,10 @@ _CPE_N_DEFAULT = 0.80
 _ECM_RESCALE_TARGET_R0 = 0.1334
 
 
-# Reduced-order PyBaMM model, selectable via ``PyBaMMOracle(model=...)``. Applied
-# identically to the cycling model (``_build_native_state``) and the internal EIS
-# model (``_eis_and_correct``). All three build with both the degradation option
-# dict from ``_build_degradation_config`` and the EIS ``surface form: differential``
-# option (verified against PyBaMM 26.5.0).
-#   DFN  — full Doyle–Fuller–Newman: the ONLY model (electrolyte transport resolved --
-#          required at the jones2022 C-rates, 1.5-4C).
-# The reduced models were REMOVED (2026-10-16): SPMe had been the default and the DFN's
-# silent fallback, so a run could report "DFN" results computed with a reduced model;
-# SPM (no electrolyte at all) was kept only for comparisons. A model that does not
-# solve now fails loudly (OracleFailure) instead of being swapped for another.
-_MODEL_CLASSES = {
-    "DFN":  _pb.lithium_ion.DFN,
-}
-REMOVED_MODELS = {name: f"{name} was removed from the oracle (2026-10-16); use model='DFN'"
-                  for name in ("SPMe", "SPM")}
+# The cycling and EIS models are both PyBaMM's DFN, built with the degradation option
+# dict from ``_build_degradation_config`` (and, for EIS, ``surface form: differential``).
+# A model that does not solve fails loudly (OracleFailure); it is never swapped for another.
+_MODEL_CLS = _pb.lithium_ion.DFN
 
 # Ideal gas constant (J/mol/K), for the Arrhenius EIS temperature correction (#11).
 _R_GAS = 8.314462618
@@ -227,9 +215,7 @@ class FailureKind(str, Enum):
     SOLVER_FAILURE     = "solver_failure"       # solver raised and no recovery succeeded
     VOLTAGE_INFEASIBLE = "voltage_infeasible"   # experiment voltage window violated
     END_OF_LIFE        = "end_of_life"          # SOH < eol_capacity_fraction
-    ECM_NONCONVERGENCE = "ecm_nonconvergence"   # AutoEIS and Randles stub both fail (aspirational)
-    THERMAL_RUNAWAY    = "thermal_runaway"      # T_cell exceeds runaway threshold (future)
-    SOLVER_DEGRADED    = "solver_degraded"      # fell back to a lower-fidelity solver/model (non-fatal)
+    SOLVER_DEGRADED    = "solver_degraded"      # the emergency solver was needed (non-fatal)
 
 
 class OracleFailure(RuntimeError):
@@ -732,16 +718,16 @@ def _build_degradation_config(
         }
         _override = {
             "Lithium plating kinetic rate constant [m.s-1]": (
-                "set", pc.get("plating_kinetic_rate_constant_m_s", 1e-8) * plating_rate_scale
+                pc.get("plating_kinetic_rate_constant_m_s", 1e-8) * plating_rate_scale
             ),
             "Dead lithium decay constant [s-1]": (
-                "set", pc.get("dead_lithium_decay_constant_s", 4e-6) * dead_li_decay_scale
+                pc.get("dead_lithium_decay_constant_s", 4e-6) * dead_li_decay_scale
             ),
             # Zero out OKane2022's formation-cycle plated Li: the oracle starts with
             # a fresh cell.  Non-zero initial concentration strips during early cycling
             # at low C-rates and drives "Loss of capacity to ... plating" negative.
             "Initial plated lithium concentration [mol.m-3]": (
-                "set", pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
+                pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
             ),
         }
 
@@ -754,13 +740,13 @@ def _build_degradation_config(
         }
         _override = {
             "Lithium plating kinetic rate constant [m.s-1]": (
-                "set", pc.get("plating_kinetic_rate_constant_m_s", 1e-7) * plating_rate_scale
+                pc.get("plating_kinetic_rate_constant_m_s", 1e-7) * plating_rate_scale
             ),
             "Dead lithium decay constant [s-1]": (
-                "set", pc.get("dead_lithium_decay_constant_s", 1e-4) * dead_li_decay_scale
+                pc.get("dead_lithium_decay_constant_s", 1e-4) * dead_li_decay_scale
             ),
             "Initial plated lithium concentration [mol.m-3]": (
-                "set", pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
+                pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
             ),
         }
 
@@ -775,6 +761,7 @@ def _build_degradation_config(
         "Lithium plating kinetic rate constant [m.s-1]",
         "Dead lithium decay constant [s-1]",
         "Dead lithium decay rate [s-1]",
+        "Lithium metal partial molar volume [m3.mol-1]",     # plated / dead Li thickness
     ]
     try:
         pv_ref = _pb.ParameterValues("OKane2022")
@@ -789,64 +776,9 @@ def _build_degradation_config(
     except Exception:
         pass   # OKane2022 unavailable — plating parameters stay as-is
 
-    # Borrow particle mechanics parameters that Chen2020 lacks from Ai2020.
-    # "swelling and cracking" requires partial molar volumes, crack geometry,
-    # cracking rate functions, and elastic constants — none in Chen2020.
-    # "Lithium metal partial molar volume" is absent from all standard sets;
-    # use 1.3e-5 m³/mol (standard value from OKane2022/Ecker2015).
-    _CRACK_BORROW_KEYS = [
-        "Negative electrode partial molar volume [m3.mol-1]",
-        "Positive electrode partial molar volume [m3.mol-1]",
-        "Negative electrode volume change",
-        "Positive electrode volume change",
-        "Negative electrode reference concentration for free of deformation [mol.m-3]",
-        "Positive electrode reference concentration for free of deformation [mol.m-3]",
-        "Negative electrode initial crack length [m]",
-        "Negative electrode initial crack width [m]",
-        "Negative electrode number of cracks per unit area [m-2]",
-        "Negative electrode cracking rate",
-        "Negative electrode activation energy for cracking rate [J.mol-1]",
-        "Negative electrode critical stress [Pa]",
-        "Negative electrode Young's modulus [Pa]",
-        "Negative electrode Poisson's ratio",
-        "Negative electrode Paris' law constant b",
-        "Negative electrode Paris' law constant m",
-        "Positive electrode initial crack length [m]",
-        "Positive electrode initial crack width [m]",
-        "Positive electrode number of cracks per unit area [m-2]",
-        "Positive electrode cracking rate",
-        "Positive electrode activation energy for cracking rate [J.mol-1]",
-        "Positive electrode critical stress [Pa]",
-        "Positive electrode Young's modulus [Pa]",
-        "Positive electrode Poisson's ratio",
-        "Positive electrode Paris' law constant b",
-        "Positive electrode Paris' law constant m",
-        "Initial SEI on cracks thickness [m]",
-    ]
-    try:
-        pv_ai = _pb.ParameterValues("Ai2020")
-        for k in _CRACK_BORROW_KEYS:
-            try:
-                _ = pv[k]
-            except (KeyError, Exception):
-                try:
-                    pv[k] = pv_ai[k]
-                except Exception:
-                    pass
-        # Not in any standard set; use known physical value
+    for key, val in _override.items():
         try:
-            _ = pv["Lithium metal partial molar volume [m3.mol-1]"]
-        except (KeyError, Exception):
-            pv["Lithium metal partial molar volume [m3.mol-1]"] = 1.3e-5
-    except Exception:
-        pass   # Ai2020 unavailable — particle mechanics parameters stay as-is
-
-    for key, (op, val) in _override.items():
-        try:
-            if op == "multiply":
-                pv[key] = float(pv[key]) * val
-            else:
-                pv[key] = val
+            pv[key] = val
         except Exception:
             pass   # key absent — skip silently
 
@@ -885,8 +817,8 @@ class CycleResult:
     capacity_ah : float
         Measured or voltage-limited discharge capacity for this cycle, in Ah.
     fidelity : str
-        ``"full"`` (primary solver/model succeeded) or ``"reduced"`` (a
-        solver/model fallback fired -- see ``FailureKind.SOLVER_DEGRADED``).
+        ``"full"`` for every completed cycle (the model is never swapped; an
+        emergency-solver retry is recorded in ``failure_kind`` instead).
     failure_kind : FailureKind or None
         Non-fatal degradation classification recorded for this cycle, if any.
         ``None`` for a full-fidelity cycle. (A *fatal* failure raises
@@ -1025,12 +957,6 @@ class PyBaMMOracle:
         explicit ``parameter_values`` is passed. A non-default chemistry needs
         its own calibration (degradation preset, voltage window) — see
         :meth:`from_config` with a matching ``config_oracle_*.yml``.
-    model : str
-        PyBaMM model — ``"DFN"`` (default and only option; full Doyle–Fuller–Newman,
-        needed at the jones2022 C-rates where electrolyte gradients matter). Drives both
-        the cycling model and the internal EIS model. ``"SPMe"`` and ``"SPM"`` were
-        removed (2026-10-16) and raise a ValueError. NOTE: the legacy degradation presets were calibrated against SPMe,
-        so a preset may reach end-of-life on a different cycle count under DFN.
     degradation_preset : str
         Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
         or ``"severe"``.  See :func:`_build_degradation_config`. Calibrated (legacy)
@@ -1079,7 +1005,7 @@ class PyBaMMOracle:
     seeds/AutoEIS sampler settings) is a lower-level constant documented in
     ``config_oracle_defaults.yml``, grouped as:
 
-    * ``solver_*`` / ``dfn_solver_*`` / ``emergency_solver_*`` — solver tolerances
+    * ``dfn_solver_*`` / ``emergency_solver_*`` — solver tolerances
       (YAML section ``solver``).
     * ``c_min_mA`` / ``c_max_mA`` / ``dur_min_s`` / ``dur_max_s`` / ``v_charge_max`` /
       ``v_discharge_min`` / ... — protocol sanitisation bounds (YAML ``protocol_bounds``).
@@ -1098,9 +1024,6 @@ class PyBaMMOracle:
       ``config_oracle_*.yml``).
     """
 
-    # Steps appended when capacity_check=True (must match _cap_check_steps()).
-    _N_CAP_CHECK_STEPS: int = 4
-
     def __init__(
         self,
         ecm_model_fn=None,
@@ -1111,7 +1034,6 @@ class PyBaMMOracle:
         # explicit parameter_values object is passed. Non-Chen2020 chemistries need
         # their own calibration YAML (bounds/preset) — see _SUPPORTED_CHEMISTRIES.
         chemistry: str = "Chen2020",
-        model: str = "DFN",
         degradation_preset: str = "accelerated",
         eol_capacity_fraction: float = 0.80,
         capacity_check: bool = False,
@@ -1177,12 +1099,8 @@ class PyBaMMOracle:
         circuit: str | None = None,
         action_names: list[str] | None = None,
         # -- Solver tolerances (config_oracle_defaults.yml: solver.*) --------
-        solver_rtol: float = 1e-3,
-        solver_atol: float = 1e-6,
-        solver_dt_max_s: float = 60.0,
         emergency_solver_rtol: float = 1e-2,
         emergency_solver_atol: float = 1e-5,
-        emergency_solver_dt_max_s: float = 10.0,
         # -- DFN-specific solver settings (config_oracle_defaults.yml: solver.dfn) --
         # DFN is a stiff coupled DAE; it needs tighter IDAKLU tolerances than SPMe,
         # and its Casadi fallback tiers use a low dt_max so IDA can backstep before
@@ -1362,12 +1280,8 @@ class PyBaMMOracle:
         self._rng = np.random.default_rng(seed)
 
         # Solver tolerances (see _build_native_state).
-        self._solver_rtol = float(solver_rtol)
-        self._solver_atol = float(solver_atol)
-        self._solver_dt_max_s = float(solver_dt_max_s)
         self._emergency_solver_rtol = float(emergency_solver_rtol)
         self._emergency_solver_atol = float(emergency_solver_atol)
-        self._emergency_solver_dt_max_s = float(emergency_solver_dt_max_s)
         self._dfn_solver_rtol = float(dfn_solver_rtol)
         self._dfn_solver_atol = float(dfn_solver_atol)
         self._dfn_solver_dt_max_s = float(dfn_solver_dt_max_s)
@@ -1408,24 +1322,6 @@ class PyBaMMOracle:
         )
         self._autoeis_num_warmup = int(autoeis_num_warmup)
         self._autoeis_num_samples = int(autoeis_num_samples)
-        try:
-            self._c20_A = float(self._pv["Nominal cell capacity [A.h]"]) / 20.0
-        except Exception:
-            self._c20_A = 5.0 / 20.0  # Chen2020 nominal 5 Ah → 0.25 A
-
-        # Model selection (DFN only; SPMe and SPM removed).
-        # Store both the name (provenance/history) and the resolved class (applied
-        # at the cycling and EIS instantiation sites). _build_degradation_config is
-        # model-agnostic — the class is applied only where the model is built.
-        self._model = str(model)
-        if self._model in REMOVED_MODELS:
-            raise ValueError(REMOVED_MODELS[self._model])
-        if self._model not in _MODEL_CLASSES:
-            raise ValueError(
-                f"Unknown model {model!r}; choose one of {sorted(_MODEL_CLASSES)}."
-            )
-        self._model_cls = _MODEL_CLASSES[self._model]
-
         # Build degradation model options and (optionally) override parameters.
         # "ec reaction limited" is always the SEI base; accelerated/severe add
         # lithium plating and particle cracking on top of it.
@@ -1588,18 +1484,9 @@ class PyBaMMOracle:
             self._sei_to_R      = 1.0 / (sigma_sei * a_s * V_el) if sigma_sei > 0 else 0.0
             self._dead_li_to_R  = 5e-2 / (a_s * V_el)  # ρ_dead≈0.05 Ω·m [OKane2022]
 
-            try:
-                N_cr = float(self._pv["Negative electrode number of cracks per unit area [m-2]"])
-                self._crack_sei_R_base = (
-                    1.0 / (sigma_sei * 2.0 * N_cr * V_el) if sigma_sei > 0 else 0.0
-                )
-            except Exception:
-                self._crack_sei_R_base = 0.0   # Ai2020 crack density not in preset
-
         except Exception:
             self._eps_s_nominal    = None
             self._sei_to_R         = 0.0
-            self._crack_sei_R_base = 0.0
             self._dead_li_to_R     = 0.0
 
     @classmethod
@@ -1617,8 +1504,6 @@ class PyBaMMOracle:
         ----------
         source : str, Path, dict, or None, optional
             * ``None`` (default) — the packaged ``config_oracle_defaults.yml``.
-            * One of the packaged per-dataset calibration names (``"calce"``,
-              ``"oxford"``, ``"matr"``).
             * A path to a custom ``config_oracle_*.yml`` (e.g. a
               ``tune.write_oracle_config`` output).
             * An already-parsed config ``dict``.
@@ -1630,14 +1515,13 @@ class PyBaMMOracle:
         Examples
         --------
         >>> oracle = PyBaMMOracle.from_config()          # packaged defaults
-        >>> oracle = PyBaMMOracle.from_config("calce")    # packaged calibration
         >>> oracle = PyBaMMOracle.from_config("my_cell.yml")  # custom YAML
         """
         from battery_oracle.experiment import build_oracle_from_oracle_config
 
         # build_oracle_from_oracle_config's `source: str | Path | dict` falls
         # through to load_oracle_config(source) for anything that isn't a dict
-        # or a recognised dataset name -- and load_oracle_config(None) loads the
+        # -- and load_oracle_config(None) loads the
         # packaged config_oracle_defaults.yml -- so None is passed through as-is.
         return build_oracle_from_oracle_config(source)
 
@@ -1714,20 +1598,16 @@ class PyBaMMOracle:
         i.e. once per policy) keeps native object lifetimes bounded to one
         policy's iterations instead of the whole multi-seed experiment.
         """
-        self._cycling_model = self._model_cls(options=self._deg_opts)
-        # DFN is a stiff coupled DAE — use tighter IDAKLU tolerances and a low
-        # dt_max on the Casadi fallback (dt_max is a no-op on IDAKLU itself, so it
-        # only bites on the Casadi tier(s), incl. the #4 fallback tier-2).
-        _is_dfn = self._model == "DFN"
-        _rtol = self._dfn_solver_rtol if _is_dfn else self._solver_rtol
-        _atol = self._dfn_solver_atol if _is_dfn else self._solver_atol
-        _dt_max = self._dfn_solver_dt_max_s if _is_dfn else self._solver_dt_max_s
+        self._cycling_model = _MODEL_CLS(options=self._deg_opts)
+        # DFN is a stiff coupled DAE: tight IDAKLU tolerances, and a low dt_max on the
+        # Casadi solvers (dt_max is a no-op on IDAKLU itself).
+        _rtol, _atol = self._dfn_solver_rtol, self._dfn_solver_atol
         try:
             self._solver = self._pb.IDAKLUSolver(rtol=_rtol, atol=_atol)
         except Exception:
             self._solver = self._pb.CasadiSolver(
                 mode="safe",
-                dt_max=_dt_max,
+                dt_max=self._dfn_solver_dt_max_s,
                 rtol=_rtol,
                 atol=_atol,
             )
@@ -1742,7 +1622,7 @@ class PyBaMMOracle:
         # the #4 fallback tier-2 (loose Casadi with the low DFN dt_max).
         self._solver_emerg = self._pb.CasadiSolver(
             mode="safe",
-            dt_max=(self._dfn_solver_dt_max_s if _is_dfn else self._emergency_solver_dt_max_s),
+            dt_max=self._dfn_solver_dt_max_s,
             rtol=self._emergency_solver_rtol,
             atol=self._emergency_solver_atol,
         )
@@ -1795,12 +1675,6 @@ class PyBaMMOracle:
     # cutoffs from Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806), Methods
     # "Battery cycling": two-stage CC charge (<=15 min/stage) stopping at
     # 4.3 V (no CV hold), single-stage CC discharge until 3.0 V.
-    # jones2022 CR2032 coin cells vs Chen2020 SPMe (5 Ah): protocol currents are
-    # scaled so the same C-rate fraction is applied to the larger cell. Default
-    # assumes a ~200 mAh cell; pass real_cell_capacity_mah to __init__ for an
-    # accurate per-cell scale (real measured capacity varies, e.g. PJ121 ~42 mAh).
-    _CAP_SCALE = 5_000.0 / 200.0  # legacy default, kept for reference/back-compat
-
     def _sanitise_current(self, val_mA: float, default_mA: float,
                           lo: float, hi: float, *,
                           label: str | None = None,
@@ -1827,14 +1701,11 @@ class PyBaMMOracle:
     def _current_ceiling_mA(self, base_hi: float) -> float:
         """Model-aware upper current bound (in the 5 Ah PyBaMM frame, mA).
 
-        Non-DFN models (none remain) kept ``base_hi``. DFN tightens to
-        ``_dfn_max_crate`` (1.5C) — computed from the cell's own C/20 current, so
+        Tightened to ``_dfn_max_crate`` — computed from the cell's own C/20 current, so
         no mA value is hardcoded (``nominal_A = 20 * self._c20_A``).
         """
-        if self._model == "DFN":
-            dfn_hi_mA = self._dfn_max_crate * (20.0 * self._c20_A) * 1000.0
-            return min(base_hi, dfn_hi_mA)
-        return base_hi
+        dfn_hi_mA = self._dfn_max_crate * (20.0 * self._c20_A) * 1000.0
+        return min(base_hi, dfn_hi_mA)
 
     def _sanitise_duration(self, val_h: float, default_h: float, *,
                            label: str | None = None,
@@ -2065,7 +1936,7 @@ class PyBaMMOracle:
         def _measure(start_state, t0: float):
             """Double-layer EIS model from ``start_state`` at rest time ``t0``, to t_end."""
             opts = {**self._deg_opts, "surface form": "differential"}
-            model = self._model_cls(options=opts)
+            model = _MODEL_CLS(options=opts)
             model.set_initial_conditions_from(start_state, inplace=True)
             model = EISSimulator.set_up_for_eis(None, model)
             # dense output in the first second after t0: the stiffest part of the rest
@@ -2097,7 +1968,7 @@ class PyBaMMOracle:
             # and the first EIS window starts after the 20 min rest, so nothing
             # measured changes.
             t_shift = 30.0
-            m0 = self._model_cls(options=self._deg_opts)
+            m0 = _MODEL_CLS(options=self._deg_opts)
             m0.set_initial_conditions_from(step.first_state, inplace=True)
             pre = pybamm.Simulation(m0, parameter_values=pv, var_pts=self._model_var_pts(m0), submesh_types=self._model_submesh(m0),
                                     solver=pybamm.IDAKLUSolver(rtol=1e-6, atol=1e-6,
@@ -2411,20 +2282,11 @@ class PyBaMMOracle:
         # --- Pre-read state-variable degradation quantities (post-hoc shifts) ---
         # SEI film is pure ohmic [Christensen & Newman, J. Electrochem. Soc. 151:A1977, 2004]
         sei_thick       = 0.0
-        crack_sei_thick = 0.0
-        l_crack         = 0.0
         dead_li_thick   = 0.0
 
         if self._sei_to_R > 0.0:
             try:
                 sei_thick = float(sol["X-averaged negative SEI thickness [m]"].entries[-1])
-            except Exception:
-                pass
-
-        if self._crack_sei_R_base > 0.0:
-            try:
-                crack_sei_thick = float(sol["X-averaged negative SEI on cracks thickness [m]"].entries[-1])
-                l_crack         = float(sol["X-averaged negative particle crack length [m]"].entries[-1])
             except Exception:
                 pass
 
@@ -2435,8 +2297,6 @@ class PyBaMMOracle:
                 pass
 
         delta_R_ohmic = sei_thick * self._sei_to_R
-        if l_crack > 0.0:
-            delta_R_ohmic += crack_sei_thick * self._crack_sei_R_base / l_crack
         delta_R_ohmic += dead_li_thick * self._dead_li_to_R
 
         self._last_eis_mode_used = "equilibrium"
@@ -2461,7 +2321,7 @@ class PyBaMMOracle:
                     Z = (Z.real + d_r) + 1j * Z.imag
                 return self._add_eis_noise(Z)
             sim = _pb.EISSimulation(
-                self._model_cls(options={"surface form": "differential"}),
+                _MODEL_CLS(options={"surface form": "differential"}),
                 parameter_values=eis_pv,
             )
             Z = np.array(sim.solve(self.frequencies, initial_soc=soc)["Impedance [Ohm]"])
@@ -2594,12 +2454,8 @@ class PyBaMMOracle:
 
         self._history.append({
             "call_idx":           len(self._history),
-            "model":              self._model,
             "chemistry":          self._chemistry,
             "protocol":           np.asarray(protocol).copy(),
-            # Post-sanitisation protocol actually simulated (A3.5) — see
-            # _protocol_to_experiment and CycleResult.protocol_applied.
-            "protocol_applied":   protocol_applied,
             # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
             # here, never raised. Successful full-fidelity steps carry None/"full".
             "failure_kind":       self._last_failure_kind,
@@ -2609,23 +2465,17 @@ class PyBaMMOracle:
             "eis_leakage_charge": None if leak_charge is None else np.asarray(leak_charge).copy(),
             "eis_leakage_discharge": None if leak_discharge is None else np.asarray(leak_discharge).copy(),
             "sei_thickness_nm":   sei_thick * 1e9 if self._sei_to_R > 0.0 else float("nan"),
-            "crack_sei_nm":       crack_sei_thick * 1e9,
             "dead_li_nm":         dead_li_thick * 1e9,
-            "l_crack_nm":         l_crack * 1e9,
             "lam_pct":            lam_frac * 100.0,
             "lam_cap_loss_ah":    lam_cap_loss,
-            "end_soc_charge":     soc_charge,
-            "end_soc_discharge":  soc_discharge,
             "end_soh":            soh,
             "T_cell_K":           T_cell_K,
             "capacity_ah":              cap_ah,
             "cumulative_sei_loss_ah":   _try_get("Loss of capacity to negative SEI [A.h]"),
-            "cumulative_crack_sei_ah":  _try_get("Loss of capacity to negative SEI on cracks [A.h]"),
             "cumulative_plating_ah":    _try_get("Loss of capacity to negative lithium plating [A.h]"),
             "cumulative_lli_total_ah":  cumulative_sei_loss,
             "delta_lli_ah":             delta_lli,
             "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
-            "cumulative_dod_throughput_ah": self._cumulative_dod_throughput_ah,
             # Per-step throughput / duration / end voltage (see _step_stats) --
             # what the tune engine's step-shape term compares to real GCPL steps.
             "step_stats":         self._step_stats(last_cycle),
@@ -2743,11 +2593,6 @@ class PyBaMMOracle:
             "ecm_variables_charge":    _ecm_diag_chg.get("_raw_variables", []),
             "ecm_variables_discharge": _ecm_diag_dis.get("_raw_variables", []),
         })
-
-        # Raw state, kept in history for downstream consumers (e.g. a
-        # digital-twin orchestrator building an augmented-state trajectory
-        # for traits_audit.RegimeDetrender / DMDc — see battery-forecast).
-        self._history[-1]["state_raw"] = state.copy()
 
         result = CycleResult(
             state=state,
@@ -2953,7 +2798,7 @@ class PyBaMMOracle:
                             # array-valued state blocks (keep the diagnostics CSV scalar)
                             "ecm_params_charge", "ecm_params_discharge",
                             "ecm_std_charge", "ecm_std_discharge",
-                            "state_raw", "drt_peaks",
+                            "drt_peaks",
                         )
                     }
                     proto = np.asarray(h.get("protocol", []))
@@ -3035,21 +2880,16 @@ class PyBaMMOracle:
                     return a
 
                 sei_ah      = _arr("cumulative_sei_loss_ah")
-                crack_ah    = _arr("cumulative_crack_sei_ah")
                 plating_ah  = _arr("cumulative_plating_ah")
-                lam_ah      = _arr("lam_cap_loss_ah")
                 dod_lam_ah  = _arr("cumulative_dod_lam_ah")
 
                 # Only show mechanisms that are active in this oracle's degradation
-                # config — e.g. SEI on cracks is absent for nominal/accelerated presets.
-                # DoD LAM is an oracle-level additive term (not a PyBaMM model option),
+                # config. DoD LAM is an oracle-level additive term (not a PyBaMM model option),
                 # gated on its own scale; it feeds eol_loss/SOH directly (see __call__).
                 _deg = self._deg_opts
                 _all = [
                     (sei_ah,       "SEI",           True),
-                    (crack_ah,     "SEI on cracks", "SEI on cracks" in _deg),
                     (plating_ah,   "Li plating",    "lithium plating" in _deg),
-                    (lam_ah,       "LAM",           "particle mechanics" in _deg),
                     (dod_lam_ah,   "DoD LAM",       self._dod_lam_scale != 0.0),
                 ]
                 active_arrs   = [a for a, _, flag in _all if flag]

@@ -80,17 +80,17 @@ def test_oracle_spectrum_of_a_relaxed_cell_equals_pybamm_eis():
     # carries a small steady interfacial current, so it is never fully relaxed and its
     # low-frequency impedance differs from the equilibrium one -- physically right,
     # but not a clean reference
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032", model="DFN",
+    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032",
                      thermal="lumped", T_ambient_K=298.15, contact_resistance_ohm=0.05,
                      degradation_preset="nominal", sei_rate_scale=1e-9,
                      eis_mode="nonstationary", eis_noise_level=0.0, frequencies=f, rest_s=600.0)
     pv = o._pv.copy()
-    rest = pybamm.Simulation(o._model_cls(options=o._deg_opts), parameter_values=pv,
+    rest = pybamm.Simulation(pybamm.lithium_ion.DFN(options=o._deg_opts), parameter_values=pv,
                              experiment=pybamm.Experiment(["Rest for 4 hours"]))
     sol = rest.solve(initial_soc=0.5)
     z = o._nonstationary_spectrum(sol.cycles[-1].steps[-1], pv)
     assert o._eis_lin_ok
-    stock = pybamm.EISSimulation(o._model_cls(options={**o._deg_opts, "surface form": "differential"}),
+    stock = pybamm.EISSimulation(pybamm.lithium_ion.DFN(options={**o._deg_opts, "surface form": "differential"}),
                                  parameter_values=pv)
     z_ref = np.asarray(stock.solve(f, initial_soc=0.5)["Impedance [Ohm]"])
     assert np.allclose(z, z_ref, rtol=0.02, atol=1e-4), np.abs(z - z_ref) / np.abs(z_ref)
@@ -101,7 +101,7 @@ def test_oracle_cycle_measures_spectra_inside_the_sweep():
     from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
 
     f = np.logspace(3, -1, 12)
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032", model="DFN",
+    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032",
                      thermal="lumped", T_ambient_K=296.15, contact_resistance_ohm=0.1,
                      eis_mode="nonstationary", eis_noise_level=0.0, frequencies=f,
                      real_cell_capacity_mah=42.0, c_max_mA=150.0, c2_max_mA=150.0, dfn_max_crate=4.0)

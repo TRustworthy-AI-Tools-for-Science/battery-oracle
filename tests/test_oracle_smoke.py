@@ -46,25 +46,6 @@ def test_construct_custom_circuit():
     assert o._ecm_param_names == ["R1", "R2", "P3w", "P3n"]
 
 
-def test_model_kwarg_resolves():
-    import pybamm
-
-    assert PyBaMMOracle()._model == "DFN"  # default
-    assert PyBaMMOracle(model="DFN")._model_cls is pybamm.lithium_ion.DFN
-
-
-@pytest.mark.parametrize("name", ["SPMe", "SPM"])
-def test_reduced_models_are_rejected(name):
-    """SPMe and SPM were removed (2026-10-16): asking for one fails loudly."""
-    with pytest.raises(ValueError, match=f"{name} was removed"):
-        PyBaMMOracle(model=name)
-
-
-def test_model_kwarg_rejects_unknown():
-    with pytest.raises(ValueError):
-        PyBaMMOracle(model="bogus")
-
-
 def test_build_degradation_config_default_matches_module_dict():
     """preset_constants=None (the default) must reproduce today's hardcoded numbers."""
     import pybamm
@@ -117,10 +98,10 @@ def test_protocol_bound_kwarg_overrides_sanitisation():
 
 def test_solver_and_ecm_kwargs_wire_to_instance_attrs():
     o = PyBaMMOracle(
-        solver_rtol=1e-4, linkk_c=0.9, linkk_max_M=40,
+        emergency_solver_rtol=1e-4, linkk_c=0.9, linkk_max_M=40,
         initial_soc=0.7, lam_ceiling=0.9,
     )
-    assert o._solver_rtol == pytest.approx(1e-4)
+    assert o._emergency_solver_rtol == pytest.approx(1e-4)
     assert o._linkk_c == pytest.approx(0.9)
     assert o._linkk_max_M == 40
     assert o._initial_soc == pytest.approx(0.7)
@@ -179,8 +160,8 @@ def test_failure_kind_is_str_enum():
     names = {f.name for f in FailureKind}
     assert {
         "SOLVER_TRUNCATION", "SOLVER_FAILURE", "VOLTAGE_INFEASIBLE",
-        "END_OF_LIFE", "ECM_NONCONVERGENCE", "THERMAL_RUNAWAY", "SOLVER_DEGRADED",
-    } <= names
+        "END_OF_LIFE", "SOLVER_DEGRADED",
+    } == names
 
 
 def test_oracle_failure_carries_failure_kind():
@@ -292,7 +273,7 @@ def test_make_candidates_temperature_protocol_shape():
 # ── Phase 1: DFN solver settings + fallback (#2, #4) ───────────────────────
 
 def test_dfn_solver_kwargs_wire_to_instance_attrs():
-    o = PyBaMMOracle(model="DFN", dfn_solver_rtol=1e-7, dfn_solver_atol=1e-9,
+    o = PyBaMMOracle(dfn_solver_rtol=1e-7, dfn_solver_atol=1e-9,
                      dfn_solver_dt_max_s=0.5, dfn_max_crate=1.2)
     assert o._dfn_solver_rtol == pytest.approx(1e-7)
     assert o._dfn_solver_atol == pytest.approx(1e-9)
@@ -303,7 +284,7 @@ def test_dfn_solver_kwargs_wire_to_instance_attrs():
 def test_dfn_current_ceiling():
     """The DFN current ceiling is _dfn_max_crate of the cell's own nominal current,
     derived from its C/20 current (no hardcoded mA)."""
-    dfn = PyBaMMOracle(model="DFN")
+    dfn = PyBaMMOracle()
     # DFN: ceiling = dfn_max_crate * nominal_A * 1000, derived from _c20_A.
     nominal_A = 20.0 * dfn._c20_A
     expected = min(dfn._C_MAX_mA, dfn._dfn_max_crate * nominal_A * 1000.0)
@@ -314,7 +295,7 @@ def test_dfn_current_ceiling():
 @pytest.mark.slow
 def test_one_cycle_runs_dfn():
     """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works)."""
-    oracle = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
+    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
         state = oracle(make_pybamm_candidates(n_candidates=1)[0])
@@ -322,7 +303,6 @@ def test_one_cycle_runs_dfn():
         pytest.skip(f"DFN oracle reported EOL/solver failure on the first cycle: {exc}")
     assert len(state) == oracle.state_vector_len
     h = oracle.history[-1]
-    assert h["model"] == "DFN"
     # the model is never swapped: a completed cycle is always full fidelity
     assert h["fidelity"] == "full"
 
@@ -330,7 +310,7 @@ def test_one_cycle_runs_dfn():
 def test_dfn_solver_failure_fails_loudly():
     """When both solvers fail on the DFN, the oracle raises OracleFailure: it never
     swaps in a reduced model (the DFN -> SPMe fallback was removed 2026-10-16)."""
-    o = PyBaMMOracle(model="DFN", ecm_model_fn=randles_stub_ecm, capacity_check=False)
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
 
     class _Boom:
@@ -387,23 +367,6 @@ def test_returned_state_matches_schema_and_std_is_nan_for_stub():
     h = oracle.history[-1]
     assert h["failure_kind"] is None and h["fidelity"] == "full"
     assert "ecm_std_charge" in h and "ecm_std_discharge" in h
-
-
-@pytest.mark.slow
-def test_call_stores_raw_state_in_history():
-    """__call__ returns the raw state and keeps a copy in history under
-    'state_raw' — per-regime detrending now lives in traits_audit.RegimeDetrender,
-    fed by a digital-twin orchestrator from this raw per-cycle state history."""
-    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
-    o.reset()
-    try:
-        state = o(make_pybamm_candidates(n_candidates=1)[0])
-    except OracleFailure as exc:
-        pytest.skip(f"oracle failed on first cycle: {exc}")
-    h = o.history[-1]
-    assert len(state) == o.state_vector_len
-    assert "state_raw" in h
-    assert np.allclose(state, h["state_raw"], equal_nan=True)
 
 
 @pytest.mark.slow
@@ -469,7 +432,7 @@ def test_radial_mesh_kwarg_builds_the_fit_mesh():
     import pybamm
 
     o = PyBaMMOracle(radial_mesh={"points": 40, "kind": "surface", "stretch": 3.0})
-    model = o._model_cls()
+    model = pybamm.lithium_ion.DFN()
     var_pts = o._model_var_pts(model)
     assert var_pts["r_n"] == 40 and var_pts["r_p"] == 40
     sub = o._model_submesh(model)
@@ -489,8 +452,10 @@ def test_radial_mesh_rejects_unknown_kind():
 
 
 def test_mesh_setting_x_factor_refines_the_electrolyte_mesh():
+    import pybamm
+
     o = PyBaMMOracle(radial_mesh={"points": 80, "kind": "uniform", "x_factor": 2})
-    model = o._model_cls()
+    model = pybamm.lithium_ion.DFN()
     vp = o._model_var_pts(model)
     d = model.default_var_pts
     assert vp["r_n"] == 80 and vp["x_n"] == 2 * d["x_n"] and vp["x_s"] == 2 * d["x_s"]

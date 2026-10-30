@@ -49,21 +49,21 @@ Key fields:
 | Key | Content |
 |---|---|
 | `end_soh`, `capacity_ah` | LLI-integrator SOH; voltage-limited (or C/20 if `capacity_check`) capacity |
-| `cumulative_{sei_loss,plating,crack_sei}_ah`, `cumulative_lli_total_ah` | per-mechanism lithium-inventory loss since cell birth |
-| `sei_thickness_nm`, `dead_li_nm`, `crack_sei_nm`, `lam_pct` | film/LAM state feeding the EIS corrections |
+| `cumulative_{sei_loss,plating}_ah`, `cumulative_lli_total_ah` | per-mechanism lithium-inventory loss since cell birth |
+| `sei_thickness_nm`, `dead_li_nm`, `lam_pct` | film/LAM state feeding the EIS corrections |
 | `Z_charge_real`, `Z_charge_neg_imag` (+ discharge) | raw synthesized spectra, jones2022 convention — Nyquist is `plot(Z_real, Z_neg_imag)` |
 | `ecm_params_charge/_discharge` | fitted parameter medians (length $P$) |
 | `ecm_samples_*`, `ecm_variables_*` | raw MCMC posterior samples per element (AutoEIS path; `None` for the stub) |
 | `linkk_rmse`, `max_cv`, `converged`, `drt_peaks` | fit diagnostics: Kramers–Kronig residual, posterior dispersion, DRT relaxation times (`[drt]` extra) |
-| `model`, `protocol`, `call_idx` | provenance |
+| `chemistry`, `protocol`, `call_idx` | provenance |
 
 ## ECM fitters
 
-- {func}`~battery_oracle._autoeis_ecm` (default when the `[autoeis]` extra is
+- {func}`~battery_oracle.autoeis_ecm` (default when the `[autoeis]` extra is
   present): Bayesian inference (NumPyro NUTS) per spectrum, with the
   scale-equivariant rescaling and process-hygiene patches described in
   [Divergences](divergences.md). ~seconds per spectrum.
-- {func}`~battery_oracle._randles_stub_ecm`: analytic asymptotics — HF intercept →
+- {func}`~battery_oracle.randles_stub_ecm`: analytic asymptotics — HF intercept →
   ohmic $R$, LF limit → total polarisation split 60/40 across arcs, peak
   $-\mathrm{Im}\,Z$ frequency → CPE admittances. Milliseconds, no JAX. Use it
   whenever the study target is PyBaMM physics rather than fit fidelity:

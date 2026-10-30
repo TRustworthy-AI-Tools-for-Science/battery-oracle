@@ -218,16 +218,6 @@ def test_all_hygiene_no_underscore_names():
     assert all(not name.startswith("_") for name in battery_oracle.__all__)
 
 
-def test_deprecated_underscore_aliases_warn_and_match():
-    with pytest.warns(DeprecationWarning):
-        randles_alias = battery_oracle._randles_stub_ecm
-    assert randles_alias is battery_oracle.randles_stub_ecm
-
-    with pytest.warns(DeprecationWarning):
-        autoeis_alias = battery_oracle._autoeis_ecm
-    assert autoeis_alias is battery_oracle.autoeis_ecm
-
-
 def test_bare_install_defaults_to_randles_stub(monkeypatch, caplog):
     # Regression: without the [autoeis] extra the constructor must default the
     # ECM fitter to the Randles stub instead of raising ImportError on the

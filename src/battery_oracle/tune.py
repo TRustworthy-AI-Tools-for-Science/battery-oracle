@@ -67,12 +67,6 @@ from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
 
 log = logging.getLogger(__name__)
 
-# Calibration model: the DFN, the same model the oracle simulates the experiment with,
-# so fitted and simulated models agree (SPMe, the former default for speed, was
-# removed 2026-10-16).
-CALIBRATION_MODEL = "DFN"
-
-
 def _resolve_circuit(circuit: str | None) -> str:
     """Return *circuit*, or the default ECM circuit loaded from the YAML config.
 
@@ -421,7 +415,6 @@ def run_oracle_candidate(
     preset: str,
     capacity_check: bool,
     circuit: str | None = None,
-    calibration_model: str = CALIBRATION_MODEL,
     chemistry: str = "Chen2020",
     dod_lam_scale: float = 0.0,
     oracle_kwargs: dict | None = None,
@@ -442,13 +435,11 @@ def run_oracle_candidate(
     ``circuit`` sets the oracle's ECM structure (and the ohmic/arc-resistor
     positions the arc-ratio / R1-growth metrics read). It is not assumed: ``None``
     loads the default from ``config_oracle_defaults.yml`` (``ecm.circuit``).
-    ``calibration_model`` pins the model (DFN) for the sweep;
     ``chemistry`` selects the PyBaMM parameter set (#14).
     """
     circuit = _resolve_circuit(circuit)
     ohmic_i, arc_is = _ecm_indices(circuit)
     kwargs: dict[str, Any] = dict(
-        model=calibration_model,
         chemistry=chemistry,
         degradation_preset=preset,
         capacity_check=capacity_check,
@@ -545,10 +536,8 @@ def run_oracle_candidate(
         "n_cycles_completed":   n_completed,
         "implied_eol_cycle":    implied_eol_cycle,
         "oracle_soh_history":   soh_history,
-        # Fallbacks / compensations: per-cycle solver fidelity and degradation
-        # kind, the protocol clamps applied (current/duration bounds), the failure.
-        "fidelity_counts":      {f: sum(h.get("fidelity") == f for h in oracle._history)
-                                 for f in ("full", "reduced")},
+        # Fallbacks / compensations: emergency-solver retries, the protocol clamps
+        # applied (current/duration bounds), the failure.
         "degraded_cycles":      sum(h.get("failure_kind") is not None for h in oracle._history),
         "clamp_signatures":     sorted(oracle._warned_clamp_signatures),
         "failure":              failure_info,
@@ -574,7 +563,6 @@ def collect_eis_comparison(
     preset: str = "accelerated",
     capacity_check: bool = True,
     circuit: str | None = None,
-    calibration_model: str = CALIBRATION_MODEL,
     chemistry: str = "Chen2020",
     max_panels: int = 2,
 ) -> dict | None:
@@ -612,7 +600,7 @@ def collect_eis_comparison(
     max_pos = max(sel_pos.values())
 
     oracle = PyBaMMOracle(
-        model=calibration_model, chemistry=chemistry, degradation_preset=preset,
+        chemistry=chemistry, degradation_preset=preset,
         capacity_check=capacity_check,
         real_cell_capacity_mah=float(cache["real_cell_capacity_mah"]),
         kinetics_scale=best["kinetics_scale"], sei_rate_scale=best["sei_rate_scale"],
@@ -659,7 +647,7 @@ def collect_eis_comparison(
 
 def _extra_oracle_kwargs(oracle_kwargs: dict | None) -> dict:
     """``oracle_kwargs`` minus the keys the probe/candidate builders set themselves."""
-    owned = {"model", "chemistry", "degradation_preset", "capacity_check",
+    owned = {"chemistry", "degradation_preset", "capacity_check",
              "real_cell_capacity_mah", "kinetics_scale", "sei_rate_scale",
              "dead_li_decay_scale", "plating_rate_scale", "dod_lam_scale",
              "circuit", "ecm_model_fn"}
@@ -682,7 +670,6 @@ def run_crate_sensitivity_probe(
     dod_lam_scale: float = 0.0,
     oracle_kwargs: dict | None = None,
     protocol_key: str = "protocol",
-    calibration_model: str = CALIBRATION_MODEL,
 ) -> dict[str, Any]:
     """Run two short oracle simulations at low vs high C-rate; return loss rates.
 
@@ -702,7 +689,6 @@ def run_crate_sensitivity_probe(
 
     def _mean_loss_per_cycle(c_rate_ma: float) -> float | None:
         oracle = PyBaMMOracle(
-            model=calibration_model,
             chemistry=chemistry,
             degradation_preset=preset,
             capacity_check=capacity_check,
@@ -886,10 +872,9 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
     """
     t0 = time.time()
     okw, pkey = cfg.get("oracle_kwargs"), cfg.get("protocol_key", "protocol")
-    cm = cfg.get("calibration_model", CALIBRATION_MODEL)
     result = run_oracle_candidate(cache, ks, srs, dds, prs, cfg["preset"],
                                   cfg["capacity_check"], circuit=cfg["circuit"],
-                                  calibration_model=cm, chemistry=cfg["chemistry"],
+                                  chemistry=cfg["chemistry"],
                                   dod_lam_scale=dl, oracle_kwargs=okw, protocol_key=pkey)
     step_rows = result.pop("_oracle_step_rows", [])
     if cfg.get("real_step_summary"):
@@ -898,7 +883,7 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
         n_extra_fail = 0
         for extra in cfg.get("extra_caches") or []:
             r = run_oracle_candidate(extra, ks, srs, dds, prs, cfg["preset"], False,
-                                     circuit=cfg["circuit"], calibration_model=cm,
+                                     circuit=cfg["circuit"],
                                      chemistry=cfg["chemistry"],
                                      dod_lam_scale=dl, oracle_kwargs=okw,
                                      protocol_key=pkey, ecm_stub=True)
@@ -917,7 +902,7 @@ def _evaluate_candidate(cache: dict, ks: float, srs: float, dds: float, prs: flo
             probe_cycles=cfg["crate_probe_cycles"], low_c_mult=cfg["crate_probe_low_c"],
             high_c_mult=cfg["crate_probe_high_c"], circuit=cfg["circuit"],
             chemistry=cfg["chemistry"], dod_lam_scale=dl,
-            oracle_kwargs=okw, protocol_key=pkey, calibration_model=cm))
+            oracle_kwargs=okw, protocol_key=pkey))
         result["crate_probe_skipped"] = False
     result["runtime_s"] = round(time.time() - t0, 1)
     score = score_candidate(result, cfg["real_targets"], cfg["preset"],
@@ -1082,7 +1067,6 @@ def calibrate_oracle(
     extra_caches: list[dict] | None = None,
     step_weight: float = 0.0,
     fit_fade: bool = False,
-    calibration_model: str = CALIBRATION_MODEL,
 ) -> dict[str, Any]:
     """Run the Optuna BO over (kinetics, sei_rate, dead_li_decay, plating)_scale.
 
@@ -1132,7 +1116,6 @@ def calibrate_oracle(
         "oracle_kwargs": dict(oracle_kwargs or {}), "protocol_key": protocol_key,
         "real_step_summary": real_step_summary, "extra_caches": list(extra_caches or []),
         "step_weight": float(step_weight), "fit_fade": bool(fit_fade),
-        "calibration_model": calibration_model,
     }
     ranges = {"ks_min": ks_min, "ks_max": ks_max, "srs_min": srs_min, "srs_max": srs_max,
               "dds_min": dds_min, "dds_max": dds_max, "prs_min": prs_min, "prs_max": prs_max,
@@ -1274,7 +1257,6 @@ def write_oracle_config(
     oracle_kwargs: dict | None = None,
     real_step_summary: dict | None = None,
     step_cells: list[str] | None = None,
-    calibration_model: str = CALIBRATION_MODEL,
     real_capacity_auto: bool = False,
 ) -> None:
     """Write YAML config with calibration provenance to *output_path*.
@@ -1378,9 +1360,6 @@ def write_oracle_config(
            f"  T_ambient_K: {okw.get('T_ambient_K', okw.get('temperature_K', 298.15))}",
            f"  h_total_W_per_m2K: {float(okw.get('h_total_W_per_m2K', 10.0)):.6g}"]
           if okw.get("thermal") else []),
-        "",
-        "model:",
-        f"  type: {calibration_model}   # calibrated with this model; simulate with the same",
         "",
         *_bounds_and_bol_lines(okw),
         *(["ecm:", "  rescale_target_r0: null   # real-scale cell: no rescaling of fitted R",

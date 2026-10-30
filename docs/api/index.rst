@@ -36,8 +36,8 @@ ECM fitting functions
    :toctree: generated
    :nosignatures:
 
-   battery_oracle._randles_stub_ecm
-   battery_oracle._autoeis_ecm
+   battery_oracle.randles_stub_ecm
+   battery_oracle.autoeis_ecm
 
 Experiment configuration
 ------------------------
