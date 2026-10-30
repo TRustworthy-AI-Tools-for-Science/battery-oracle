@@ -7,7 +7,7 @@ Every check returns ``{"name", "status", "value", "limit", "note"}`` with
 battery-forecast pipeline refuses to start the degradation tune (stage B) on a
 stage-A result whose overall status is ``"fail"`` unless forced.
 
-Validity before accuracy (user rule, 2026-10-18): a fit need not reproduce the cell
+Validity before accuracy: a fit need not reproduce the cell
 exactly, but it must be physically valid. In the chain report (:func:`check_chain`) the
 fit-accuracy checks (voltage and EIS errors) are therefore reported but never fail a
 fit (at worst ``warn``), while the internal-solution checks of
@@ -181,7 +181,7 @@ def check_esoh(pv_fitted) -> list[dict]:
 def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: float = 2.0,
                     d_crate: float = 3.8) -> list[dict]:
     """One demanding cycle on the fitted cell (default: the jones2022 protocol envelope,
-    ~3.8C charge and discharge; diag/protocol_envelope.py); internal-state and conservation checks.
+    ~3.8C charge and discharge); internal-state and conservation checks.
 
     ``oracle_kwargs`` must build the fitted oracle (chemistry, model, BOL values,
     bounds, temperature). Currents are given at the stated C-rates of its own
@@ -215,7 +215,7 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         ce = _entries("Electrolyte concentration [mol.m-3]")
         ce0 = float(oracle._pv["Initial concentration in electrolyte [mol.m-3]"])
         ratio = float(np.min(ce)) / ce0
-        # the final model must be physical (user, 2026-10-16): below the fits' 0.1 c0
+        # the final model must be physical: below the fits' 0.1 c0
         # floor the oracle reaches its rate limit through electrolyte starvation
         status = "fail" if ratio < 0.1 else ("warn" if ratio < 0.2 else "pass")
         out.append(_check("electrolyte not depleted (min c_e / initial)", status, ratio, ">= 0.1 (fail), 0.2 (warn)",

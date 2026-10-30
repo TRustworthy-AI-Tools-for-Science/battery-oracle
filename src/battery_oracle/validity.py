@@ -1,7 +1,7 @@
 """Physical validity of a solved DFN history (the acceptance gate of a fit).
 
 A fit need not reproduce the cell exactly, but its internal solution must obey the
-continuum equations it discretises (user rule, 2026-10-18). From one PyBaMM solution
+continuum equations it discretises. From one PyBaMM solution
 this measures, at every saved time:
 
 * flux continuity across both electrode|separator interfaces: the electrolyte current
@@ -20,14 +20,13 @@ Continuity is not judged within ``STEP_WINDOW_S`` after a step in the applied cu
 (a cycler stop or a new step): there the double layer redistributes charge through a
 boundary layer at the separator that starts with zero thickness (transmission-line
 time constant ~ L^2 a C_dl / kappa_eff, ~0.01-1 s here), so no mesh resolves it at the
-step itself (diag/validity_probe.py, 2026-10-18: a 0.69 i_1C "jump" right after a stop,
-unchanged by refining x). In this model (differential surface form) each electrode's
+step itself (a 0.69 i_1C "jump" right after a stop is unchanged by refining x). In this model (differential surface form) each electrode's
 i_e is written with its own surface potential difference and i_e = i_app at the
 separator, so no coefficient is averaged across an interface for i_e.
 
 Fluxes are scaled by the larger of the applied and the 1C current density.
 
-Judgement (:func:`judge`, 2026-10-19). Fixed tolerances on the jumps would be arbitrary:
+Judgement (:func:`judge`). Fixed tolerances on the jumps would be arbitrary:
 in finite volumes the discrete interface flux is single-valued by construction, and the
 one-sided reconstruction measures how well the field is RESOLVED there. So the gate
 compares two meshes (the deployed one and one refined by ``factor``) in three tiers:
@@ -197,7 +196,7 @@ def _max_alternating_run(arr, tol):
 def _step_mask(t, i_app, i_1c) -> tuple[np.ndarray, np.ndarray]:
     """Current steps and the mask of samples judged outside them. A step is a jump of more than
     1 % of i_1C between samples, or a change faster than ``STEP_RAMP_C_PER_S`` (a smoothed step:
-    the solver ramps a step onset in sub-threshold increments, 2026-10-27), or the first sample
+    the solver ramps a step onset in sub-threshold increments), or the first sample
     of a solution starting under load. Not judged: ``STEP_WINDOW_S`` after each step, and the
     sample just before it (a central difference or trapezoid there straddles the step)."""
     t, i_app = np.asarray(t, float), np.asarray(i_app, float)
@@ -291,7 +290,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
             edges = lay["edges"]
             worst_int = 0.0
             differential = _surface_form(sol) == "differential"
-            # judged per sample interval, in charge form (2026-10-28): the reactions' charge
+            # judged per sample interval, in charge form: the reactions' charge
             # (trapezoid) plus the change of the charge stored in the double layer equals the
             # applied charge. The rate form needed d(delta phi)/dt from the samples, which is
             # inaccurate where the solver's step size jumps (a ~100x step ratio gave a
@@ -406,9 +405,8 @@ def _exact_law(tag, name, value, limit, ladder, what):
     solver-tolerance error, judged on ``ladder`` = its values at the solver tolerance and
     10x and 100x tighter (deployed mesh): it must shrink by >= MIN_DECADE_RATIO per decade
     of tolerance, and its extrapolated zero-tolerance limit must be within ``limit``. A real
-    violation levels off at a nonzero value, so it fails (2026-10-29: the residual near
-    cycler stops falls ~ rtol^0.44, so a fixed >= 10x per 100x test failed clear
-    tolerance errors)."""
+    violation levels off at a nonzero value, so it fails. (The residual near cycler stops
+    falls ~ rtol^0.44, so a fixed >= 10x per 100x test would fail clear tolerance errors.)"""
     if value is None:
         return _rec(tag + name, "skip", None, limit, "not evaluable")
     if value <= limit:

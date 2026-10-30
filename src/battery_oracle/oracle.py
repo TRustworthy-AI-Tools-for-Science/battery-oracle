@@ -115,14 +115,10 @@ def _init_autoeis_patches() -> None:
     except Exception:
         pass
 
-    # Monkeypatch autoeis.utils.initialize_priors to fix excessively wide prior —
-    # same fix as inference.py's training-path patch (see that module for the
-    # full bug writeup). Without this, _autoeis_ecm's admittance terms (P0w/P1w/
-    # P2w below) draw from a ±12-decade log-normal and routinely converge 10-500x
-    # away from the training distribution; this patch was previously applied to
-    # the training featurization path only, never to the oracle's own AutoEIS
-    # call, which is the root cause of that mismatch (see
-    # project_oracle_p2_prior_mismatch memory / oracle-p2-prior-mismatch-fix plan).
+    # Monkeypatch autoeis.utils.initialize_priors to fix its excessively wide prior
+    # (the same fix as inference.py's training-path patch). Without it the admittance
+    # terms draw from a +-12-decade log-normal and converge 10-500x away from the
+    # training distribution.
     def _corrected_initialize_priors(p0):
         priors = {}
         variables = [k for k in p0.keys() if _ae_utils.parser.validate_parameter(k, raises=False)]
@@ -149,7 +145,7 @@ def _init_autoeis_patches() -> None:
 # are the jones2022 training-partition medians — they keep the poorly-identified
 # CPE terms near the training scale (without them the wide LogNormal prior lets
 # the posterior mean wander orders of magnitude off). Exponents are typical for
-# Li-ion SPMe at moderate SOC (Chen2020). Both circuit generations are seeded:
+# Li-ion cells at moderate SOC. Both circuit generations are seeded:
 # the current 7-param arcs P3/P5 carry the same tuned values as the legacy
 # 9-param arcs P4/P6 they correspond to (P2 was the legacy series CPE, no
 # 7-param counterpart). Unknown labels fall back to the defaults.
@@ -168,8 +164,7 @@ _CPE_N_DEFAULT = 0.80
 # the admittances/exponents in distribution; resistances are divided back by s
 # afterwards to report the oracle's native scale. Value = pooled training-median
 # R1 (ohmic) across jones2022 featurized records. Set to None to disable.
-# NOTE: rescaling does NOT fix the R5 arc collapse (scale-invariant) -- that is an
-# SPMe single-arc fidelity limit. See project_oracle_p2_prior_mismatch memory.
+# Rescaling does not change arc collapse (a scale-invariant property of the spectrum).
 _ECM_RESCALE_TARGET_R0 = 0.1334
 
 
@@ -661,19 +656,9 @@ def _build_degradation_config(
     except Exception:
         pass
 
-    # An attempt was made to also scale "SEI kinetic rate constant [m.s-1]" (the
-    # parameter "ec reaction limited" actually reads for reaction kinetics, NOT
-    # "SEI reaction exchange current density [A.m-2]" despite both existing in
-    # Chen2020's ParameterValues — verified against
-    # pybamm.lithium_ion.SPMe(options=opts).parameters). That attempt was
-    # reverted: lowering it to 0.1x made 15-cycle R1 growth on PJ121 WORSE
-    # (236% vs the EC-diffusivity-only behavior's 82.5%, against a real target of
-    # ~10%) — i.e. growth got *faster*, the wrong direction, indicating SEI
-    # growth rate's dependence on this PyBaMM submodel's parameters is not the
-    # simple monotonic relationship assumed. sei_rate_scale therefore only
-    # scales EC diffusivity for now; R1/SEI growth-rate calibration remains
-    # unresolved (see TODO.md) and likely needs the PyBaMM SEI submodel
-    # equations read directly rather than further blind parameter sweeps.
+    # sei_rate_scale scales EC diffusivity only. Scaling "SEI kinetic rate constant
+    # [m.s-1]" too (the parameter "ec reaction limited" reads for its kinetics) is not
+    # monotonic in growth rate: 0.1x made SEI growth faster.
 
     # Charge-transfer kinetics correction (see kinetics_scale docstring above).
     # Wraps Chen2020's concentration-dependent exchange-current-density functions
@@ -697,9 +682,8 @@ def _build_degradation_config(
         # internally evaluates dOCP/dc at initial conditions; the LGM50 function
         # returns inconsistent derivatives at the initial stoichiometry that make
         # the IDA DAE initialization fail. Ai2020's OCP works; Chen2020's does not.
-        # Root cause confirmed by binary search (see _build_degradation_config
-        # comments, 2026-06-23): replacing only 'Negative electrode OCP [V]' with
-        # Chen2020's value causes the failure; all other Ai2020 params are fine.
+        # Replacing only 'Negative electrode OCP [V]' with Chen2020's value causes
+        # the failure; all other Ai2020 params are fine.
         # Workaround: drop 'particle mechanics' from all presets; use plating
         # kinetics for C-rate sensitivity in accelerated/severe instead.
         opts = {
@@ -959,8 +943,8 @@ class PyBaMMOracle:
         :meth:`from_config` with a matching ``config_oracle_*.yml``.
     degradation_preset : str
         Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
-        or ``"severe"``.  See :func:`_build_degradation_config`. Calibrated (legacy)
-        for SPMe; particle-cracking/LAM submodels are currently disabled in every
+        or ``"severe"``.  See :func:`_build_degradation_config`. The
+        particle-cracking/LAM submodels are disabled in every
         preset (see the comment in :func:`_build_degradation_config` — an
         upstream PyBaMM regression workaround, not a design choice).
     thermal : str
@@ -1096,14 +1080,13 @@ class PyBaMMOracle:
         emergency_solver_rtol: float = 1e-2,
         emergency_solver_atol: float = 1e-5,
         # -- DFN-specific solver settings (config_oracle_defaults.yml: solver.dfn) --
-        # DFN is a stiff coupled DAE; it needs tighter IDAKLU tolerances than SPMe,
+        # DFN is a stiff coupled DAE; it needs tight IDAKLU tolerances,
         # and its Casadi fallback tiers use a low dt_max so IDA can backstep before
         # a catastrophic failure at the CC->CV switch rather than silently truncate.
         dfn_solver_rtol: float = 1e-6,
         dfn_solver_atol: float = 1e-8,
         dfn_solver_dt_max_s: float = 1.0,
-        # DFN loses fidelity/stability above ~1.5C (vs SPMe's validated ~2C = c_max_mA);
-        # _protocol_to_experiment tightens the current ceiling to this C-rate for DFN.
+        # _protocol_to_experiment caps the current at this C-rate (DFN stability).
         dfn_max_crate: float = 1.5,
         # -- Protocol sanitisation bounds (config_oracle_defaults.yml: protocol_bounds.*) --
         c_min_mA: float = 50.0,
@@ -1205,7 +1188,7 @@ class PyBaMMOracle:
         # C-rate is null -- but only modestly (rho~0.4 among the cells with a
         # clean degradation signal) because every jones2022 variable-discharge
         # cell is shallow (4-17% DoD): there is no deep-cycling arm to size the
-        # magnitude from. See project_dod_lam_lever_finding memory.
+        # magnitude from.
         #
         # Mechanism (Smith-style sqrt-throughput law, integrated incrementally):
         #   stress_i      = sqrt( (C_rate_1/Q) * (DoD_ah_i/Q) )   [dimensionless]
@@ -1632,21 +1615,12 @@ class PyBaMMOracle:
         self._warned_clamp_signatures = set()
         self._build_native_state()
 
-    # Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah) --
-    # _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/_DUR_MAX_s/
-    # _V_CHARGE_MAX/_V_DISCHARGE_MIN/_CHARGE_STAGE_MAX_s are set as INSTANCE
-    # attributes in __init__ (from the c_min_mA/... kwargs, YAML-overridable
-    # via config_oracle_defaults.yml's protocol_bounds section), not class
-    # constants here. Upper C-rate: 1C = 5 000 mA; SPMe accuracy degrades
-    # above this and the DAE solver diverges above ~2-3C.  Upper duration:
+    # Protocol bounds -- _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/
+    # _DUR_MAX_s/_V_CHARGE_MAX/_V_DISCHARGE_MIN/_CHARGE_STAGE_MAX_s -- are INSTANCE
+    # attributes set in __init__ (from the c_min_mA/... kwargs, YAML-overridable
+    # via config_oracle_defaults.yml's protocol_bounds section). Upper duration:
     # 8 h is generous for any step that also has a voltage-cutoff termination
-    # condition. charge step 2 (taper stage): real jones2022 variable-discharge
-    # cells (see project_crate_real_data_finding memory) run C_rate_2 at
-    # 35-118 mA raw, which scales (via _cap_scale, ~118x for these ~42 mAh
-    # cells) to 4_140-13_954 mA -- within _C_MAX_mA's validated-stable 2C
-    # envelope, so C_rate_2 shares that ceiling rather than an independent,
-    # lower one. C_rate_2 is the one protocol dimension real data shows
-    # correlates with degradation (rho=0.111, p=8e-05). Voltage/duration
+    # condition. The charge step 2 (taper stage) shares the C1 ceiling. Voltage/duration
     # cutoffs from Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806), Methods
     # "Battery cycling": two-stage CC charge (<=15 min/stage) stopping at
     # 4.3 V (no CV hold), single-stage CC discharge until 3.0 V.
@@ -2028,8 +2002,8 @@ class PyBaMMOracle:
         """Solve ``experiment``, returning ``(solution, fidelity, failure_kind)``.
 
         Primary solver, then the emergency (looser) solver on the same model and cell
-        state. The model is never swapped (the DFN -> SPMe fallback was removed
-        2026-10-16): when both solvers fail, ``OracleFailure`` is raised.
+        state. The model is never swapped: when both solvers fail, ``OracleFailure``
+        is raised.
 
         ``FailureKind.SOLVER_DEGRADED`` is *recorded* (returned) when the emergency
         solver was needed (same model, looser tolerances). Must be called holding

@@ -189,8 +189,7 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
     killer) says nothing about the candidate, so it is not scored ``inf``: the
     candidate is run again with one worker fewer (kept for later batches too). If it
     is killed again with a single worker, the job does not have the memory for one
-    simulation and this raises. (Before 2026-10-18 such candidates were scored
-    ``inf``: the v20 pilots lost 251 / 706 of their candidates to OOM kills.)
+    simulation and this raises.
     """
     import multiprocessing as mp
     import time
@@ -382,8 +381,8 @@ def _install_harmonic_flux_coefficients() -> None:
         # only a coefficient MULTIPLYING a flux gets the harmonic mean (as upstream PR #5856):
         # an addend (e.g. a node term added to a flux in the EIS-wrapped model) has no series
         # meaning, and is zero at rest, where its harmonic mean 1/(b/0 + (1-b)/0) is undefined
-        # (non-finite Jacobian at t = 0; found with a stoichiometry-dependent conductivity,
-        # 2026-10-21); division stays arithmetic (PyBaMM#5863)
+        # (non-finite Jacobian at t = 0 with a stoichiometry-dependent conductivity);
+        # division stays arithmetic (PyBaMM#5863)
         if isinstance(bin_op, pybamm.Multiplication) and le != re_:
             if le and not isinstance(left, pybamm.Gradient) and _is_flux(left):
                 disc_right = self.node_to_edge(disc_right, method="harmonic")

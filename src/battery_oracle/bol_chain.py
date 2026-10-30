@@ -119,7 +119,7 @@ CE_FLOOR_DEFAULT = 0.1
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 
 
-#: particle radial mesh (checklist 4: the default 20 uniform points are not converged for
+#: particle radial mesh (the default 20 uniform points are not converged for
 #: the LiCoO2 surface gradients). env ORACLE_FIT_R_POINTS (points per particle, default:
 #: PyBaMM's) and ORACLE_FIT_R_MESH ("uniform" or "surface": exponential, clustered at r = R)
 R_POINTS = os.environ.get("ORACLE_FIT_R_POINTS")
@@ -128,9 +128,9 @@ R_MESH_STRETCH = float(os.environ.get("ORACLE_FIT_R_STRETCH", "1.15"))
 #: electrode/separator (x) mesh, as a factor on PyBaMM's points: the fit runs on
 #: ORACLE_FIT_X_FACTOR (default 1); the final evaluation, the validity gate and the
 #: oracle use ORACLE_FIT_VALIDATE_X_FACTOR (default 2). The x mesh moves the fitted
-#: voltage by <= 0.3 mV (verify/mesh_domains.py) but the default one does not resolve
-#: the salt flux at the negative|separator interface during fast charge (jump 0.10 of
-#: the current at x1, 0.033 at x2; diag/validity_probe.py, 2026-10-18).
+#: voltage by <= 0.3 mV but the default one does not resolve the salt flux at the
+#: negative|separator interface during fast charge (jump 0.10 of the current at x1,
+#: 0.033 at x2).
 X_FACTOR = int(os.environ.get("ORACLE_FIT_X_FACTOR", "1"))
 VALIDATE_X_FACTOR = int(os.environ.get("ORACLE_FIT_VALIDATE_X_FACTOR", "2"))
 
@@ -162,22 +162,21 @@ def x_var_pts(model, factor: int) -> dict:
     """x points of ``model``'s default mesh times ``factor``."""
     d = model.default_var_pts
     return {k: int(d[k]) * int(factor) for k in ("x_n", "x_s", "x_p")} if factor != 1 else {}
-#: Cycler voltage limits of the jones2022 protocol, from the raw GCPL files (PJ248,
-#: PJ250; diag/cutoff_behaviour.py) and Jones et al. 2022 Methods: formation charge CC
+#: Cycler voltage limits of the jones2022 protocol, from the raw GCPL files and
+#: Jones et al. 2022 Methods: formation charge CC
 #: to 4.2 V then CV (40 -> ~4 mA); every cycling charge stage CC with a hard stop at
 #: 4.3 V (current to 0 within 1 s, no CV); every discharge a hard stop at 3.0 V. The
 #: measured current is the real cell's response to these limits: a model cell that
 #: reaches a limit earlier must stop (or hold, in CV) where the real cycler would have,
-#: not be forced on (pilot 12: 2.76 V at the end of the first formation discharge,
+#: not be forced on (a forced replay ends a formation discharge at 2.76 V against the
 #: measured 3.00 V).
 #: Hard stops are EXACT: the cut-off is an input parameter CUT_INPUT (0 conducting, 1
 #: stopped) and the solve runs in segments (ChainModel._solve_segments). A terminating
 #: event stops the integration where the voltage crosses its limit in the current's
 #: direction; the solve continues from that state with the current cut; a second event
 #: releases the cut when the measured step ends (the real step sequence goes on). A
-#: smooth latch state (until 2026-10-16) engaged gradually, so a model cell near its
-#: limit hovered in a partial-cut, CV-like state; with a saturating LiCoO2 surface that
-#: DAE was so stiff that solves crawled for hours (diag/crawl_bisect.py).
+#: smooth latch would engage gradually, leaving a model cell near its limit in a
+#: partial-cut, CV-like state; with a saturating LiCoO2 surface that DAE is too stiff.
 CYCLER_V_MIN = 3.0
 CYCLER_V_MAX_CYCLING = 4.3
 CYCLER_V_MAX_FORMATION = 4.2
@@ -194,25 +193,24 @@ EVENT_RELEASE = "Cycler limit released [experiment]"
 MAX_SEGMENTS = 5000
 #: scalar minimum of the electrolyte concentration (added to the chain model)
 CE_MIN_VAR = "Minimum electrolyte concentration [mol.m-3]"
-#: what a fit candidate stores at every output time (memory: the full state history of
-#: one PJ248 candidate is ~1.7 GB on the converged mesh and was held several times over,
-#: ~9 GB per candidate; diag/memory_profile.py, 2026-10-18). Full states are captured
-#: only at the EIS linearisation times (segment ends).
+#: what a fit candidate stores at every output time (the full state history of one
+#: candidate is ~1.7 GB on the converged mesh). Full states are captured only at the
+#: EIS linearisation times (segment ends).
 OUTPUT_VARS = ("Voltage [V]", CE_MIN_VAR, "Volume-averaged cell temperature [K]",
                "Minimum negative particle surface stoichiometry", "Maximum negative particle surface stoichiometry",
                "Minimum positive particle surface stoichiometry", "Maximum positive particle surface stoichiometry")
-#: Envelope probe (2026-10-19): the fit's electrolyte floor protects only the measured
+#: Envelope probe: the fit's electrolyte floor protects only the measured
 #: history, but the oracle is asked for the whole jones2022 protocol space. With
 #: ORACLE_FIT_ENVELOPE_MA="<charge mA>,<discharge mA>" every candidate's history is
 #: followed by the most demanding protocol in that space -- CC charge to the 4.3 V cycler
 #: stop, 20-min rest, CC discharge to the 3.0 V stop, 20-min rest -- and a candidate whose
 #: electrolyte reaches the floor (or whose solve stops) in the probe is rejected. The
 #: chemistry2-25C envelope is ~159 mA in both directions (~3.8C; 480 cycling files of 8
-#: cells, diag/protocol_envelope.py).
+#: cells).
 ENVELOPE_MA = os.environ.get("ORACLE_FIT_ENVELOPE_MA")
 PROBE_NAME = "envelope probe"
 PROBE_STEP_S, PROBE_REST_S, PROBE_GAP_S, PROBE_SAMPLE_S = 3600.0, 1200.0, 600.0, 5.0
-#: two-stage probe charge (ORACLE_FIT_ENVELOPE_MA="c1;c2;discharge", 2026-10-24): each stage
+#: two-stage probe charge (ORACLE_FIT_ENVELOPE_MA="c1;c2;discharge"): each stage
 #: runs up to this long or to the 4.3 V cycler stop -- the oracle's demanding cycle
 #: (physicality.check_dfn_cycle: 3.8C then 2C for <= 0.25 h each, 3.8C discharge), which the
 #: single-stage probe did not cover (the second stage pushes in more lithium at high rate)
@@ -329,8 +327,7 @@ MACMULLIN_S = "Separator MacMullin number"
 BRUGG_N = "Negative electrode Bruggeman coefficient (electrolyte)"
 BRUGG_S = "Separator Bruggeman coefficient (electrolyte)"
 
-#: Fit bounds from peer-reviewed values for LiCoO2/graphite cells (literature check
-#: 2026-10-09; see _results/oracle_recal/report). Multipliers are relative to the
+#: Fit bounds from peer-reviewed values for LiCoO2/graphite cells. Multipliers are relative to the
 #: LiR2032 (Ai2020-template) values, absolute values in brackets.
 LITERATURE_BOUNDS = {
     # j0 at c_e 1 M, sto 0.5: graphite 0.34-7.9 A/m2 (Chen 2020; Mohtat 2020; Ramadass
@@ -873,8 +870,7 @@ class ChainModel:
         states: dict[float, np.ndarray] = {}
         sol, cut, n_cuts = None, 0.0, 0
         # every capture time ends a segment, and so does every cycler stop / release:
-        # the cap must grow with them (a fixed 5000 silently truncated long histories at
-        # ~14 cycle groups, 2026-10-19)
+        # the cap grows with them
         max_segments = MAX_SEGMENTS + 2 * capture.size
         for _ in range(max_segments):
             t0 = 0.0 if sol is None else float(sol.t[-1])
@@ -981,9 +977,8 @@ class ChainModel:
             ce_min_t = np.asarray(sol[CE_MIN_VAR].entries, float).ravel()
         except Exception:                       # noqa: BLE001
             ce_min_t = np.ones_like(ts)
-        # optional physical floor (review R2): below CE_FLOOR x c0 the candidate is
-        # treated as depleted, so the fit cannot buy rate limitation with an
-        # electrolyte state no real cell has (pilot 3: 0.0025 c0)
+        # physical floor: below CE_FLOOR x c0 the candidate is treated as depleted, so
+        # the fit cannot buy rate limitation with an electrolyte state no real cell has
         c0 = float(pv["Initial concentration in electrolyte [mol.m-3]"])
         floor = float(os.environ.get("ORACLE_FIT_CE_FLOOR", CE_FLOOR_DEFAULT)) * c0
         bad = ~np.isfinite(v_all) | (ce_min_t <= floor)
