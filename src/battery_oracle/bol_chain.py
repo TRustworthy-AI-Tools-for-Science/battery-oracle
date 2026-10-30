@@ -47,14 +47,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-import os
 import time
 from collections import OrderedDict
 from typing import Any
 
 import numpy as np
 
-from battery_oracle.model_options import radial_mesh, x_var_pts  # noqa: F401 (re-exported)
+from battery_oracle.fit_config import FitConfig
+from battery_oracle.model_options import radial_mesh, x_var_pts
 from battery_oracle.parameter_sets import ocp_data_range
 
 N_PARALLEL = "Number of electrodes connected in parallel to make a cell"
@@ -114,37 +114,8 @@ CHAIN_OPTIONS = {
     # balance carries the lithium the SEI consumes
     "SEI": ("ec reaction limited", "none"),
 }
-#: default electrolyte floor (fraction of c0) for the depletion stop; env ORACLE_FIT_CE_FLOOR
-CE_FLOOR_DEFAULT = 0.1
 #: oracle EC-diffusivity factor = 0.25 (commercial-electrolyte correction) x sei_rate_scale
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
-
-
-#: particle radial mesh (the default 20 uniform points are not converged for
-#: the LiCoO2 surface gradients). env ORACLE_FIT_R_POINTS (points per particle, default:
-#: PyBaMM's) and ORACLE_FIT_R_MESH ("uniform" or "surface": exponential, clustered at r = R)
-R_POINTS = os.environ.get("ORACLE_FIT_R_POINTS")
-R_MESH = os.environ.get("ORACLE_FIT_R_MESH", "uniform")
-R_MESH_STRETCH = float(os.environ.get("ORACLE_FIT_R_STRETCH", "1.15"))
-#: electrode/separator (x) mesh, as a factor on PyBaMM's points: the fit runs on
-#: ORACLE_FIT_X_FACTOR (default 1); the final evaluation, the validity gate and the
-#: oracle use ORACLE_FIT_VALIDATE_X_FACTOR (default 2). The x mesh moves the fitted
-#: voltage by <= 0.3 mV but the default one does not resolve the salt flux at the
-#: negative|separator interface during fast charge (jump 0.10 of the current at x1,
-#: 0.033 at x2).
-X_FACTOR = int(os.environ.get("ORACLE_FIT_X_FACTOR", "1"))
-VALIDATE_X_FACTOR = int(os.environ.get("ORACLE_FIT_VALIDATE_X_FACTOR", "2"))
-
-
-def radial_mesh_setting(x_factor: int | None = None) -> dict | None:
-    """The mesh set by ORACLE_FIT_R_* (and the x factor) as an oracle setting
-    (``radial_mesh`` of PyBaMMOracle): {"points", "kind", "stretch", "x_factor"}; None
-    for PyBaMM's default mesh. ``x_factor`` defaults to the validation mesh's."""
-    xf = VALIDATE_X_FACTOR if x_factor is None else int(x_factor)
-    if not R_POINTS and R_MESH == "uniform" and xf == 1:
-        return None
-    return {"points": int(R_POINTS) if R_POINTS else None, "kind": R_MESH, "stretch": R_MESH_STRETCH,
-            "x_factor": xf}
 
 
 #: Cycler voltage limits of the jones2022 protocol, from the raw GCPL files and
@@ -186,34 +157,19 @@ OUTPUT_VARS = ("Voltage [V]", CE_MIN_VAR, "Volume-averaged cell temperature [K]"
                "Minimum positive particle surface stoichiometry", "Maximum positive particle surface stoichiometry")
 #: Envelope probe: the fit's electrolyte floor protects only the measured
 #: history, but the oracle is asked for the whole jones2022 protocol space. With
-#: ORACLE_FIT_ENVELOPE_MA="<charge mA>,<discharge mA>" every candidate's history is
+#: FitConfig.envelope_ma = (charge mA, discharge mA) every candidate's history is
 #: followed by the most demanding protocol in that space -- CC charge to the 4.3 V cycler
 #: stop, 20-min rest, CC discharge to the 3.0 V stop, 20-min rest -- and a candidate whose
 #: electrolyte reaches the floor (or whose solve stops) in the probe is rejected. The
 #: chemistry2-25C envelope is ~159 mA in both directions (~3.8C; 480 cycling files of 8
 #: cells).
-ENVELOPE_MA = os.environ.get("ORACLE_FIT_ENVELOPE_MA")
 PROBE_NAME = "envelope probe"
 PROBE_STEP_S, PROBE_REST_S, PROBE_GAP_S, PROBE_SAMPLE_S = 3600.0, 1200.0, 600.0, 5.0
-#: two-stage probe charge (ORACLE_FIT_ENVELOPE_MA="c1;c2;discharge"): each stage
+#: two-stage probe charge (FitConfig.envelope_ma = (c1, discharge, c2) mA): each stage
 #: runs up to this long or to the 4.3 V cycler stop -- the oracle's demanding cycle
 #: (physicality.check_dfn_cycle: 3.8C then 2C for <= 0.25 h each, 3.8C discharge), which the
 #: single-stage probe did not cover (the second stage pushes in more lithium at high rate)
 PROBE_STAGE_S = 900.0
-
-
-def envelope_setting() -> tuple[float, ...] | None:
-    """Envelope probe set by ORACLE_FIT_ENVELOPE_MA: "charge;discharge" -> (charge mA,
-    discharge mA); "c1;c2;discharge" (two-stage charge) -> (c1 mA, discharge mA, c2 mA), the
-    argument order of :func:`with_envelope_probe`."""
-    if not ENVELOPE_MA:
-        return None
-    vals = [float(x) for x in ENVELOPE_MA.replace(";", ",").split(",")]
-    if len(vals) == 2:
-        return vals[0], vals[1]
-    if len(vals) == 3:
-        return vals[0], vals[2], vals[1]
-    raise ValueError(f"ORACLE_FIT_ENVELOPE_MA needs 2 or 3 values, got {ENVELOPE_MA!r}")
 
 
 def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charge2_ma: float | None = None) -> dict:
@@ -747,13 +703,13 @@ def candidate_values(pv_base, inputs: dict, initial_voltage: float,
 
 
 def chain_for_fit(data: dict, pv, fit: dict) -> "ChainModel":
-    """The ChainModel of a saved fit report (ambient, EC diffusivity factor, fixed
-    inputs), for diagnostics and re-evaluation."""
-    pv_base = base_values(pv, fit.get("ambient_k"))
-    factor = float(fit.get("ec_diffusivity_factor", 1.0))
+    """The ChainModel of a saved fit report (its fit config, ambient, EC diffusivity
+    factor and fixed inputs), for diagnostics and re-evaluation."""
+    pv_base = base_values(pv, fit["ambient_k"])
+    factor = float(fit["ec_diffusivity_factor"])
     if factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * factor
-    return ChainModel(data, pv_base, fixed=fit.get("fixed_inputs") or {})
+    return ChainModel(data, pv_base, config=FitConfig.from_report(fit), fixed=fit["fixed_inputs"])
 
 
 def base_values(pv, ambient_k: float | None = None):
@@ -773,13 +729,15 @@ class ChainModel:
     """Simulates one cell's continuous history for a candidate; caches results."""
 
     def __init__(self, data: dict, pv_base, *, cache_size: int = 256, rtol: float = 1e-6,
-                 atol: float = 1e-6, fixed: dict | None = None):
-        env = envelope_setting()
+                 atol: float = 1e-6, fixed: dict | None = None, config: FitConfig | None = None):
+        self.config = config or FitConfig()
+        env = self.config.envelope_ma
         self.data = with_envelope_probe(data, *env) if env else data
         self.options = dict(CHAIN_OPTIONS)
-        r_pts, self.submesh_types = radial_mesh(R_POINTS, R_MESH, R_MESH_STRETCH)
+        r_pts, self.submesh_types = radial_mesh(self.config.r_points, self.config.r_mesh, self.config.r_stretch)
         self.var_pts = r_pts or None
-        self.x_factor = X_FACTOR
+        self.x_factor = self.config.x_factor
+        self.keep_solution = False              # diagnostics: keep the full solution
         self.pv_base = pv_base
         self.fixed = dict(fixed or {})          # inputs held fixed (e.g. the OCV balance)
         self.rtol, self.atol = rtol, atol
@@ -829,7 +787,7 @@ class ChainModel:
             # spent > 100 min per candidate there); the truncated history is penalised below
             self._model.variables[CE_MIN_VAR] = pybamm.min(
                 self._model.variables["Electrolyte concentration [mol.m-3]"])
-            floor = float(os.environ.get("ORACLE_FIT_CE_FLOOR", CE_FLOOR_DEFAULT))
+            floor = self.config.ce_floor
             if floor > 0:
                 c_e = self._model.variables["Electrolyte concentration [mol.m-3]"]
                 c_0 = pybamm.Parameter("Initial concentration in electrolyte [mol.m-3]")
@@ -937,13 +895,13 @@ class ChainModel:
         probe_t = [np.arange(t_probe, t_end, PROBE_SAMPLE_S)] if probe_g else []
         t_eval = np.unique(np.concatenate([[0.0, t_end]] + rec_t + sp_lin + sp_lo + sp_hi + probe_t))
 
-        x_pts = x_var_pts(self.model(), getattr(self, "x_factor", 1))
+        x_pts = x_var_pts(self.model(), self.x_factor)
         var_pts = ({**self.model().default_var_pts, **(self.var_pts or {}), **x_pts}
                    if (self.var_pts or x_pts) else None)
         submesh = {**self.model().default_submesh_types, **self.submesh_types} if self.submesh_types else None
         # a fit candidate stores only OUTPUT_VARS and the states at the EIS linearisation
         # times; a kept solution (diagnostics, validity checks) stores everything
-        lean = not getattr(self, "keep_solution", False)
+        lean = not self.keep_solution
         capture = np.concatenate(sp_lin) if (lean and sp_lin) else None
         sim = pybamm.Simulation(self.model(), parameter_values=pv, var_pts=var_pts, submesh_types=submesh,
                                 solver=single_thread_solver(self.rtol, self.atol,
@@ -965,7 +923,7 @@ class ChainModel:
         # physical floor: below CE_FLOOR x c0 the candidate is treated as depleted, so
         # the fit cannot buy rate limitation with an electrolyte state no real cell has
         c0 = float(pv["Initial concentration in electrolyte [mol.m-3]"])
-        floor = float(os.environ.get("ORACLE_FIT_CE_FLOOR", CE_FLOOR_DEFAULT)) * c0
+        floor = self.config.ce_floor * c0
         bad = ~np.isfinite(v_all) | (ce_min_t <= floor)
         if bad.any():
             k = int(np.argmax(bad))
@@ -1046,7 +1004,7 @@ class ChainModel:
             spectra.append(z)
         diag["solve_s"] = round(time.time() - t0, 2)
         out = {"records": records, "spectra": spectra, "diag": diag, "offsets": off.tolist()}
-        if getattr(self, "keep_solution", False):      # diagnostics: internal states
+        if self.keep_solution:                  # diagnostics: internal states
             out.update(solution=sol, parameter_values=pv)
         return out
 
@@ -1161,19 +1119,59 @@ def build_chain_problems(data: dict, pv_base, fit: dict, chain: ChainModel | Non
     return out, chain
 
 
-def _fit_model_report(ec_diffusivity_factor: float) -> dict:
-    """The fitted model's settings, as recorded in a fit report."""
-    return {"balance_mode": "ocv_features", "sei": CHAIN_OPTIONS["SEI"][0],
-            "ec_diffusivity_factor": float(ec_diffusivity_factor),
-            "radial_mesh": radial_mesh_setting(), "envelope_probe_ma": envelope_setting(),
-            "voltage_limits": {"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
-                               "v_max_formation_cv": CYCLER_V_MAX_FORMATION}}
+def _warm_start(config: FitConfig) -> dict | None:
+    """best_inputs of the config's warm-start report or checkpoint (None: no warm start)."""
+    import json
+    if not config.warm_json:
+        return None
+    return {k: float(v) for k, v in json.loads(Path(config.warm_json).read_text())["best_inputs"].items()}
+
+
+def _run_optimiser(meta, fit: dict, config: FitConfig, warm_inputs: dict | None, *,
+                   max_iterations: int, max_unchanged: int, seed: int | None, label: str):
+    """CMA-ES over ``meta`` (or, with ``config.from_checkpoint``, the best-so-far candidate
+    of the checkpoint of a stopped fit, patches._checkpoint_best); returns (result, runtime s)."""
+    import json
+    from types import SimpleNamespace
+
+    import pybop
+
+    meta.set_run(workers=config.workers, timeout_s=config.candidate_timeout_s, checkpoint=config.checkpoint)
+    if seed is not None:
+        np.random.seed(seed)
+    t0 = time.time()
+    if config.from_checkpoint:
+        ck = json.loads(Path(config.checkpoint).read_text())
+        result = SimpleNamespace(best_inputs={k: v for k, v in ck["best_inputs"].items() if k in fit},
+                                 best_cost=ck["best_cost"], n_iterations=None)
+        log.info("%s: report from checkpoint %s (cost %s, written %s)", label, config.checkpoint,
+                 ck["best_cost"], ck.get("written"))
+    else:
+        options = pybop.PintsOptions(max_iterations=max_iterations, max_unchanged_iterations=max_unchanged,
+                                     verbose=True)
+        optim = pybop.CMAES(meta, options=options)
+        if warm_inputs is not None:
+            # PyBOP starts population optimisers at the prior mean: restart at the warm values
+            optim._optimiser = optim._pints_optimiser(
+                x0=optim.problem.parameters.get_initial_values(transformed=True),
+                sigma0=np.asarray(optim._std0, float) * config.warm_sigma, boundaries=optim._boundaries)
+        result = optim.run()
+    return result, time.time() - t0
+
+
+def _start_at_warm(fit: dict, warm_inputs: dict) -> None:
+    for k, prm in fit.items():
+        if k in warm_inputs:
+            lo, hi = prm.bounds
+            span = hi - lo
+            prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
 
 
 def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                    max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                    free: list[str] | None = None, ambient_k: float | None = None,
-                   bounds: dict | None = None, ec_diffusivity_factor: float = 1.0) -> dict[str, Any]:
+                   bounds: dict | None = None, ec_diffusivity_factor: float = 1.0,
+                   config: FitConfig | None = None) -> dict[str, Any]:
     """Chain fit of one cell (module docstring); returns a JSON-able report.
     ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
     Two-step stage A: the electrode balance (positive capacity, N:P, cyclable lithium)
@@ -1181,9 +1179,9 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
     (``ocv_balance``); the DFN fit then adjusts kinetics, transport and architecture
     only, with the negative/positive thickness ratio replacing the negative active
     fraction (which follows from the fixed N:P). ``ec_diffusivity_factor`` multiplies
-    the template EC diffusivity as the oracle does (0.25 x sei_rate_scale)."""
-    import os
-
+    the template EC diffusivity as the oracle does (0.25 x sei_rate_scale). ``config``:
+    mesh, envelope probe, electrolyte floor, warm start and run control (recorded in the
+    report)."""
     import pybop
 
     from battery_oracle import patches
@@ -1198,80 +1196,41 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
              LI_FRACTION: balance_report["li_fraction"]}
     log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
     bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
-    # warm start (ORACLE_FIT_WARM_JSON: a report or checkpoint with best_inputs): CMA-ES
-    # starts at those values with a step ORACLE_FIT_WARM_SIGMA x the prior's, and every
-    # parameter not freed (ORACLE_FIT_FREE, ";"-separated names) is held at its warm
-    # value -- not at the template's, which a plain ``free`` list would give
-    warm_inputs = None
-    if os.environ.get("ORACLE_FIT_WARM_JSON"):
-        import json
-        warm_inputs = {k: float(v) for k, v in
-                       json.loads(Path(os.environ["ORACLE_FIT_WARM_JSON"]).read_text())["best_inputs"].items()}
+    config = config or FitConfig()
+    # warm start: CMA-ES starts at the warm values, and every parameter not freed
+    # (config.free) is held at its warm value -- not at the template's
+    warm_inputs = _warm_start(config)
+    if warm_inputs is not None:
         warm = {**(warm or {}), **warm_inputs}
-        if os.environ.get("ORACLE_FIT_FREE"):
-            free = [k.strip() for k in os.environ["ORACLE_FIT_FREE"].split(";") if k.strip()]
+        if config.free:
+            free = list(config.free)
     fit = fit_parameters_chain(pv_base, data, warm, free=free, bounds=bounds)
     for k in fixed:
         fit.pop(k, None)
-    if fixed:
-        fit.pop(EPS_N, None)
+    fit.pop(EPS_N, None)
     if warm_inputs is not None:
         held = {k: v for k, v in warm_inputs.items() if k not in fit and k not in fixed and k != EPS_N}
         fixed = {**fixed, **held}
-        for k, prm in fit.items():
-            if k in warm_inputs:
-                lo, hi = prm.bounds
-                span = hi - lo
-                prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
-        log.info("%s: warm start from %s; free %s; held %s", cell_id, os.environ["ORACLE_FIT_WARM_JSON"],
-                 sorted(fit), sorted(held))
-    chain = ChainModel(data, pv_base, fixed=fixed)
+        _start_at_warm(fit, warm_inputs)
+        log.info("%s: warm start from %s; free %s; held %s", cell_id, config.warm_json, sorted(fit), sorted(held))
+    chain = ChainModel(data, pv_base, fixed=fixed, config=config)
     problems, chain = build_chain_problems(data, pv_base, fit, chain=chain)
     meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
-    meta.set_workers(int(os.environ.get("ORACLE_FIT_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", 1))))
-    if seed is not None:
-        np.random.seed(seed)
-    options = pybop.PintsOptions(max_iterations=max_iterations, max_unchanged_iterations=max_unchanged,
-                                 verbose=True)
-    t0 = time.time()
-    resume = os.environ.get("ORACLE_FIT_FROM_CHECKPOINT") == "1"
-    if resume:
-        # the fit was stopped (e.g. a job time limit): report the best-so-far candidate
-        # of its checkpoint (patches._checkpoint_best) instead of optimising again
-        import json
-        from types import SimpleNamespace
-        ck = json.loads(Path(os.environ["ORACLE_FIT_CHECKPOINT"]).read_text())
-        result = SimpleNamespace(best_inputs={k: v for k, v in ck["best_inputs"].items() if k in fit},
-                                 best_cost=ck["best_cost"], n_iterations=None)
-        log.info("%s: report from checkpoint %s (cost %s, written %s)", cell_id,
-                 os.environ["ORACLE_FIT_CHECKPOINT"], ck["best_cost"], ck.get("written"))
-    else:
-        optim = pybop.CMAES(meta, options=options)
-        if warm_inputs is not None:
-            # PyBOP starts population optimisers at the prior mean: restart at the warm values
-            f_sigma = float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))
-            optim._optimiser = optim._pints_optimiser(
-                x0=optim.problem.parameters.get_initial_values(transformed=True),
-                sigma0=np.asarray(optim._std0, float) * f_sigma, boundaries=optim._boundaries)
-        result = optim.run()
-    runtime = time.time() - t0
+    result, runtime = _run_optimiser(meta, fit, config, warm_inputs, max_iterations=max_iterations,
+                                     max_unchanged=max_unchanged, seed=seed, label=cell_id)
     best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
     log.info("%s: chain fit cost %s in %.0f s: %s", cell_id, result.best_cost, runtime, best)
     fitted = dict(best)
     best = {**fixed, **best}                   # the full candidate (fixed balance included)
     return {"cell_id": cell_id, "method": "chain", "best_inputs": best, "fitted_inputs": fitted,
             "fixed_inputs": fixed, "ocv_balance": balance_report,
-            **_fit_model_report(ec_diffusivity_factor),
-            "seed": seed,
-            "warm_start": ({"from": os.environ["ORACLE_FIT_WARM_JSON"], "free": sorted(fit),
-                            "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}
-                           if warm_inputs is not None else None),
+            "ec_diffusivity_factor": float(ec_diffusivity_factor), "fit_config": config.to_dict(),
+            "ambient_k": ambient_k, "seed": seed, "free": sorted(fit),
             "cost": float(np.asarray(result.best_cost).ravel()[0]),
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()},
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
             "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
             "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
-            "from_checkpoint": bool(resume),
             **evaluate_chain(data, pv_base, fitted, chain=chain)}
 
 
@@ -1298,7 +1257,8 @@ def _unprefixed(inputs: dict, cell_id: str) -> dict:
 def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
                           max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                           ambient_k: float | None = None, bounds: dict | None = None,
-                          ec_diffusivity_factor: float = 1.0) -> dict[str, dict]:
+                          ec_diffusivity_factor: float = 1.0,
+                          config: FitConfig | None = None) -> dict[str, dict]:
     """Joint chain fit of several cells: ONE set of kinetic, transport and geometric
     parameters shared by all cells, scored on every cell's records and spectra.
 
@@ -1306,11 +1266,9 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     between cells) and the unrecorded rests. A single-cell fit can tune the shared
     physics to one cell's history; the joint fit cannot. Returns {cell_id: report},
     each report shaped like ``fit_cell_chain``'s (``best_inputs`` with the cell's own
-    rest names), so ``aggregate_chain`` works unchanged. Warm start and checkpoint
-    environment variables as in ``fit_cell_chain``; ORACLE_FIT_DRY_RUN=1 builds the
-    problems and returns their sizes without optimising."""
-    import json
-
+    rest names), so ``aggregate_chain`` works unchanged. ``config`` as in
+    ``fit_cell_chain``; ``config.dry_run`` builds the problems and returns their sizes
+    without optimising."""
     import pybop
 
     from battery_oracle import patches
@@ -1330,11 +1288,10 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         log.info("joint fit %s: OCV balance -> fixed %s", c, fixed[c])
     bounds = dict(bounds or {})
     bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
+    config = config or FitConfig()
     warm = dict(warm or {})
-    warm_inputs = None
-    if os.environ.get("ORACLE_FIT_WARM_JSON"):
-        warm_inputs = {k: float(v) for k, v in
-                       json.loads(Path(os.environ["ORACLE_FIT_WARM_JSON"]).read_text())["best_inputs"].items()}
+    warm_inputs = _warm_start(config)
+    if warm_inputs is not None:
         warm.update(warm_inputs)
     fit = {}
     for c in cells:                          # shared names coincide; rests are per cell
@@ -1342,45 +1299,22 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     for k in (Q_P_RATIO, NP_RATIO, LI_FRACTION, EPS_N):
         fit.pop(k, None)
     if warm_inputs is not None:
-        for k, prm in fit.items():
-            if k in warm_inputs:
-                lo, hi = prm.bounds
-                span = hi - lo
-                prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
+        _start_at_warm(fit, warm_inputs)
     chains, problems = {}, []
     for c in cells:
         own = {k: v for k, v in fit.items() if not k.startswith("Rest before ") or f"{c}:" in k}
-        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c])
+        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c], config=config)
         probs, _ = build_chain_problems(jdata[c], pv_base, own, chain=chains[c])
         problems += probs
     shared = sorted(k for k in fit if not k.startswith("Rest before "))
     log.info("joint fit %s: %d shared parameters, %d rests, %d problems", cells, len(shared),
              len(fit) - len(shared), len(problems))
-    if os.environ.get("ORACLE_FIT_DRY_RUN") == "1":
+    if config.dry_run:
         return {"dry_run": {"cells": cells, "shared": shared, "rests": sorted(set(fit) - set(shared)),
                             "n_problems": len(problems), "fixed": fixed}}
     meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
-    meta.set_workers(int(os.environ.get("ORACLE_FIT_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", 1))))
-    if seed is not None:
-        np.random.seed(seed)
-    options = pybop.PintsOptions(max_iterations=max_iterations, max_unchanged_iterations=max_unchanged,
-                                 verbose=True)
-    t0 = time.time()
-    resume = os.environ.get("ORACLE_FIT_FROM_CHECKPOINT") == "1"
-    if resume:
-        from types import SimpleNamespace
-        ck = json.loads(Path(os.environ["ORACLE_FIT_CHECKPOINT"]).read_text())
-        result = SimpleNamespace(best_inputs={k: v for k, v in ck["best_inputs"].items() if k in fit},
-                                 best_cost=ck["best_cost"], n_iterations=None)
-    else:
-        optim = pybop.CMAES(meta, options=options)
-        if warm_inputs is not None:
-            f_sigma = float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))
-            optim._optimiser = optim._pints_optimiser(
-                x0=optim.problem.parameters.get_initial_values(transformed=True),
-                sigma0=np.asarray(optim._std0, float) * f_sigma, boundaries=optim._boundaries)
-        result = optim.run()
-    runtime = time.time() - t0
+    result, runtime = _run_optimiser(meta, fit, config, warm_inputs, max_iterations=max_iterations,
+                                     max_unchanged=max_unchanged, seed=seed, label=f"joint fit {cells}")
     best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
     cost = float(np.asarray(result.best_cost).ravel()[0])
     log.info("joint fit %s: cost %s in %.0f s: %s", cells, cost, runtime, best)
@@ -1392,11 +1326,8 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         reports[c] = {
             "cell_id": c, "method": "chain-joint", "best_inputs": {**fixed[c], **mine}, "fitted_inputs": mine,
             "fixed_inputs": fixed[c], "ocv_balance": balances[c],
-            **_fit_model_report(ec_diffusivity_factor),
-            "seed": seed,
-            "warm_start": ({"from": os.environ["ORACLE_FIT_WARM_JSON"],
-                            "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}
-                           if warm_inputs is not None else None),
+            "ec_diffusivity_factor": float(ec_diffusivity_factor), "fit_config": config.to_dict(),
+            "ambient_k": ambient_k, "seed": seed,
             "joint": {"cells": cells, "cost": cost, "shared": shared},
             "cost": cost,
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()
@@ -1404,7 +1335,6 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
             "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
             "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
-            "from_checkpoint": bool(resume),
             **ev}
         # report the cell's own rest names (as in its unprefixed data)
         reports[c]["param_bounds"] = _unprefixed(reports[c]["param_bounds"], c)
@@ -1413,10 +1343,10 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     return reports
 
 
-def _mesh_agreement(fit_res: dict, val_res: dict, x_fit: int, cell: str) -> dict:
+def _mesh_agreement(fit_res: dict, val_res: dict, x_fit: int, x_val: int, cell: str) -> dict:
     """Validity record: the fit mesh's voltages vs the validation mesh's (the fitted
     parameters must not depend on resolving the interfaces better)."""
-    name = f"validity[{cell}] fit mesh (x{x_fit}) agrees with validation mesh (x{VALIDATE_X_FACTOR})"
+    name = f"validity[{cell}] fit mesh (x{x_fit}) agrees with validation mesh (x{x_val})"
     if "error" in fit_res:
         return {"name": name, "status": "fail", "value": None, "limit": [1.0, 3.0], "note": fit_res["error"]}
     dv = [float(np.max(np.abs(np.asarray(a) - np.asarray(b)))) for a, b in
@@ -1435,7 +1365,7 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
     """Measured vs simulated curves/spectra + diagnostics at ``inputs`` (plot/physicality),
     including the physical-validity gate (:mod:`battery_oracle.validity`, under
     ``diagnostics["validity"]``): the full internal solution on the deployed mesh
-    (x VALIDATE_X_FACTOR, the oracle's) and on that mesh refined x2, judged by exact
+    (x ``config.validate_x_factor``, the oracle's) and on that mesh refined x2, judged by exact
     laws, convergence of the interface continuity, and whether the deployed mesh
     resolves the outputs to the measurement noise. Curves are the deployed mesh's."""
     from battery_oracle import validity
@@ -1443,7 +1373,8 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
     chain = chain or ChainModel(data, pv_base)
     cell = str(data.get("cell_id", ""))
     fit_res = chain.solve(inputs)               # on the fit mesh (usually cached)
-    keep, xf = getattr(chain, "keep_solution", False), getattr(chain, "x_factor", 1)
+    keep, xf = chain.keep_solution, chain.x_factor
+    xv = chain.config.validate_x_factor
 
     def full(x_factor, tol_scale=1.0):
         """Full-storage solve past the candidate cache on x ``x_factor`` (tolerances x
@@ -1465,12 +1396,12 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
                 r["measures_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         return r
 
-    res = full(VALIDATE_X_FACTOR)
+    res = full(xv)
     if "error" in res:
         return {"records": [{"kind": r["kind"], "label": r["label"], "error": res["error"]}
                             for r in data["records"]], "diagnostics": {"error": res["error"]}}
-    fine = full(2 * VALIDATE_X_FACTOR)
-    names = (f"x{VALIDATE_X_FACTOR}", f"x{2 * VALIDATE_X_FACTOR}")
+    fine = full(2 * xv)
+    names = (f"x{xv}", f"x{2 * xv}")
     if "error" in fine or "measures" not in res or "measures" not in fine:
         why = fine.get("error") or res.get("measures_error") or fine.get("measures_error")
         res["diag"]["validity"] = [{"name": f"validity[{cell}] two-mesh gate evaluated", "status": "fail",
@@ -1480,13 +1411,13 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
         if any(r["status"] == "fail" and "exact law" in r["name"] for r in laws):
             # an exact law above its solver-tolerance limit: solves 10x and 100x tighter decide
             # whether it converges to the law (a tolerance error) or levels off (a real violation)
-            ladder = [full(VALIDATE_X_FACTOR, tol_scale=f) for f in validity.TOLERANCE_LADDER]
+            ladder = [full(xv, tol_scale=f) for f in validity.TOLERANCE_LADDER]
             if all("measures" in r for r in ladder):
                 laws = validity.judge(res["measures"], fine["measures"], factor=2, rtol=chain.rtol, cell=cell,
                                       mesh=names, ladder=[r["measures"] for r in ladder])
         res["diag"]["validity"] = (laws
                                    + validity.relevance(res, fine, cell=cell, mesh=names)
-                                   + [_mesh_agreement(fit_res, res, xf, cell)])
+                                   + [_mesh_agreement(fit_res, res, xf, xv, cell)])
         res["diag"]["validity_measures"] = {names[0]: res["measures"], names[1]: fine["measures"]}
     recs = []
     for r, v in zip(data["records"], res["records"]):
@@ -1620,8 +1551,8 @@ def aggregate_chain(cell_reports: list[dict], pv) -> dict:
                    "p10": float(np.percentile(x, 10)), "p90": float(np.percentile(x, 90))}
     # submodels of the fitted model the oracle must use too (same parameter functions)
     model_kw = {}
-    # the fit's particle mesh (a report written before reports recorded it: this run's setting)
-    mesh = ok[0]["radial_mesh"] if "radial_mesh" in ok[0] else radial_mesh_setting()
+    # the fit's particle mesh
+    mesh = FitConfig.from_report(ok[0]).radial_mesh_setting()
     if mesh:
         model_kw["radial_mesh"] = mesh
     return {"parameter_overrides": ov, "parameter_scales": scales, "contact_resistance_ohm": cr,

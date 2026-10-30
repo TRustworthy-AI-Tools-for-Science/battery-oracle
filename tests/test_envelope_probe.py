@@ -1,9 +1,10 @@
-"""Envelope probe (bol_chain.with_envelope_probe / envelope_setting): single- and two-stage
+"""Envelope probe (bol_chain.with_envelope_probe, FitConfig.envelope_ma): single- and two-stage
 charge, parsing of ORACLE_FIT_ENVELOPE_MA (synthetic data only)."""
 import numpy as np
 import pytest
 
 from battery_oracle import bol_chain as bc
+from battery_oracle.fit_config import FitConfig
 
 DATA = {"groups": [{"name": "g0", "duration_s": 100.0}], "current": [{"group": 0, "t": np.array([0.0, 100.0]),
                                                                       "I": np.array([0.0, 0.0])}]}
@@ -40,12 +41,10 @@ def test_two_stage_probe_charges_c1_then_c2_back_to_back():
 
 @pytest.mark.parametrize("text, expect", [("159.4;159.4", (159.4, 159.4)), ("160;84;150", (160.0, 150.0, 84.0)),
                                           ("160,84,150", (160.0, 150.0, 84.0))])
-def test_envelope_setting_parses_two_or_three_values(monkeypatch, text, expect):
-    monkeypatch.setattr(bc, "ENVELOPE_MA", text)
-    assert bc.envelope_setting() == expect
+def test_envelope_setting_parses_two_or_three_values(text, expect):
+    assert FitConfig.from_env({"ORACLE_FIT_ENVELOPE_MA": text}).envelope_ma == expect
 
 
-def test_envelope_setting_rejects_other_lengths(monkeypatch):
-    monkeypatch.setattr(bc, "ENVELOPE_MA", "1;2;3;4")
+def test_envelope_setting_rejects_other_lengths():
     with pytest.raises(ValueError):
-        bc.envelope_setting()
+        FitConfig.from_env({"ORACLE_FIT_ENVELOPE_MA": "1;2;3;4"})

@@ -1069,7 +1069,7 @@ class PyBaMMOracle:
         # the jones2022 protocol. "protocol": discharge runs for the protocol's
         # own duration (or until v_discharge_min), for time-limited protocols.
         discharge_mode: str = "cutoff",
-        # Particle radial mesh of the chain fit (model_options.radial_mesh; bol_chain.radial_mesh_setting):
+        # Particle radial mesh of the chain fit (FitConfig.radial_mesh_setting):
         # {"points": .., "kind": "uniform" | "surface", "stretch": .., "x_factor": ..}
         # (x_factor multiplies PyBaMM's electrode/separator points); None = PyBaMM default.
         radial_mesh: dict | None = None,

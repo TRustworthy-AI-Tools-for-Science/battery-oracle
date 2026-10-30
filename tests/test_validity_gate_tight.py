@@ -5,6 +5,7 @@ import pytest
 
 from battery_oracle import bol_chain as bc
 from battery_oracle import validity
+from battery_oracle.fit_config import FitConfig
 
 
 class FakeChain:
@@ -14,6 +15,7 @@ class FakeChain:
     def __init__(self, power):
         self.power, self.rtol, self.atol = power, 1e-6, 1e-8
         self.fixed, self.keep_solution, self.x_factor, self.tols = {}, False, 1, []
+        self.config = FitConfig()
 
     def solve(self, inputs):
         return {"diag": {}, "records": [[3.9]], "spectra": [], "offsets": [0.0]}

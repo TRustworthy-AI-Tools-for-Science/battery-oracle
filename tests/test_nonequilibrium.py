@@ -207,9 +207,9 @@ def test_parallel_batches_match_sequential_and_preserve_order():
     stock = np.asarray(meta.evaluate_batch(xs, False).values)
     patches.apply(["parallel_batches"])
     try:
-        meta.set_workers(1)
+        meta.set_run(workers=1)
         one = np.asarray(meta.evaluate_batch(xs, False).values)
-        meta.set_workers(3)
+        meta.set_run(workers=3)
         par = np.asarray(meta.evaluate_batch(xs, False).values)
     finally:
         patches.revert()
@@ -241,9 +241,8 @@ def test_parallel_batches_kill_a_runaway_candidate_and_keep_the_rest(monkeypatch
     real = patches._ORIGINALS["MetaProblem.evaluate_batch"]     # revert() must get THIS back
     try:
         patches._ORIGINALS["MetaProblem.evaluate_batch"] = fake
-        monkeypatch.setenv("ORACLE_FIT_CANDIDATE_TIMEOUT", "3")
         meta = MetaProblem.__new__(MetaProblem)              # workers only call the fake
-        meta.set_workers(2)
+        meta.set_run(workers=2, timeout_s=3)
         t0 = time.time()
         out = np.asarray(meta.evaluate_batch([{"a": float(k)} for k in (1, 2, 3, 4, 5)], False).values)
         elapsed = time.time() - t0

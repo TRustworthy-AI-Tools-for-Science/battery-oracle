@@ -15,14 +15,14 @@ sweeps on a relaxing cell):
 ``parallel_batches``
     ``pybop.MetaProblem.evaluate_batch`` evaluates a population one candidate
     after another. A joint DFN fit costs ~20 s per candidate, so a CMA-ES iteration
-    (10 candidates) takes minutes. Patched: after ``problem.set_workers(n)`` the
+    (10 candidates) takes minutes. Patched: after ``problem.set_run(workers=n)`` the
     candidates are split over ``n`` forked worker processes (the built PyBaMM models
     are inherited, not pickled) and the costs recombined in order. With one worker,
     or with sensitivities requested, the stock path runs. Fork-safety: forking after
     PyBaMM's multi-threaded (OpenMP) IDAKLU has run deadlocks the workers, so solvers
     used with this patch must be single-threaded (:func:`single_thread_solver`);
     each candidate runs in its own process under a hard time limit
-    (``ORACLE_FIT_CANDIDATE_TIMEOUT`` s, default 600): a candidate that crawls is
+    (``set_run(timeout_s=...)``, default 600 s): a candidate that crawls is
     killed and scored ``inf`` like any failed simulation, so one pathological
     parameter set cannot freeze a whole population.
 
@@ -263,10 +263,10 @@ _BEST: dict = {"cost": np.inf}
 POOL_STATS: dict = {"killed_workers": 0, "workers": None}
 
 
-def _checkpoint_best(inputs: list, costs) -> None:
-    """Keep the best candidate seen so far; when ``ORACLE_FIT_CHECKPOINT`` names a
-    file, rewrite it on every improvement, so a fit stopped by the job's time limit
-    still leaves its best parameters (PyBOP writes results only at the end)."""
+def _checkpoint_best(path: str | None, inputs: list, costs) -> None:
+    """Keep the best candidate seen so far; when ``path`` names a file, rewrite it on
+    every improvement, so a fit stopped by the job's time limit still leaves its best
+    parameters (PyBOP writes results only at the end)."""
     import json
     import os
     import time
@@ -276,7 +276,6 @@ def _checkpoint_best(inputs: list, costs) -> None:
         return
     best = {key: float(np.asarray(v, dtype=float).ravel()[0]) for key, v in dict(inputs[k]).items()}
     _BEST.update(cost=float(costs[k]), inputs=best, time=time.time())
-    path = os.environ.get("ORACLE_FIT_CHECKPOINT")
     if path:
         tmp = f"{path}.tmp"
         with open(tmp, "w") as fh:
@@ -294,31 +293,32 @@ def _install_parallel_batches() -> None:
     original = MetaProblem.evaluate_batch
     _ORIGINALS["MetaProblem.evaluate_batch"] = original
 
-    def set_workers(self, n: int) -> None:
-        self._n_workers = max(1, int(n))
+    def set_run(self, workers: int = 1, timeout_s: float = 600.0, checkpoint: str | None = None) -> None:
+        """Concurrent candidate workers, the per-candidate time limit and the
+        best-so-far checkpoint file of this problem's fit."""
+        self._n_workers = max(1, int(workers))
+        self._timeout_s = float(timeout_s)
+        self._checkpoint = checkpoint
 
     def evaluate_batch(self, inputs, calculate_sensitivities: bool = False):
-        import os
-
         n = getattr(self, "_n_workers", 1)
         if n <= 1 or len(inputs) <= 1 or calculate_sensitivities:
             return original(self, inputs, calculate_sensitivities)
-        timeout = float(os.environ.get("ORACLE_FIT_CANDIDATE_TIMEOUT", 600))
         inputs = list(inputs)
-        costs = run_candidates(self, inputs, n, timeout)
-        _checkpoint_best(inputs, costs)
+        costs = run_candidates(self, inputs, n, self._timeout_s)
+        _checkpoint_best(self._checkpoint, inputs, costs)
         return Evaluation(values=costs)
 
     MetaProblem.evaluate_batch = evaluate_batch
-    MetaProblem.set_workers = set_workers
+    MetaProblem.set_run = set_run
 
 
 def _remove_parallel_batches() -> None:
     from pybop.problems.meta_problem import MetaProblem
 
     MetaProblem.evaluate_batch = _ORIGINALS.pop("MetaProblem.evaluate_batch")
-    if hasattr(MetaProblem, "set_workers"):
-        del MetaProblem.set_workers
+    if hasattr(MetaProblem, "set_run"):
+        del MetaProblem.set_run
 
 
 # ---------------------------------------------------------------------------
