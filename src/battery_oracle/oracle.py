@@ -1069,7 +1069,7 @@ class PyBaMMOracle:
         # the jones2022 protocol. "protocol": discharge runs for the protocol's
         # own duration (or until v_discharge_min), for time-limited protocols.
         discharge_mode: str = "cutoff",
-        # Particle radial mesh of the chain fit (bol_chain.radial_mesh_setting):
+        # Particle radial mesh of the chain fit (model_options.radial_mesh; bol_chain.radial_mesh_setting):
         # {"points": .., "kind": "uniform" | "surface", "stretch": .., "x_factor": ..}
         # (x_factor multiplies PyBaMM's electrode/separator points); None = PyBaMM default.
         radial_mesh: dict | None = None,
@@ -1365,7 +1365,7 @@ class PyBaMMOracle:
         self._radial_mesh = dict(radial_mesh) if radial_mesh else None
         self._submesh = None
         if self._radial_mesh:
-            from battery_oracle.bol_chain import radial_mesh as _radial_mesh
+            from battery_oracle.model_options import radial_mesh as _radial_mesh
             r_pts, self._submesh = _radial_mesh(self._radial_mesh.get("points"),
                                                 self._radial_mesh.get("kind", "uniform"),
                                                 float(self._radial_mesh.get("stretch") or 1.15))
@@ -1486,7 +1486,7 @@ class PyBaMMOracle:
     def _model_var_pts(self, model):
         """Mesh for a PyBaMM model of this oracle: the defaults, with the coarse
         size-distribution mesh of the chain fit when one is set (None otherwise)."""
-        from battery_oracle.bol_chain import x_var_pts
+        from battery_oracle.model_options import x_var_pts
 
         x_pts = x_var_pts(model, self._x_factor)
         if not self._var_pts and not x_pts:

@@ -16,26 +16,14 @@ Optional extras:
   * ``[autoeis]`` — Bayesian ECM fitting (falls back to a fast Randles stub without it)
   * ``[drt]``     — distribution-of-relaxation-times peaks (hybrid-drt)
   * ``[tune]``    — Optuna calibration engine (``battery_oracle.tune``)
+
+On a CPU-only machine with jax[cuda12] installed, set ``JAX_PLATFORMS=cpu`` before
+importing (jax otherwise fails probing the CUDA plugin).
 """
 from __future__ import annotations
 
-import os
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
-
-# Configure JAX BEFORE any import below that pulls it in transitively
-# (battery_oracle.oracle -> pybamm -> jax). This package is designed to be
-# "imported and reused independently" (see module docstring), so it can't
-# rely on every caller setting this up first the way battery_forecast's
-# entry-point scripts currently have to. Without it, a CPU-only process (no
-# --gres=gpu) hard-crashes: jax[cuda12]'s eager CUDA backend registration
-# raises "FAILED_PRECONDITION: No visible GPU devices" instead of falling
-# back, and JAX_PLATFORMS (plural) -- not the legacy JAX_PLATFORM_NAME -- is
-# the only setting that actually stops jax from probing the cuda plugin at
-# all. GPU presence is inferred from the environment alone (no subprocess
-# probe) -- CUDA_VISIBLE_DEVICES is set by the scheduler (Slurm --gres=gpu,
-# Docker --gpus) whenever a GPU is actually allocated.
-os.environ.setdefault('JAX_PLATFORMS', 'cuda,cpu' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu')
 
 from battery_oracle._circuit import (
     ACTION_FEATURE_NAMES,

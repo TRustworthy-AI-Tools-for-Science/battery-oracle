@@ -29,3 +29,7 @@ pip install "battery-oracle[autoeis,tune] @ git+https://github.com/TRustworthy-A
 Heavy optional dependencies (AutoEIS/JAX, Optuna, DRT git packages) are
 **lazy-imported** in the source, so `import battery_oracle` needs only the core
 dependencies.
+
+On a CPU-only machine with `jax[cuda12]` installed, set `JAX_PLATFORMS=cpu` before
+importing; otherwise jax fails while probing the CUDA plugin. The package does not
+set it for you.
