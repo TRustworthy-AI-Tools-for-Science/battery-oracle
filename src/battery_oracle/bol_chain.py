@@ -122,25 +122,6 @@ CE_FLOOR_DEFAULT = 0.0
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 
 
-#: Graphite OCP hysteresis (PyBaMM one-state model, Axen et al. 2022): lithiation /
-#: delithiation branches U -/+ HYST_DELTA; the state h relaxes over a change in
-#: surface stoichiometry of ~2/HYST_DECAY (dh/dsto = gamma (1 - sign h)/2), i.e. ~4%
-#: of the graphite range at gamma 50, and persists through rests. Graphite staging
-#: shows ~10-20 mV between lithiation and delithiation (Mercer et al. 2021, J. Mater.
-#: Chem. A, doi 10.1039/D0TA10403E; Li et al. 2022 Electrochemistry, 0.05C) -> half-gap
-#: bounds 0-12.5 mV.
-HYST_DELTA = "Negative electrode OCP hysteresis half-gap [V]"
-HYST_BOUNDS = (0.0, 0.0125)
-HYST_DECAY = 50.0
-#: Particle-size distribution (PyBaMM "particle size": "distribution", lognormal,
-#: area-weighted; get_size_distribution_parameters): relative width sigma_R / R_av of
-#: each electrode. Commercial graphite and LiCoO2 powders: ~0.3-0.5 (D10-D90 spread);
-#: bounds 0.15-0.6. Mesh of PSD_POINTS radii per electrode keeps the cost bounded.
-PSD_SD_N = "Negative particle radius relative width"
-PSD_SD_P = "Positive particle radius relative width"
-PSD_BOUNDS = {PSD_SD_N: (0.15, 0.6), PSD_SD_P: (0.15, 0.6)}
-PSD_POINTS = int(os.environ.get("ORACLE_FIT_PSD_POINTS", "6"))
-
 #: particle radial mesh (checklist 4: the default 20 uniform points are not converged for
 #: the LiCoO2 surface gradients). env ORACLE_FIT_R_POINTS (points per particle, default:
 #: PyBaMM's) and ORACLE_FIT_R_MESH ("uniform" or "surface": exponential, clustered at r = R)
@@ -223,13 +204,6 @@ CE_MIN_VAR = "Minimum electrolyte concentration [mol.m-3]"
 OUTPUT_VARS = ("Voltage [V]", CE_MIN_VAR, "Volume-averaged cell temperature [K]",
                "Minimum negative particle surface stoichiometry", "Maximum negative particle surface stoichiometry",
                "Minimum positive particle surface stoichiometry", "Maximum positive particle surface stoichiometry")
-#: smallest particle radius kept in the distribution, relative to the mean
-PSD_R_MIN = 0.2
-#: which electrodes get a size distribution: True / "both", or "positive" (LiCoO2
-#: only; the PJ248 probes show the LiCoO2 spread is the one that changes the
-#: end-of-discharge, and a single graphite radius halves the cost)
-PSD_ELECTRODES = ("both", "positive", "negative")
-
 #: Envelope probe (2026-10-19): the fit's electrolyte floor protects only the measured
 #: history, but the oracle is asked for the whole jones2022 protocol space. With
 #: ORACLE_FIT_ENVELOPE_MA="<charge mA>,<discharge mA>" every candidate's history is
@@ -295,31 +269,11 @@ def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charg
     return d
 
 
-def psd_mode(size_distribution) -> str | None:
-    """Normalise a size_distribution flag (bool or PSD_ELECTRODES entry)."""
-    if size_distribution in (None, False, "", "0", "none"):
-        return None
-    if size_distribution in (True, "1"):
-        return "both"
-    if size_distribution not in PSD_ELECTRODES:
-        raise ValueError(f"size_distribution must be a bool or one of {PSD_ELECTRODES}, got {size_distribution!r}")
-    return size_distribution
-
-
-def chain_options(sei: str = "constant", hysteresis: bool = False, size_distribution: bool | str = False) -> dict:
-    """Stage-A model options with the given SEI submodel (negative electrode only),
-    optional graphite OCP hysteresis and particle-size distributions."""
+def chain_options(sei: str = "constant") -> dict:
+    """Stage-A model options with the given SEI submodel (negative electrode only)."""
     if sei not in SEI_MODES:
         raise ValueError(f"sei must be one of {SEI_MODES}, got {sei!r}")
-    opts = {**CHAIN_OPTIONS, "SEI": sei if sei == "constant" else (sei, "none")}
-    if hysteresis:
-        opts["open-circuit potential"] = ("one-state hysteresis", "single")
-    mode = psd_mode(size_distribution)
-    if mode == "both":
-        opts["particle size"] = "distribution"
-    elif mode:
-        opts["particle size"] = ("distribution", "single") if mode == "negative" else ("single", "distribution")
-    return opts
+    return {**CHAIN_OPTIONS, "SEI": sei if sei == "constant" else (sei, "none")}
 
 
 def apply_voltage_limits(model, width: float = VOLTAGE_LIMIT_WIDTH):
@@ -372,36 +326,6 @@ def limit_schedule(groups, off: np.ndarray, t_end: float):
     tk, vk, ck = np.asarray(tk), np.asarray(vk), np.asarray(ck)
     return (pybamm.Interpolant(tk, vk, pybamm.t, interpolator="linear"),
             pybamm.Interpolant(tk, ck, pybamm.t, interpolator="linear"))
-
-
-def hysteresis_values(pv, delta: float, decay: float = HYST_DECAY) -> dict:
-    """PyBaMM one-state hysteresis parameters for the negative electrode: branches
-    U(sto) -/+ delta around the set's graphite OCP."""
-    u = pv["Negative electrode OCP [V]"]
-    d = float(delta)
-    return {"Negative electrode lithiation OCP [V]": lambda sto: u(sto) - d,
-            "Negative electrode delithiation OCP [V]": lambda sto: u(sto) + d,
-            "Negative particle lithiation hysteresis decay rate": float(decay),
-            "Negative particle delithiation hysteresis decay rate": float(decay),
-            "Negative particle hysteresis switching factor": 1.0,
-            "Initial hysteresis state in negative electrode": 0.0}
-
-
-def size_distribution_values(pv, sd_n: float, sd_p: float):
-    """``pv`` with lognormal area-weighted particle-size distributions around its
-    radii (relative widths sd_n, sd_p)."""
-    import pybamm
-
-    # PyBaMM's default lower cut, max(0, 1 - 5 sd) x R, reaches R = 0 for sd >= 0.2:
-    # zero-radius particles have no capacity, empty at once at the end of a discharge and
-    # stop the solver. Real powders have no such particles: cut the lognormal at
-    # max(PSD_R_MIN, 1 - 3 sd) and 1 + 3 sd (relative to the mean radius).
-    sd_n, sd_p = float(sd_n), float(sd_p)
-    return pybamm.get_size_distribution_parameters(
-        pv, R_n_av=float(pv["Negative particle radius [m]"]), R_p_av=float(pv["Positive particle radius [m]"]),
-        sd_n=sd_n, sd_p=sd_p,
-        R_min_n=max(PSD_R_MIN, 1.0 - 3.0 * sd_n), R_max_n=1.0 + 3.0 * sd_n,
-        R_min_p=max(PSD_R_MIN, 1.0 - 3.0 * sd_p), R_max_p=1.0 + 3.0 * sd_p)
 
 
 THICKNESS_SCALE = "Electrode thickness scale"
@@ -838,10 +762,6 @@ def candidate_values(pv_base, inputs: dict, initial_voltage: float,
               if k in inputs}
     pv.update(direct, check_already_exists=False)
     pv.update(geometry_overrides(pv_base, inputs, measured_capacity_ah), check_already_exists=False)
-    if HYST_DELTA in inputs:
-        pv.update(hysteresis_values(pv, _f(inputs[HYST_DELTA])), check_already_exists=False)
-    if PSD_SD_N in inputs or PSD_SD_P in inputs:
-        pv = size_distribution_values(pv, _f(inputs.get(PSD_SD_N, 0.3)), _f(inputs.get(PSD_SD_P, 0.3)))
     f_li = _f(inputs.get(LI_FRACTION, lithium_fraction(pv)))
     T0 = float(pv["Initial temperature [K]"])
     x0, y0 = initial_stoichiometries(pv, initial_voltage, f_li, T0)
@@ -863,7 +783,6 @@ def chain_for_fit(data: dict, pv, fit: dict) -> "ChainModel":
     if sei != "constant" and factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * factor
     return ChainModel(data, pv_base, fixed=fit.get("fixed_inputs") or {}, sei=sei,
-                      hysteresis=bool(fit.get("hysteresis")), size_distribution=fit.get("size_distribution") or False,
                       voltage_limits=bool(fit.get("voltage_limits")))
 
 
@@ -885,15 +804,13 @@ class ChainModel:
 
     def __init__(self, data: dict, pv_base, *, cache_size: int = 256, rtol: float = 1e-6,
                  atol: float = 1e-6, fixed: dict | None = None, sei: str = "constant",
-                 hysteresis: bool = False, size_distribution: bool | str = False,
                  voltage_limits: bool = False):
         env = envelope_setting()
         self.data = with_envelope_probe(data, *env) if env else data
         self.voltage_limits = bool(voltage_limits)
-        self.options = chain_options(sei, hysteresis, size_distribution)
-        self.var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS} if psd_mode(size_distribution) else {}
+        self.options = chain_options(sei)
         r_pts, self.submesh_types = radial_mesh(R_POINTS, R_MESH, R_MESH_STRETCH)
-        self.var_pts = {**self.var_pts, **r_pts} or None
+        self.var_pts = r_pts or None
         self.x_factor = X_FACTOR
         self.pv_base = pv_base
         self.fixed = dict(fixed or {})          # inputs held fixed (e.g. the OCV balance)
@@ -1239,8 +1156,7 @@ def fit_parameters_chain(pv, data: dict, warm: dict | None = None, *, bounds: di
 
     warm = dict(warm or {})
     bnd = {**LITERATURE_BOUNDS, **(bounds or {})}
-    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, HYST_DELTA,
-              PSD_SD_N, PSD_SD_P}
+    linear = {EPS_N, Q_P_RATIO, LI_FRACTION}
     fit = {}
     for name, (lo, hi) in bnd.items():
         if name in linear:
@@ -1289,8 +1205,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                    max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                    free: list[str] | None = None, ambient_k: float | None = None,
                    bounds: dict | None = None, balance: str = "free", sei: str = "constant",
-                   ec_diffusivity_factor: float = 1.0, hysteresis: bool = False,
-                   size_distribution: bool | str = False, voltage_limits: bool = False) -> dict[str, Any]:
+                   ec_diffusivity_factor: float = 1.0, voltage_limits: bool = False) -> dict[str, Any]:
     """Chain fit of one cell (module docstring); returns a JSON-able report.
     ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
     ``balance="ocv"``: two-step stage A -- the electrode balance (positive capacity,
@@ -1319,14 +1234,6 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
         log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
         bounds = dict(bounds or {})
         bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
-    extra = {}
-    if hysteresis:
-        extra[HYST_DELTA] = HYST_BOUNDS
-    mode = psd_mode(size_distribution)
-    if mode:
-        extra.update({k: v for k, v in PSD_BOUNDS.items()
-                      if mode == "both" or (k == PSD_SD_P) == (mode == "positive")})
-    bounds = {**(bounds or {}), **extra}
     # warm start (ORACLE_FIT_WARM_JSON: a report or checkpoint with best_inputs): CMA-ES
     # starts at those values with a step ORACLE_FIT_WARM_SIGMA x the prior's, and every
     # parameter not freed (ORACLE_FIT_FREE, ";"-separated names) is held at its warm
@@ -1354,8 +1261,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                 prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
         log.info("%s: warm start from %s; free %s; held %s", cell_id, os.environ["ORACLE_FIT_WARM_JSON"],
                  sorted(fit), sorted(held))
-    chain = ChainModel(data, pv_base, fixed=fixed, sei=sei, hysteresis=hysteresis,
-                       size_distribution=size_distribution, voltage_limits=voltage_limits)
+    chain = ChainModel(data, pv_base, fixed=fixed, sei=sei, voltage_limits=voltage_limits)
     problems, chain = build_chain_problems(data, pv_base, fit, chain=chain)
     meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
     meta.set_workers(int(os.environ.get("ORACLE_FIT_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", 1))))
@@ -1392,7 +1298,6 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
     return {"cell_id": cell_id, "method": "chain", "best_inputs": best, "fitted_inputs": fitted,
             "fixed_inputs": fixed, "ocv_balance": balance_report, "balance_mode": balance,
             "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
-            "hysteresis": bool(hysteresis), "size_distribution": psd_mode(size_distribution) or False,
             "radial_mesh": radial_mesh_setting(),
             "envelope_probe_ma": envelope_setting(),
             "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
@@ -1434,8 +1339,7 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
                           max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
                           ambient_k: float | None = None, bounds: dict | None = None,
                           balance: str = "ocv_features", sei: str = "constant",
-                          ec_diffusivity_factor: float = 1.0, hysteresis: bool = False,
-                          size_distribution: bool | str = False,
+                          ec_diffusivity_factor: float = 1.0,
                           voltage_limits: bool = False) -> dict[str, dict]:
     """Joint chain fit of several cells: ONE set of kinetic, transport and geometric
     parameters shared by all cells, scored on every cell's records and spectra.
@@ -1470,12 +1374,6 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         log.info("joint fit %s: OCV balance -> fixed %s", c, fixed[c])
     bounds = dict(bounds or {})
     bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
-    if hysteresis:
-        bounds[HYST_DELTA] = HYST_BOUNDS
-    mode = psd_mode(size_distribution)
-    if mode:
-        bounds.update({k: v for k, v in PSD_BOUNDS.items()
-                       if mode == "both" or (k == PSD_SD_P) == (mode == "positive")})
     warm = dict(warm or {})
     warm_inputs = None
     if os.environ.get("ORACLE_FIT_WARM_JSON"):
@@ -1496,8 +1394,7 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
     chains, problems = {}, []
     for c in cells:
         own = {k: v for k, v in fit.items() if not k.startswith("Rest before ") or f"{c}:" in k}
-        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c], sei=sei, hysteresis=hysteresis,
-                               size_distribution=size_distribution, voltage_limits=voltage_limits)
+        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c], sei=sei, voltage_limits=voltage_limits)
         probs, _ = build_chain_problems(jdata[c], pv_base, own, chain=chains[c])
         problems += probs
     shared = sorted(k for k in fit if not k.startswith("Rest before "))
@@ -1540,7 +1437,6 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
             "cell_id": c, "method": "chain-joint", "best_inputs": {**fixed[c], **mine}, "fitted_inputs": mine,
             "fixed_inputs": fixed[c], "ocv_balance": balances[c], "balance_mode": balance,
             "sei": sei, "ec_diffusivity_factor": float(ec_diffusivity_factor),
-            "hysteresis": bool(hysteresis), "size_distribution": psd_mode(size_distribution) or False,
             "radial_mesh": radial_mesh_setting(),
             "envelope_probe_ma": envelope_setting(),
             "voltage_limits": ({"v_min": CYCLER_V_MIN, "v_max_cycling": CYCLER_V_MAX_CYCLING,
@@ -1772,11 +1668,6 @@ def aggregate_chain(cell_reports: list[dict], pv) -> dict:
                    "p10": float(np.percentile(x, 10)), "p90": float(np.percentile(x, 90))}
     # submodels of the fitted model the oracle must use too (same parameter functions)
     model_kw = {}
-    if HYST_DELTA in med:
-        model_kw["hysteresis_half_gap_V"] = med[HYST_DELTA]
-    mode = psd_mode(ok[0].get("size_distribution"))
-    if mode:
-        model_kw["size_distribution"] = {"mode": mode, "sd_n": med.get(PSD_SD_N), "sd_p": med.get(PSD_SD_P)}
     # the fit's particle mesh (a report written before reports recorded it: this run's setting)
     mesh = ok[0]["radial_mesh"] if "radial_mesh" in ok[0] else radial_mesh_setting()
     if mesh:

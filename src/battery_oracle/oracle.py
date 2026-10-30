@@ -1085,12 +1085,6 @@ class PyBaMMOracle:
         # the jones2022 protocol. "protocol": discharge runs for the protocol's
         # own duration (or until v_discharge_min), for time-limited protocols.
         discharge_mode: str = "cutoff",
-        # Graphite OCP hysteresis half-gap [V] (PyBaMM one-state model, as in the chain
-        # fit: bol_chain.hysteresis_values); None = no hysteresis.
-        hysteresis_half_gap_V: float | None = None,
-        # Particle-size distribution, as in the chain fit (bol_chain.size_distribution_values):
-        # {"mode": "both" | "positive" | "negative", "sd_n": .., "sd_p": ..}; None = single size.
-        size_distribution: dict | None = None,
         # Particle radial mesh of the chain fit (bol_chain.radial_mesh_setting):
         # {"points": .., "kind": "uniform" | "surface", "stretch": .., "x_factor": ..}
         # (x_factor multiplies PyBaMM's electrode/separator points); None = PyBaMM default.
@@ -1384,26 +1378,7 @@ class PyBaMMOracle:
             # parameter_sets) heats the real cell, not the electrode stack alone.
             if "Cell heat capacity [J.K-1.m-3]" in self._pv.keys():
                 self._deg_opts["use lumped thermal capacity"] = "true"
-        # Graphite hysteresis and particle-size distribution from a chain fit: the
-        # same submodels and parameter functions as the fitted model, so the oracle
-        # replays the protocol with the model that was fitted.
         self._var_pts = None
-        self._hysteresis_half_gap_V = (float(hysteresis_half_gap_V)
-                                       if hysteresis_half_gap_V is not None else None)
-        if self._hysteresis_half_gap_V is not None:
-            from battery_oracle.bol_chain import hysteresis_values
-            self._pv.update(hysteresis_values(self._pv, self._hysteresis_half_gap_V),
-                            check_already_exists=False)
-            self._deg_opts = {**self._deg_opts, "open-circuit potential": ("one-state hysteresis", "single")}
-        self._size_distribution = dict(size_distribution) if size_distribution else None
-        if self._size_distribution:
-            from battery_oracle.bol_chain import PSD_POINTS, chain_options, psd_mode, size_distribution_values
-            mode = psd_mode(self._size_distribution.get("mode", "both"))
-            self._pv = size_distribution_values(self._pv, float(self._size_distribution.get("sd_n") or 0.3),
-                                                float(self._size_distribution.get("sd_p") or 0.3))
-            self._deg_opts = {**self._deg_opts,
-                              "particle size": chain_options(size_distribution=mode)["particle size"]}
-            self._var_pts = {"R_n": PSD_POINTS, "R_p": PSD_POINTS}
         self._radial_mesh = dict(radial_mesh) if radial_mesh else None
         self._submesh = None
         if self._radial_mesh:
