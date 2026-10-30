@@ -69,7 +69,7 @@ def test_oracle_soc_window_stays_inside_ocp_data_and_nominal_is_measured():
     capacity is the measured one so the oracle replays real currents."""
     from battery_oracle.bol_chain import (EPS_N, LI_FRACTION, N_PARALLEL, THICKNESS_SCALE,
                                           overrides_from_chain)
-    from battery_oracle.bol_fit import ocp_data_range
+    from battery_oracle.parameter_sets import ocp_data_range
 
     pv = _pv()
     best = {N_PARALLEL: 0.91, EPS_N: 0.78, THICKNESS_SCALE: 2.0, LI_FRACTION: 0.74}   # pilot PJ248
@@ -82,16 +82,17 @@ def test_oracle_soc_window_stays_inside_ocp_data_and_nominal_is_measured():
     assert 3.0 <= ov["Open-circuit voltage at 0% SOC [V]"] < ov["Open-circuit voltage at 100% SOC [V]"] <= 4.2
 
 
-def _synthetic_data():
-    """One group: rest, 1C discharge, rest, 1C charge, 20 min rest, EIS sweep, a
-    second group after an unrecorded gap with a short discharge."""
-    t1 = np.concatenate([np.arange(0, 60, 20.0), np.arange(60, 660, 20.0), np.arange(660, 960, 30.0),
-                         np.arange(960, 1560, 20.0), np.arange(1560, 2760, 60.0)])
+def _synthetic_data(discharge_s: float = 600.0):
+    """One group: rest, 1C discharge (``discharge_s``), rest, 1C charge, 20 min rest, EIS
+    sweep, a second group after an unrecorded gap with a short discharge."""
+    d = float(discharge_s)
+    t1 = np.concatenate([np.arange(0, 60, 20.0), np.arange(60, 60 + d, 20.0), np.arange(60 + d, 360 + d, 30.0),
+                         np.arange(360 + d, 960 + d, 20.0), np.arange(960 + d, 2160 + d, 60.0)])
     i1 = np.zeros_like(t1)
-    i1[(t1 >= 60) & (t1 < 660)] = 0.042
-    i1[(t1 >= 960) & (t1 < 1560)] = -0.042
+    i1[(t1 >= 60) & (t1 < 60 + d)] = 0.042
+    i1[(t1 >= 360 + d) & (t1 < 960 + d)] = -0.042
     f = np.logspace(2, -1, 8)
-    stamps = 2760.0 + np.cumsum(2.0 / f) + 1.0
+    stamps = 2160.0 + d + np.cumsum(2.0 / f) + 1.0
     lo, hi = windows_from_stamps(stamps)
     t2 = np.concatenate([np.arange(0, 60, 20.0), np.arange(60, 360, 10.0), np.arange(360, 960, 60.0)])
     i2 = np.zeros_like(t2)
@@ -138,13 +139,15 @@ def test_chain_simulates_history_with_heating_and_spectrum():
 def test_chain_fit_recovers_known_parameters_from_synthetic_data():
     """Round trip: data simulated by the chain model at known parameters; the fit
     (5 free parameters incl. lithium inventory and the unrecorded gap, perturbed
-    start) recovers them."""
+    start) recovers them. The discharge reaches the LiCoO2 wall, where the thermodynamic-
+    factor diffusivity is felt: doubling D0 moves the voltage by ~50 mV there, against
+    ~4 mV for a 600 s discharge on the plateau (probe 2026-10-30)."""
     from battery_oracle.bol_chain import (CONTACT_R, LI_FRACTION, ChainModel, fit_cell_chain, gap_name,
                                           lithium_fraction)
     from battery_oracle.params import scale_parameter_name
 
     pv = _pv()
-    data = _synthetic_data()
+    data = _synthetic_data(discharge_s=1800.0)
     f_li0 = lithium_fraction(pv)
     free = [scale_parameter_name("Negative electrode exchange-current density [A.m-2]"),
             scale_parameter_name("Positive particle diffusivity [m2.s-1]"), CONTACT_R, LI_FRACTION,
@@ -176,18 +179,24 @@ def test_oracle_lumped_thermal_uses_coin_cell_heat_capacity():
     assert float(o._pv["Cell volume [m3]"]) < 2e-6            # the coin can, not the pouch
 
 
-def test_lico2_ocp_is_monotone_below_its_data_and_keeps_the_data_range():
-    """Ai2020's cubic extrapolation bends back below y = 0.4, giving OCV = 4.2 V a second
-    root near y = 0; the LiR2032 set continues the OCP linearly instead."""
+def test_lico2_ocp_is_monotone_and_ocp_data_range_reports_the_data():
+    """The set's LiCoO2 OCP falls monotonically over the stoichiometry; ocp_data_range is
+    (0, 1) for an analytic OCP and the x range of an interpolated one (synthetic table)."""
+    import pybamm
+
     from battery_oracle.bol_chain import _ocp_evaluators
-    from battery_oracle.bol_fit import ocp_data_range
+    from battery_oracle.parameter_sets import ocp_data_range
 
     pv = _pv()
     _, up = _ocp_evaluators(pv, 298.15)
     ys = np.linspace(0.01, 0.99, 197)
     u = np.array([up(y) for y in ys])
     assert np.all(np.diff(u) < 0), ys[1:][np.diff(u) >= 0]
-    assert ocp_data_range(pv, "positive") == pytest.approx((0.4, 0.999), abs=2e-3)
+    assert ocp_data_range(pv, "positive") == (0.0, 1.0)
+    x = np.linspace(0.2, 0.9, 15)
+    table = pybamm.ParameterValues({"Positive electrode OCP [V]":
+                                    lambda sto: pybamm.Interpolant(x, 4.2 - x, sto, name="synthetic_ocp")})
+    assert ocp_data_range(table, "positive") == pytest.approx((0.2, 0.9))
 
 
 def test_negative_volume_fractions_sum_to_one():

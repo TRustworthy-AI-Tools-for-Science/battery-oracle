@@ -83,13 +83,13 @@ Rejected physics, with their tests and registrations:
 | knee / graphite knee / j0 shape | `LICO2_DS_*`, `GRAPHITE_DS_*`, `J0_SHAPE_*` (no-op `x**0` nodes in every model); bol_chain 414-430, 843, 1248, 1763 | the knee cases |
 | porosity / solid-fraction modes | bol_chain 444-459, 797-811, 1248, 1327-1332, 1511-1516 | test_chain_porosity (4; keep the N:P identity) |
 | hysteresis, PSD (rejected v21) | bol_chain 94-104, 189-193, 260-268, 339-366, 1334-1340, 1517-1522; oracle.py 1198-1205, 1561-1579 | |
-| harmonic_flux patch | patches 419-492; oracle.py:1603-1604 | test_harmonic_flux (2; move the checkpoint test) |
 | eis_nonstationary PyBOP patch | patches 123-180; `eis_nonstationary.History`/`nonstationary_impedance` | test_nonequilibrium patched-EIS (2) |
 | bol_fit, bol_joint (superseded) | relocate their live constants first: `EIS_SCALES`, `ocp_data_range`, `CONTACT_R`, `EPS_N`, `N_PARALLEL`, `OCV0/100`, `SIGMA_V`, `SIGMA_Z_REL`, `_centred`, `widened`; replace `oracle_parameter_values` (builds an oracle to read `_pv`) with `parameter_sets.resolve` | test_bol_fit (5), joint_fit_recovers |
 
-- The harmonic patch is deleted only after a firing count on the oracle's DFN and the
-  chain model under 26.10: zero firings means removal. BF `diag/validity_probe.py` once
-  logged two firings.
+- **Harmonic patch: keep** (firing count 2026-10-29, `verify/harmonic_firing_count.py`, PyBaMM
+  26.10): 0 firings in the chain model, but 8 in the stage-A oracle and 7 in the default oracle,
+  all on the electrolyte current (kappa tor)(chi grad c_e - grad phi_e). It stays until upstream
+  PR #5856 ships. Re-count after the oracle consistency update (differential surface form).
 - Dead oracle code (from the review), removed with its YAML keys and mapper lines:
   - the non-DFN branches (`_MODEL_CLASSES` has a single entry), the `model` kwarg,
     `REMOVED_MODELS`, `solver_rtol/atol/dt_max_s`, `emergency_solver_dt_max_s`;

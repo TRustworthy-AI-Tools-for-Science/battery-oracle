@@ -54,6 +54,8 @@ from typing import Any
 
 import numpy as np
 
+from battery_oracle.parameter_sets import ocp_data_range  # noqa: F401  (re-exported for callers)
+
 from battery_oracle.params import (
     add_scale_parameters,
     apply_parameter_overrides,
@@ -176,28 +178,6 @@ def ocp_interpolants(pv, n: int = 1001):
         y = np.asarray(pv.process_symbol(u).evaluate(), dtype=float).ravel()
         out.append(pybop.Interpolant(sto, y, name=f"{d} OCP"))
     return tuple(out)
-
-
-def ocp_data_range(pv, domain: str) -> tuple[float, float]:
-    """Stoichiometry range covered by an electrode OCP's data (interpolant x range);
-    ``(0, 1)`` for an analytic OCP. Outside it PyBaMM extrapolates."""
-    import pybamm
-
-    f = pv[f"{domain.capitalize()} electrode OCP [V]"]
-    try:
-        sym = f(pybamm.Scalar(0.5)) if callable(f) else f
-        from battery_oracle.parameter_sets import OCP_DATA_RANGES
-
-        nodes = [n for n in sym.pre_order() if isinstance(n, pybamm.Interpolant)]
-        for n in nodes:                    # continued beyond its data: report the data range
-            if n.name in OCP_DATA_RANGES:
-                return OCP_DATA_RANGES[n.name]
-        xs = [np.asarray(n.x[0]) for n in nodes]
-        if xs:
-            return float(np.min(xs[0])), float(np.max(xs[0]))
-    except Exception:
-        pass
-    return 0.0, 1.0
 
 
 def ocv_soc_limits(pv) -> tuple[float, float]:

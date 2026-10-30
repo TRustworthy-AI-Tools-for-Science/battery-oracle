@@ -53,7 +53,8 @@ from typing import Any
 
 import numpy as np
 
-from battery_oracle.bol_fit import EIS_SCALES, ocp_data_range
+from battery_oracle.bol_fit import EIS_SCALES
+from battery_oracle.parameter_sets import ocp_data_range
 
 #: Multiplied parameters of the chain fit: the EIS set plus electrolyte diffusivity
 #: (the 1-4C coin-cell steps are electrolyte-transport limited; without it the fit
@@ -411,23 +412,6 @@ LITERATURE_BOUNDS = {
     "Positive particle radius [m]": (2.0e-6, 6.5e-6),
 }
 RADII = ("Negative particle radius [m]", "Positive particle radius [m]")
-#: lithiation dependence of the LiCoO2 diffusivity (parameter_sets.LICO2_DS_KNEE);
-#: not in LITERATURE_BOUNDS by default: add via ``bounds`` (LICO2_DS_BOUNDS)
-from battery_oracle.parameter_sets import (GRAPHITE_DS_DROP, GRAPHITE_DS_KNEE,  # noqa: E402
-                                           J0_SHAPE_N, J0_SHAPE_P, LICO2_DS_DROP, LICO2_DS_KNEE)
-LICO2_DS_SHAPE = (LICO2_DS_KNEE, LICO2_DS_DROP)
-GRAPHITE_DS_SHAPE = (GRAPHITE_DS_KNEE, GRAPHITE_DS_DROP)
-J0_SHAPE = (J0_SHAPE_N, J0_SHAPE_P)
-#: knee 0.75-0.95; drop 0-3 decades (chemical D; the tracer D* of Hasegawa/Kuwata
-#: 2021 falls ~4 decades over 0.4-1.0, the thermodynamic factor offsets part of it)
-LICO2_DS_BOUNDS = {LICO2_DS_KNEE: (0.75, 0.95), LICO2_DS_DROP: (0.0, 3.0)}
-#: graphite (parameter_sets.GRAPHITE_DS_KNEE): knee 0.5-0.9 (stage 2 -> 1 starts at
-#: x ~0.5), drop 0-2 decades (GITT/PITT, Levi & Aurbach 1997; Persson et al. 2010)
-GRAPHITE_DS_BOUNDS = {GRAPHITE_DS_KNEE: (0.5, 0.9), GRAPHITE_DS_DROP: (0.0, 2.0)}
-#: exchange-current stoichiometry exponents (parameter_sets.J0_SHAPE_N/P): 0-2.5; at
-#: theta = 0.95 (LiCoO2 near full) gamma = 2.5 lowers j0 by ~60x below the standard form,
-#: within the 1-2 decades of SOC-dependent j0 reported for Li_xCoO2 (Hess et al. 2015)
-J0_SHAPE_BOUNDS = {J0_SHAPE_N: (0.0, 2.5), J0_SHAPE_P: (0.0, 2.5)}
 NP_RATIO = "Negative / positive theoretical capacity"
 #: practical N:P = reversible graphite capacity / cell capacity, 1.0-1.4 (commercial
 #: 1.05-1.2; same window as physicality's check); ~93% of graphite's theoretical
@@ -439,25 +423,7 @@ NEG_THICKNESS_RATIO = "Negative / positive electrode thickness"
 #: lower end is widened to 0.7 because the OCV-fixed N:P with LiCoO2's high volumetric
 #: capacity can need a negative thinner than the positive (flagged by physicality)
 NEG_THICKNESS_RATIO_BOUNDS = (0.7, 1.4)
-POROSITY_P = "Positive electrode porosity"
 EPS_P = "Positive electrode active material volume fraction"
-#: Fitted electrode porosities with a closed solid volume fraction (user specification,
-#: 2026-10-22): active fraction = SOLID_FRACTION - porosity in each electrode (the rest is
-#: binder / conductive additive), porosities 0.25-0.35. With the OCV balance's N:P fixed, the
-#: negative thickness then follows from N:P (it is no longer fitted: NEG_THICKNESS_RATIO is
-#: dropped), and the electrode area from the positive capacity at the candidate's active
-#: fraction. Enabled by ORACLE_FIT_POROSITY=1.
-SOLID_FRACTION = {POROSITY_N: 0.90, POROSITY_P: 0.85}
-POROSITY_BOUNDS = {POROSITY_N: (0.25, 0.35), POROSITY_P: (0.25, 0.35)}
-#: The solid volume fractions themselves as fitted parameters (ORACLE_FIT_SOLID_FRACTION=1, with
-#: ORACLE_FIT_POROSITY=1; user decision 2026-10-23): binder + conductive additive between the
-#: user's 15 % (0.85) and the Ai2020 template's 6 % (0.94), each electrode independently. A
-#: candidate's value replaces SOLID_FRACTION[...] for that electrode.
-SOLID_N = "Negative electrode solid volume fraction"
-SOLID_P = "Positive electrode solid volume fraction"
-SOLID_OF = {POROSITY_N: SOLID_N, POROSITY_P: SOLID_P}
-SOLID_BOUNDS = {SOLID_N: (0.85, 0.94), SOLID_P: (0.85, 0.94)}
-
 
 def negative_porosity(pv_template, eps_n: float) -> float:
     """Porosity that keeps the negative electrode's volume fractions summing to 1 when
@@ -794,22 +760,13 @@ def geometry_overrides(pv_template, inputs: dict, measured_capacity_ah: float | 
     s = _f(inputs.get(THICKNESS_SCALE, 1.0))
     if THICKNESS_SCALE in inputs:
         ov.update({k: float(pv_template[k]) * s for k in THICKNESSES})
-    # fitted porosities, closed solid fraction (see SOLID_FRACTION)
-    for por, eps in ((POROSITY_N, EPS_N), (POROSITY_P, EPS_P)):
-        if por in inputs:
-            ov[por] = _f(inputs[por])
-            solid = _f(inputs[SOLID_OF[por]]) if SOLID_OF[por] in inputs else SOLID_FRACTION[por]
-            ov[eps] = solid - ov[por]
-    eps_p = ov.get(EPS_P, float(pv_template[EPS_P]))
+    eps_p = float(pv_template[EPS_P])
     c_p = float(pv_template["Maximum concentration in positive electrode [mol.m-3]"])
     c_n = float(pv_template["Maximum concentration in negative electrode [mol.m-3]"])
     if NEG_THICKNESS_RATIO in inputs:          # L_n = ratio x L_p
         L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
         ov["Negative electrode thickness [m]"] = _f(inputs[NEG_THICKNESS_RATIO]) * L_p
-    if NP_RATIO in inputs and POROSITY_N in inputs:   # porosity fixes eps_n: N:P fixes L_n
-        L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
-        ov["Negative electrode thickness [m]"] = _f(inputs[NP_RATIO]) * eps_p * L_p * c_p / (ov[EPS_N] * c_n)
-    elif NP_RATIO in inputs:                   # active fraction from the fixed N:P (OCV balance)
+    if NP_RATIO in inputs:                   # active fraction from the fixed N:P (OCV balance)
         L_n = ov.get("Negative electrode thickness [m]", float(pv_template["Negative electrode thickness [m]"]))
         L_p = ov.get("Positive electrode thickness [m]", float(pv_template["Positive electrode thickness [m]"]))
         ov[EPS_N] = _f(inputs[NP_RATIO]) * eps_p * L_p * c_p / (L_n * c_n)
@@ -840,7 +797,7 @@ def candidate_values(pv_base, inputs: dict, initial_voltage: float,
     scales = {n: _f(inputs[scale_parameter_name(n)]) for n in CHAIN_SCALES
               if scale_parameter_name(n) in inputs}
     apply_parameter_scales(pv, scales)
-    direct = {k: _f(inputs[k]) for k in (CONTACT_R, N_PARALLEL, H_TOTAL, *RADII, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE)
+    direct = {k: _f(inputs[k]) for k in (CONTACT_R, N_PARALLEL, H_TOTAL, *RADII)
               if k in inputs}
     pv.update(direct, check_already_exists=False)
     pv.update(geometry_overrides(pv_base, inputs, measured_capacity_ah), check_already_exists=False)
@@ -1245,7 +1202,7 @@ def fit_parameters_chain(pv, data: dict, warm: dict | None = None, *, bounds: di
 
     warm = dict(warm or {})
     bnd = {**LITERATURE_BOUNDS, **(bounds or {})}
-    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, POROSITY_N, POROSITY_P, SOLID_N, SOLID_P, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE, HYST_DELTA,
+    linear = {EPS_N, Q_P_RATIO, LI_FRACTION, HYST_DELTA,
               PSD_SD_N, PSD_SD_P}
     fit = {}
     for name, (lo, hi) in bnd.items():
@@ -1324,12 +1281,7 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                  LI_FRACTION: balance_report["li_fraction"]}
         log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
         bounds = dict(bounds or {})
-        if os.environ.get("ORACLE_FIT_POROSITY") == "1":
-            bounds.update(POROSITY_BOUNDS)          # the negative thickness then follows from N:P
-            if os.environ.get("ORACLE_FIT_SOLID_FRACTION") == "1":
-                bounds.update(SOLID_BOUNDS)
-        else:
-            bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
+        bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     extra = {}
     if hysteresis:
         extra[HYST_DELTA] = HYST_BOUNDS
@@ -1386,13 +1338,6 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                                  best_cost=ck["best_cost"], n_iterations=None)
         log.info("%s: report from checkpoint %s (cost %s, written %s)", cell_id,
                  os.environ["ORACLE_FIT_CHECKPOINT"], ck["best_cost"], ck.get("written"))
-    elif os.environ.get("ORACLE_FIT_POLISH_ONLY") == "1":
-        # validate / apply the local polish alone, from the warm-start point (no CMA-ES)
-        from types import SimpleNamespace
-        if warm_inputs is None:
-            raise ValueError("ORACLE_FIT_POLISH_ONLY needs ORACLE_FIT_WARM_JSON (the start point)")
-        result = SimpleNamespace(best_inputs={k: float(warm_inputs[k]) for k in fit}, best_cost=np.nan,
-                                 n_iterations=0)
     else:
         optim = pybop.CMAES(meta, options=options)
         if warm_inputs is not None:
@@ -1402,26 +1347,6 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                 x0=optim.problem.parameters.get_initial_values(transformed=True),
                 sigma0=np.asarray(optim._std0, float) * f_sigma, boundaries=optim._boundaries)
         result = optim.run()
-    polish_report = None
-    n_polish = int(os.environ.get("ORACLE_FIT_POLISH", "0"))
-    if n_polish > 0 or os.environ.get("ORACLE_FIT_POLISH_ONLY") == "1":
-        # local polish from the CMA-ES best (battery_oracle.polish): replaces it only if better
-        from battery_oracle.polish import polish as _polish
-        names = list(fit)
-        start = {k: float(np.asarray(result.best_inputs[k]).ravel()[0]) for k in names}
-        pol = _polish(lambda cands: np.ravel(np.asarray(meta.evaluate_batch(cands).values, float)), names,
-                      [tuple(map(float, fit[k].bounds)) for k in names], start, max_iter=max(n_polish, 1),
-                      h=float(os.environ.get("ORACLE_FIT_POLISH_STEP", "5e-3")))
-        cma_cost = float(np.asarray(result.best_cost).ravel()[0])
-        polish_report = {k: pol[k] for k in ("start_cost", "best_cost", "iterations", "stop_reason", "history",
-                                             "log_scaled")}
-        polish_report["cmaes_cost"] = cma_cost
-        log.info("%s: polish %s -> %s in %d iterations (%s)", cell_id, pol["start_cost"], pol["best_cost"],
-                 pol["iterations"], pol["stop_reason"])
-        if not np.isfinite(cma_cost) or pol["best_cost"] < cma_cost:
-            from types import SimpleNamespace
-            result = SimpleNamespace(best_inputs=pol["best_inputs"], best_cost=pol["best_cost"],
-                                     n_iterations=getattr(result, "n_iterations", None))
     runtime = time.time() - t0
     best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
     log.info("%s: chain fit cost %s in %.0f s: %s", cell_id, result.best_cost, runtime, best)
@@ -1440,7 +1365,6 @@ def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
                             "sigma_factor": float(os.environ.get("ORACLE_FIT_WARM_SIGMA", "0.3"))}
                            if warm_inputs is not None else None),
             "cost": float(np.asarray(result.best_cost).ravel()[0]),
-            "polish": polish_report,
             "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()},
             "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
             "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
@@ -1508,12 +1432,7 @@ def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
         balances[c] = rep
         log.info("joint fit %s: OCV balance -> fixed %s", c, fixed[c])
     bounds = dict(bounds or {})
-    if os.environ.get("ORACLE_FIT_POROSITY") == "1":
-        bounds.update(POROSITY_BOUNDS)
-        if os.environ.get("ORACLE_FIT_SOLID_FRACTION") == "1":
-            bounds.update(SOLID_BOUNDS)
-    else:
-        bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
+    bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
     if hysteresis:
         bounds[HYST_DELTA] = HYST_BOUNDS
     mode = psd_mode(size_distribution)
@@ -1760,7 +1679,7 @@ def overrides_from_chain(pv, best: dict, measured_capacity_mah: float | None = N
     import pybamm
 
     ov = geometry_overrides(pv, best, measured_capacity_mah / 1000.0 if measured_capacity_mah else None)
-    ov.update({k: float(best[k]) for k in (*RADII, *LICO2_DS_SHAPE, *GRAPHITE_DS_SHAPE, *J0_SHAPE) if k in best})
+    ov.update({k: float(best[k]) for k in RADII if k in best})
     if "Electrode height [m]" not in ov:        # legacy fits: area as a parallel-layer count
         area = float(pv["Electrode height [m]"]) * float(pv["Electrode width [m]"]) * float(best.get(N_PARALLEL, 1.0))
         side = float(np.sqrt(area))

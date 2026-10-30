@@ -25,7 +25,7 @@ dependencies = [
     "scipy>=1.10.0",
     "matplotlib",
     "impedance",
-    "pybamm>=26.4.3,<27",
+    "pybamm>=26.10,<27",
     "pyyaml",
 ]
 

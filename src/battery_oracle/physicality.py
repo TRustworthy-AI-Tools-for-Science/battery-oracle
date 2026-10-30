@@ -296,7 +296,7 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
             out.append(_check(f"{d} surface stoichiometry not saturated", "skip", None, None,
                               str(exc)[:120]))
     try:
-        from battery_oracle.bol_fit import ocp_data_range
+        from battery_oracle.parameter_sets import ocp_data_range
 
         s_min = float(np.min(_entries("Minimum positive particle surface stoichiometry")))
         s_max = float(np.max(_entries("Maximum positive particle surface stoichiometry")))

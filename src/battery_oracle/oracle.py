@@ -58,7 +58,7 @@ from battery_oracle._eis.noise import (
     add_white_noise as _add_white_noise,
 )
 from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
-from battery_oracle.parameter_sets import resolve_parameter_values
+from battery_oracle.parameter_sets import CUSTOM_PARAMETER_SETS, resolve_parameter_values
 from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES, Protocol
 
@@ -196,37 +196,16 @@ REMOVED_MODELS = {name: f"{name} was removed from the oracle (2026-10-16); use m
 # Ideal gas constant (J/mol/K), for the Arrhenius EIS temperature correction (#11).
 _R_GAS = 8.314462618
 
-# Multi-chemistry switching (#14): friendly name / alias -> PyBaMM parameter-set
-# name. Layered on top of the existing parameter_values path (a validated allow-
-# list + provenance anchor), NOT a replacement. NOTE: degradation presets and
-# protocol bounds are chemistry-specific — a non-Chen2020 chemistry must be paired
-# with its own calibration YAML (voltage window, capacity, preset). In particular
-# LFP (Prada2013) has a ~2.0-3.6 V window, incompatible with the default 4.3 V/3.0 V
-# bounds; see config_oracle_matr.yml.
+# Chemistry name / alias -> parameter-set name: PyBaMM's sets, the custom sets of
+# battery_oracle.parameter_sets (each its own name), and friendly aliases. Degradation
+# presets and protocol bounds are chemistry-specific: a non-Chen2020 chemistry needs its
+# own oracle config (voltage window, capacity, preset); LFP (Prada2013) has a ~2.0-3.6 V
+# window, incompatible with the default 4.3 V / 3.0 V bounds.
 _SUPPORTED_CHEMISTRIES = {
     "Chen2020":  "Chen2020",   # LG M50, NMC811/graphite, 5 Ah (default)
     "Xu2019":    "Xu2019",     # NMC532 half-cell
     "Prada2013": "Prada2013",  # A123 LFP, 2.3 Ah
-    # Custom sets (battery_oracle.parameter_sets): the real jones2022 LiR2032
-    # LiCoO2/graphite coin cell (~42 mAh), Ai2020 template (or Ramadass2004).
-    "LiR2032":   "LiR2032",
-    "LiR2032_Ramadass2004": "LiR2032_Ramadass2004",
-    "LiR2032_RamadassGraphite": "LiR2032_RamadassGraphite",   # Ai2020 + Ramadass graphite OCP
-    "LiR2032_ChenGraphite": "LiR2032_ChenGraphite",           # Ai2020 + Chen2020 LG M50 graphite OCP
-    "LiR2032_EckerGraphite": "LiR2032_EckerGraphite",
-    "LiR2032_MohtatGraphite": "LiR2032_MohtatGraphite",
-    # + LiCoO2 solid diffusivity from the OCP's thermodynamic factor (no shape parameters)
-    "LiR2032_MohtatGraphite_ThermoD": "LiR2032_MohtatGraphite_ThermoD",
-    "LiR2032_MohtatGraphite_VacancyD": "LiR2032_MohtatGraphite_VacancyD",
-    "LiR2032_MohtatGraphite_MarquisLCO": "LiR2032_MohtatGraphite_MarquisLCO",
-    "LiR2032_MohtatGraphite_MarquisLCO_VacancyD": "LiR2032_MohtatGraphite_MarquisLCO_VacancyD",
-    "LiR2032_MohtatGraphite_MarquisLCO_ThermoD": "LiR2032_MohtatGraphite_MarquisLCO_ThermoD",
-    "LiR2032_MohtatGraphite_MarquisLCO_ThermoD_MIT": "LiR2032_MohtatGraphite_MarquisLCO_ThermoD_MIT",
-    "LiR2032_MohtatGraphite_Wall": "LiR2032_MohtatGraphite_Wall",
-    "LiR2032_MohtatGraphite_Wall_VacancyD": "LiR2032_MohtatGraphite_Wall_VacancyD",
-    "LiR2032_EckerGraphite_MarquisLCO": "LiR2032_EckerGraphite_MarquisLCO",
-    "LiR2032_ChenGraphite_MarquisLCO": "LiR2032_ChenGraphite_MarquisLCO",
-    # friendly aliases
+    **{name: name for name in CUSTOM_PARAMETER_SETS},
     "LGM50":     "Chen2020",
     "NMC532":    "Xu2019",
     "LFP":       "Prada2013",
