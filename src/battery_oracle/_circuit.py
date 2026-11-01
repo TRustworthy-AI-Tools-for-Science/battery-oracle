@@ -55,9 +55,6 @@ ECM_PARAM_NAMES = _param_labels_from_circuit(DEFAULT_CIRCUIT)
 # ---------------------------------------------------------------------------
 # Symmetric-Randles arc-flip correction (vendored from utils.py)
 # ---------------------------------------------------------------------------
-_LEGACY_RANDLES_PAIRS = [("R3", "P4"), ("R5", "P6")]
-
-
 def randles_pairs_from_circuit(circuit: str) -> list[tuple[str, str]]:
     """Extract symmetric Randles ``[R, CPE]`` arc pairs from an ECM circuit string.
 
@@ -132,11 +129,10 @@ def _fix_arc_flips(sample_dicts: list[dict], pairs) -> None:
         _apply_arc_permutation(curr, best, pairs)
 
 
-def fix_parameter_flips_dicts(sample_dicts, circuit: str | None = None) -> None:
+def fix_parameter_flips_dicts(sample_dicts, circuit: str) -> None:
     """Flip-correct a list of per-cycle posterior-sample dicts in place.
 
-    Lowest-level public entry point.  Arc pairs are derived from ``circuit``
-    (legacy project pairs when None).
+    Lowest-level public entry point.  Arc pairs are derived from ``circuit``.
     """
-    pairs = randles_pairs_from_circuit(circuit) if circuit else _LEGACY_RANDLES_PAIRS
+    pairs = randles_pairs_from_circuit(circuit)
     _fix_arc_flips(list(sample_dicts), pairs)

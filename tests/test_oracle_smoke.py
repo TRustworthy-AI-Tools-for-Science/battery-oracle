@@ -139,7 +139,7 @@ def test_randles_stub_shape():
 
 
 def test_randles_stub_circuit_generic():
-    """The stub derives its layout from the circuit — legacy 9-param still works."""
+    """The stub derives its layout from the circuit (here a 9-param one)."""
     freq = np.logspace(-2, 4, 30)
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
     out = randles_stub_ecm(freq, Z.real, Z.imag, circuit="R1-P2-[R3,P4]-[R5,P6]")
@@ -167,8 +167,8 @@ def test_failure_kind_is_str_enum():
 def test_oracle_failure_carries_failure_kind():
     exc = OracleFailure("boom", protocol=np.zeros(6), failure_kind=FailureKind.SOLVER_TRUNCATION)
     assert exc.failure_kind is FailureKind.SOLVER_TRUNCATION
-    # Back-compat: failure_kind is optional.
-    assert OracleFailure("legacy").failure_kind is None
+    with pytest.raises(TypeError):
+        OracleFailure("no kind")
 
 
 def test_save_to_csv_failure_and_fidelity_columns():

@@ -686,7 +686,7 @@ def candidate_values(pv_base, inputs: dict, initial_voltage: float,
     scales = {n: _f(inputs[scale_parameter_name(n)]) for n in CHAIN_SCALES
               if scale_parameter_name(n) in inputs}
     apply_parameter_scales(pv, scales)
-    direct = {k: _f(inputs[k]) for k in (CONTACT_R, N_PARALLEL, H_TOTAL, *RADII)
+    direct = {k: _f(inputs[k]) for k in (CONTACT_R, H_TOTAL, *RADII)
               if k in inputs}
     pv.update(direct, check_already_exists=False)
     pv.update(geometry_overrides(pv_base, inputs, measured_capacity_ah), check_already_exists=False)
@@ -1496,10 +1496,6 @@ def overrides_from_chain(pv, best: dict, measured_capacity_mah: float | None = N
 
     ov = geometry_overrides(pv, best, measured_capacity_mah / 1000.0 if measured_capacity_mah else None)
     ov.update({k: float(best[k]) for k in RADII if k in best})
-    if "Electrode height [m]" not in ov:        # legacy fits: area as a parallel-layer count
-        area = float(pv["Electrode height [m]"]) * float(pv["Electrode width [m]"]) * float(best.get(N_PARALLEL, 1.0))
-        side = float(np.sqrt(area))
-        ov.update({"Electrode height [m]": side, "Electrode width [m]": side, N_PARALLEL: 1.0})
     pvf = apply_parameter_overrides(pv.copy(), ov)
     f_li = float(best.get(LI_FRACTION, lithium_fraction(pvf)))
     T = float(pvf["Initial temperature [K]"])

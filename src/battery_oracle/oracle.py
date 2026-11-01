@@ -145,14 +145,14 @@ def _init_autoeis_patches() -> None:
 # are the jones2022 training-partition medians — they keep the poorly-identified
 # CPE terms near the training scale (without them the wide LogNormal prior lets
 # the posterior mean wander orders of magnitude off). Exponents are typical for
-# Li-ion cells at moderate SOC. Both circuit generations are seeded:
-# the current 7-param arcs P3/P5 carry the same tuned values as the legacy
-# 9-param arcs P4/P6 they correspond to (P2 was the legacy series CPE, no
-# 7-param counterpart). Unknown labels fall back to the defaults.
-_CPE_W_SEED    = {"P3w": 0.071, "P5w": 0.043,                 # current arcs
-                  "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}    # legacy 9-param labels
-_CPE_N_SEED    = {"P3n": 0.80, "P5n": 0.75,                   # current arcs
-                  "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}      # legacy 9-param labels
+# Li-ion cells at moderate SOC. Both circuits are seeded: the package's 7-param
+# R1-[R2,P3]-[R4,P5] and battery-forecast's 9-param R1-P2-[R3,P4]-[R5,P6] (what its
+# surrogates are trained on); the arcs carry the same values in both, P2 is the
+# 9-param series CPE. Unknown labels fall back to the defaults.
+_CPE_W_SEED    = {"P3w": 0.071, "P5w": 0.043,                 # 7-param arcs
+                  "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}    # 9-param
+_CPE_N_SEED    = {"P3n": 0.80, "P5n": 0.75,                   # 7-param arcs
+                  "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}      # 9-param
 _CPE_W_DEFAULT = 0.1
 _CPE_N_DEFAULT = 0.80
 
@@ -220,7 +220,7 @@ class OracleFailure(RuntimeError):
     oracle, do not substitute synthetic data — end the active learning loop.
     The last protocol that triggered the failure is stored in
     ``self.protocol`` for diagnostics, and a machine-readable
-    :class:`FailureKind` in ``self.failure_kind`` (``None`` for legacy callers).
+    :class:`FailureKind` in ``self.failure_kind``.
 
     Note: ``FailureKind.SOLVER_DEGRADED`` is a *non-fatal* status recorded in the
     history dict, never raised — raising it would end the AL loop.
@@ -229,7 +229,8 @@ class OracleFailure(RuntimeError):
         self,
         message: str,
         protocol: np.ndarray | None = None,
-        failure_kind: "FailureKind | None" = None,
+        *,
+        failure_kind: FailureKind,
     ) -> None:
         super().__init__(message)
         self.protocol = protocol
@@ -371,7 +372,7 @@ def _autoeis_ecm(
     ``[R1, R2, P3w, P3n, R4, P5w, P5n]``, duplicated for charge and discharge
     into the 14-D state. The initial guess ``p0`` is built generically from the
     circuit (ohmic R, arc [R,P] pairs, series CPEs), so any circuit works
-    unchanged (e.g. the legacy 9-param ``R1-P2-[R3,P4]-[R5,P6]``).
+    unchanged (e.g. battery-forecast's 9-param ``R1-P2-[R3,P4]-[R5,P6]``).
 
     ``cpe_w_seed``/``cpe_n_seed``/``cpe_w_default``/``cpe_n_default``/
     ``rescale_target_r0``/``num_warmup``/``num_samples`` default to the module

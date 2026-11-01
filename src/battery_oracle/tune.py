@@ -1383,9 +1383,8 @@ def write_oracle_config(
         f"  dod_lam_scale: {dl_best:.4g}   # C_rate_1 (charge-rate) lever; 0 = disabled (charge rate has no lifetime effect)",
         "",
         "protocol_scaling:",
-        "  real_cell_capacity_mah_legacy_default: 200.0  # always auto-detect per cell",
-        *([f"  real_cell_capacity: auto   # exp2: detect each held-out cell's capacity"]
-          if real_capacity_auto else []),
+        ("  real_cell_capacity: auto   # exp2: detect each held-out cell's capacity" if real_capacity_auto
+         else "  # set real_cell_capacity: auto or real_cell_capacity_mah (exp2 needs one)"),
         f"  kinetics_scale: {best['kinetics_scale']}",
         f"  sei_rate_scale: {best['sei_rate_scale']}",
         f"  dead_li_decay_scale: {dds_best:.4g}",

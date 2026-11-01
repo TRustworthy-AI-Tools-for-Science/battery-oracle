@@ -63,23 +63,30 @@ def test_impossible_lithium_inventory_is_a_failed_candidate():
         initial_stoichiometries(pv, 3.96, 1.01 * (q_n + q_p) / q_p, 296.15)
 
 
-def test_oracle_soc_window_stays_inside_ocp_data_and_nominal_is_measured():
-    """The oracle's 0/100% SOC limits must map to stoichiometries inside the OCP data
-    (the pilot's 4.2 V limit sent LiCoO2 below its y = 0.4 data edge), and the nominal
-    capacity is the measured one so the oracle replays real currents."""
-    from battery_oracle.bol_chain import (EPS_N, LI_FRACTION, N_PARALLEL, THICKNESS_SCALE,
-                                          overrides_from_chain)
+@pytest.mark.parametrize("thickness, q_p_ratio, li_fraction",
+                         [(0.6, 1.6, 0.85), (1.3, 2.4, 1.0), (1.0, 2.0, 0.9)])
+def test_oracle_soc_window_stays_inside_ocp_data_and_nominal_is_measured(thickness, q_p_ratio, li_fraction):
+    """Over the fitted-geometry bounds: the oracle's 0/100% SOC limits map to
+    stoichiometries inside the OCP data, the nominal capacity is the measured one (so the
+    oracle replays real currents), and the area gives the positive electrode
+    Q_P_RATIO x the measured capacity."""
+    from battery_oracle.bol_chain import (EPS_N, LI_FRACTION, OCV0, OCV100, Q_P_RATIO, THICKNESS_SCALE,
+                                          electrode_capacities_ah, overrides_from_chain)
+    from battery_oracle.params import apply_parameter_overrides
     from battery_oracle.parameter_sets import ocp_data_range
 
     pv = _pv()
-    best = {N_PARALLEL: 0.91, EPS_N: 0.78, THICKNESS_SCALE: 2.0, LI_FRACTION: 0.74}   # pilot PJ248
-    ov, _, _, _, esoh = overrides_from_chain(pv, best, 41.9)
+    measured_mah = 10.0
+    best = {THICKNESS_SCALE: thickness, Q_P_RATIO: q_p_ratio, LI_FRACTION: li_fraction, EPS_N: 0.7}
+    ov, _, _, _, esoh = overrides_from_chain(pv, best, measured_mah)
     assert "error" not in esoh, esoh
     y_lo, y_hi = ocp_data_range(pv, "positive")
     assert y_lo <= esoh["y_100"] < esoh["y_0"] <= y_hi
     assert 0 <= esoh["x_0"] < esoh["x_100"] <= 1
-    assert np.isclose(ov["Nominal cell capacity [A.h]"], 0.0419)
-    assert 3.0 <= ov["Open-circuit voltage at 0% SOC [V]"] < ov["Open-circuit voltage at 100% SOC [V]"] <= 4.2
+    assert ov[OCV0] < ov[OCV100]
+    assert np.isclose(ov["Nominal cell capacity [A.h]"], measured_mah / 1000.0)
+    _, q_p = electrode_capacities_ah(apply_parameter_overrides(pv.copy(), ov))
+    assert np.isclose(q_p, q_p_ratio * measured_mah / 1000.0, rtol=1e-9)
 
 
 def _synthetic_data(discharge_s: float = 600.0):

@@ -2,10 +2,10 @@
 
 Mirrors the discipline already used for the oracle's *output* (see
 ``oracle.state_vector_schema``) on its *input*: :class:`PyBaMMOracle.__call__`
-and :meth:`PyBaMMOracle.run_cycle` accept a bare 6-D (or 7-D) ``np.ndarray``
-for backward compatibility, but the slot order/meaning was previously only
-documented in comments (``_circuit.ACTION_FEATURE_NAMES``). ``Protocol``
-gives that vector a name and a unit for each slot.
+and :meth:`PyBaMMOracle.run_cycle` also accept a bare 6-D (or 7-D) ``np.ndarray``
+(the array interface battery-forecast uses), whose slot order is
+``_circuit.ACTION_FEATURE_NAMES``. ``Protocol`` gives that vector a name and a
+unit for each slot.
 
 Deliberately import-light (``dataclasses``, ``numpy``, and
 ``battery_oracle._circuit`` only) so it has no PyBaMM/AutoEIS dependency and

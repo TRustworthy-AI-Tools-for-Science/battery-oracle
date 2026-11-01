@@ -186,7 +186,7 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
         # calibration YAML (e.g. LFP scales loaded onto an NMC cell).
         "chemistry": cycling.get("chemistry", cycling.get("parameter_set", "Chen2020")),
         "real_cell_capacity_mah": float(
-            protocol_scaling.get("real_cell_capacity_mah_legacy_default", 200.0)
+            protocol_scaling.get("real_cell_capacity_mah", 200.0)
         ),
         "rest_s": float(cycling.get("rest_s", 1200.0)),
         "initial_soc": float(cycling.get("initial_soc", 0.8)),
