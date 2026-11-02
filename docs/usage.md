@@ -37,7 +37,9 @@ s = \big[\underbrace{\theta^{\mathrm{chg}}_1, \dots, \theta^{\mathrm{chg}}_P}_{\
 $$
 
 the two spectra being fitted independently. For the packaged default circuit
-`R1-[R2,P3]-[R4,P5]` ($P{=}7$) this is the 14-D state. Parameter
+`R1-[R2,P3]-[R4,P5]` ($P{=}7$) this is the 14-D state. The default is a fallback:
+pass the circuit your experiment is featurized with (`ecm.circuit` in the experiment
+config, or `PyBaMMOracle(circuit=...)`). Parameter
 summaries are posterior medians (see [Divergences](divergences.md) §7 for why
 not means).
 

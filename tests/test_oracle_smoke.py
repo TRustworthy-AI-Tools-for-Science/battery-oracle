@@ -134,7 +134,8 @@ def test_randles_stub_shape():
     # Simple synthetic spectrum: ohmic + one decaying arc
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
     out = randles_stub_ecm(freq, Z.real, Z.imag)
-    assert out.shape == (14,)   # 7-param DEFAULT_CIRCUIT half, duplicated chg/dis
+    # one DEFAULT_CIRCUIT half per state (charge, discharge)
+    assert out.shape == (2 * len(_param_labels_from_circuit(DEFAULT_CIRCUIT)),)
     assert np.all(np.isfinite(out))
 
 
@@ -327,7 +328,7 @@ def test_dfn_solver_failure_fails_loudly():
 # ── Phase 0: STATE_VECTOR_SCHEMA + ECM σ (#6) ──────────────────────────────
 
 def test_state_vector_schema_is_derived():
-    # Default circuit has 7 params -> 4 blocks of 7 = 28, all derived (no literals).
+    # 4 blocks of the default circuit's parameter count, all derived (no literals).
     n = len(_param_labels_from_circuit(DEFAULT_CIRCUIT))
     sch = state_vector_schema(n)
     assert list(sch) == ["means_charge", "means_discharge", "std_charge", "std_discharge"]

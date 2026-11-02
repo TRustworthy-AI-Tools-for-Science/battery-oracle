@@ -75,7 +75,9 @@ for u in make_pybamm_candidates():   # 6-D protocol grid, as plain arrays
 ```
 
 The ECM circuit is configurable (`PyBaMMOracle(circuit="R1-[R2,P3]-[R4,P5]", ...)`);
-it defaults to `battery_oracle.DEFAULT_CIRCUIT`. A fully-configured oracle can
+in practice take it from the experiment config (`ecm.circuit`), so the oracle's state
+vector matches the featurization of the real experiment. Without one it falls back to
+`battery_oracle.DEFAULT_CIRCUIT` (the 7-parameter circuit above). A fully-configured oracle can
 also be built directly from a calibration YAML with
 `PyBaMMOracle.from_config()` (packaged defaults), `.from_config("calce")`
 (a packaged per-dataset calibration), or `.from_config("my_cell.yml")`.

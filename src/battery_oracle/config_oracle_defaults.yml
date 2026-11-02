@@ -107,19 +107,19 @@ ecm:
   # this circuit (ohmic R = the resistor outside any [R,CPE] arc; arc Rs are the
   # bracketed resistors) -- no fixed element count is assumed anywhere. Load it via
   # battery_oracle.load_default_ecm_circuit(); the tune engine falls back to it when
-  # no circuit is passed. MUST match battery_oracle._circuit.DEFAULT_CIRCUIT (and,
-  # in the battery_forecast study, datasets.yaml's default_circuit) or oracle state
-  # vectors diverge from the real-experiment (BattMAP) featurization. AutoEIS
-  # labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE exponent, so this 7-parameter
-  # circuit -> [R1,R2,P3w,P3n,R4,P5w,P5n].
+  # no circuit is passed. A fallback only: in practice pass the experiment's circuit
+  # (ecm.circuit, or the study's own, e.g. battery_forecast's datasets.yaml
+  # default_circuit) so the oracle's state vectors match the real experiment's
+  # featurization. Matches battery_oracle._circuit.DEFAULT_CIRCUIT.
+  # AutoEIS labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE exponent, so this
+  # 7-parameter circuit -> [R1,R2,P3w,P3n,R4,P5w,P5n].
   circuit: "R1-[R2,P3]-[R4,P5]"
   # AutoEIS initial-guess seeds for the CPE terms, keyed by canonical AutoEIS
   # label. Admittance (w) seeds are jones2022 training-partition medians, kept
   # close to the training scale; exponents (n) are typical for Li-ion SPMe at
-  # moderate SOC (Chen2020). Both circuits are seeded: this package's 7-param
-  # (arcs P3/P5) and battery-forecast's 9-param R1-P2-[R3,P4]-[R5,P6] (arcs
-  # P4/P6, same values; P2 its series CPE). Unknown labels fall back to
-  # w_default/n_default.
+  # moderate SOC (Chen2020). Both circuits are seeded: the default 7-param (arcs
+  # P3/P5) and the 9-param R1-P2-[R3,P4]-[R5,P6] (arcs P4/P6, same values; P2 its
+  # series CPE). Unknown labels fall back to w_default/n_default.
   cpe_seeds:
     w:
       P3w: 0.071

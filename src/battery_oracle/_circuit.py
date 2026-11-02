@@ -14,10 +14,11 @@ from itertools import permutations
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Canonical circuit + parameter/action names (single source of truth for the
-# standalone package; a study can override per-instance via PyBaMMOracle kwargs).
-# Values mirror battery_forecast's config/datasets.yaml default_circuit +
-# action_names so featurized records line up when used inside that pipeline.
+# Default circuit + parameter/action names of the standalone package. The circuit
+# is only the fallback: in practice it comes from the experiment config (the
+# experiment YAML's ecm.circuit, or the study's own setting such as battery_forecast's
+# config/datasets.yaml default_circuit) and is passed as PyBaMMOracle(circuit=...),
+# so the oracle's state vector has the layout the study's surrogates were trained on.
 # ---------------------------------------------------------------------------
 DEFAULT_CIRCUIT = "R1-[R2,P3]-[R4,P5]"
 
