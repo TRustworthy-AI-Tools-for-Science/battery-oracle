@@ -187,9 +187,11 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
     bounds, temperature). Currents are given at the stated C-rates of its own
     nominal capacity, so the real-cell scaling is 1.
     """
-    from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.failures import OracleFailure
+    from battery_oracle.oracle import PyBaMMOracle
 
-    kw = {**oracle_kwargs, "ecm_model_fn": _randles_stub_ecm}
+    kw = {**oracle_kwargs, "ecm_model_fn": randles_stub_ecm}
     try:
         oracle = PyBaMMOracle(**kw)
         nominal = oracle._nominal_mAh

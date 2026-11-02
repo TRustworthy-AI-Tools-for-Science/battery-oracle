@@ -50,7 +50,7 @@ def test_build_degradation_config_default_matches_module_dict():
     """preset_constants=None (the default) must reproduce today's hardcoded numbers."""
     import pybamm
 
-    from battery_oracle.oracle import _DEFAULT_PRESET_CONSTANTS, _build_degradation_config
+    from battery_oracle.degradation import _build_degradation_config, _DEFAULT_PRESET_CONSTANTS
 
     pv = pybamm.ParameterValues("Chen2020")
     _, pv2 = _build_degradation_config("accelerated", pv)
@@ -62,7 +62,7 @@ def test_build_degradation_config_default_matches_module_dict():
 def test_build_degradation_config_preset_constants_override():
     import pybamm
 
-    from battery_oracle.oracle import _build_degradation_config
+    from battery_oracle.degradation import _build_degradation_config
 
     pv = pybamm.ParameterValues("Chen2020")
     custom = {
@@ -78,7 +78,7 @@ def test_build_degradation_config_preset_constants_override():
 def test_ec_diffusivity_base_factor_override():
     import pybamm
 
-    from battery_oracle.oracle import _build_degradation_config
+    from battery_oracle.degradation import _build_degradation_config
 
     pv = pybamm.ParameterValues("Chen2020")
     base_d = float(pv["EC diffusivity [m2.s-1]"])

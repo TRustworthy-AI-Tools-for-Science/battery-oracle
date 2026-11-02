@@ -92,22 +92,24 @@ def test_lico2_diffusivity_follows_the_installed_ocp():
 def test_oracle_scales_currents_by_the_simulated_cell_capacity():
     """The protocol's real-cell currents are scaled by simulated / real capacity: 1 when the
     real cell is the simulated one, nominal / real otherwise."""
-    from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
 
     q = ps.nominal_capacity_mah("LiR2032")
-    o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=_randles_stub_ecm, real_cell_capacity_mah=q)
+    o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=randles_stub_ecm, real_cell_capacity_mah=q)
     assert o._cap_scale == pytest.approx(1.0)
-    chen = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, real_cell_capacity_mah=q)
+    chen = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, real_cell_capacity_mah=q)
     assert chen._cap_scale == pytest.approx(ps.nominal_capacity_mah("Chen2020") / q)
 
 
 @pytest.mark.slow
 def test_dfn_lir2032_oracle_applies_real_cell_currents_unscaled():
     """A real-scale DFN cycle: a stage current equals the requested real-cell current."""
-    from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
 
     q = ps.nominal_capacity_mah("LiR2032")
-    o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=_randles_stub_ecm,
+    o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=randles_stub_ecm,
                      real_cell_capacity_mah=q, discharge_mode="protocol",
                      c_min_mA=0.01 * q, c2_min_mA=0.01 * q, c_max_mA=4.5 * q, c2_max_mA=4.5 * q,
                      dfn_max_crate=4.5, dur_min_s=1.0, ecm_rescale_target_r0=None)

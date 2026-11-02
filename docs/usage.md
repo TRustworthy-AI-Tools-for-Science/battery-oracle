@@ -69,8 +69,8 @@ Key fields:
   whenever the study target is PyBaMM physics rather than fit fidelity:
 
 ```python
-from battery_oracle.oracle import _randles_stub_ecm
-oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm)
+from battery_oracle.ecm import randles_stub_ecm
+oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm)
 ```
 
 Any callable `(frequencies, Z_real, Z_imag) -> (2P,) array` is accepted.

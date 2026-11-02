@@ -41,17 +41,10 @@ from battery_oracle.experiment import (
     protocols_from_config,
     run_experiment,
 )
-from battery_oracle.oracle import (
-    STATE_VECTOR_SCHEMA,
-    CycleResult,
-    FailureKind,
-    OracleFailure,
-    PyBaMMOracle,
-    autoeis_ecm,
-    make_pybamm_candidates,
-    randles_stub_ecm,
-    state_vector_schema,
-)
+from battery_oracle.ecm import autoeis_ecm, randles_stub_ecm
+from battery_oracle.failures import FailureKind, OracleFailure
+from battery_oracle.oracle import make_pybamm_candidates, PyBaMMOracle
+from battery_oracle.state import CycleResult, STATE_VECTOR_SCHEMA, state_vector_schema
 from battery_oracle.protocol import Protocol
 from battery_oracle.tune import (
     calibrate_oracle,

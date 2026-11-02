@@ -1,7 +1,7 @@
 """``Protocol``: a named, unit-explicit charge/discharge protocol vector.
 
 Mirrors the discipline already used for the oracle's *output* (see
-``oracle.state_vector_schema``) on its *input*: :class:`PyBaMMOracle.__call__`
+``state.state_vector_schema``) on its *input*: :class:`PyBaMMOracle.__call__`
 and :meth:`PyBaMMOracle.run_cycle` also accept a bare 6-D (or 7-D) ``np.ndarray``
 (the array interface battery-forecast uses), whose slot order is
 ``_circuit.ACTION_FEATURE_NAMES``. ``Protocol`` gives that vector a name and a

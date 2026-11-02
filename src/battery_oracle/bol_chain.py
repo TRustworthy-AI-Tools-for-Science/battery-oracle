@@ -110,7 +110,7 @@ CHAIN_OPTIONS = {
     "contact resistance": "true",
     "thermal": "lumped",
     "use lumped thermal capacity": "true",
-    # the oracle's SEI growth model (oracle._build_degradation_config), so the fitted
+    # the oracle's SEI growth model (degradation._build_degradation_config), so the fitted
     # balance carries the lithium the SEI consumes
     "SEI": ("ec reaction limited", "none"),
 }

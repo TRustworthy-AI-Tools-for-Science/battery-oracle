@@ -275,12 +275,8 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     kwargs = oracle_kwargs_from_config(cfg, oracle_cfg)
     pset = kwargs.pop("parameter_set", None)
 
-    from battery_oracle.oracle import (
-        _SUPPORTED_CHEMISTRIES,
-        PyBaMMOracle,
-        _autoeis_ecm,
-        _randles_stub_ecm,
-    )
+    from battery_oracle.ecm import autoeis_ecm, randles_stub_ecm
+    from battery_oracle.oracle import _SUPPORTED_CHEMISTRIES, PyBaMMOracle
     # #14: cross-layer chemistry validation — the config's declared chemistry must
     # resolve to the same PyBaMM parameter set, so an LFP-calibrated YAML can't be
     # silently paired with an NMC cell (mismatched degradation scales/bounds).
@@ -303,7 +299,7 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
         kwargs["parameter_values"] = resolve_parameter_values(pset)
 
     fitter = kwargs.pop("ecm_fitter", _DEFAULT_ECM_FITTER)
-    kwargs["ecm_model_fn"] = _autoeis_ecm if fitter == "autoeis" else _randles_stub_ecm
+    kwargs["ecm_model_fn"] = autoeis_ecm if fitter == "autoeis" else randles_stub_ecm
     return PyBaMMOracle(**kwargs)
 
 
@@ -324,11 +320,8 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     kwargs = oracle_kwargs_from_oracle_config(oracle_cfg)
     pset = kwargs.pop("parameter_set", None)
 
-    from battery_oracle.oracle import (
-        _SUPPORTED_CHEMISTRIES,
-        PyBaMMOracle,
-        _randles_stub_ecm,
-    )
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import _SUPPORTED_CHEMISTRIES, PyBaMMOracle
     chem = kwargs.get("chemistry", "Chen2020")
     if chem not in _SUPPORTED_CHEMISTRIES:
         raise ValueError(
@@ -347,7 +340,7 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     # This layer carries an ecm.circuit-derived `circuit`; the fitter is not part
     # of the oracle config, so default to the fast Randles stub.
     kwargs.pop("ecm_fitter", None)
-    kwargs["ecm_model_fn"] = _randles_stub_ecm
+    kwargs["ecm_model_fn"] = randles_stub_ecm
     return PyBaMMOracle(**kwargs)
 
 
@@ -373,7 +366,7 @@ def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> lis
     """
     import numpy as np
 
-    from battery_oracle.oracle import OracleFailure
+    from battery_oracle.failures import OracleFailure
 
     cfg = load_experiment_config(path)
     oracle = build_oracle_from_config(cfg)

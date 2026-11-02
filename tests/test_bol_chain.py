@@ -144,9 +144,10 @@ def test_chain_simulates_history_with_heating_and_spectrum():
 
 @pytest.mark.slow
 def test_oracle_lumped_thermal_uses_coin_cell_heat_capacity():
-    from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
 
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032", thermal="lumped",
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, chemistry="LiR2032", thermal="lumped",
                      T_ambient_K=296.15, h_total_W_per_m2K=12.0)
     assert o._deg_opts.get("use lumped thermal capacity") == "true"
     assert float(o._pv["Total heat transfer coefficient [W.m-2.K-1]"]) == 12.0

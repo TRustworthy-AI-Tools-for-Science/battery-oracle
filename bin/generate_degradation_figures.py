@@ -33,7 +33,7 @@ if str(SRC) not in sys.path:
 
 from battery_oracle import OracleFailure, PyBaMMOracle  # noqa: E402
 from battery_oracle._plotting import label_axes, slipstream  # noqa: E402
-from battery_oracle.oracle import _randles_stub_ecm  # noqa: E402
+from battery_oracle.ecm import randles_stub_ecm
 
 plt.rcParams.update({"font.family": "serif", "figure.dpi": 120,
                      "axes.grid": True, "grid.alpha": 0.3})
@@ -55,7 +55,7 @@ HIST_KEYS = [
 
 
 def run_preset(preset: str, n_cycles: int) -> dict:
-    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, degradation_preset=preset,
+    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, degradation_preset=preset,
                           capacity_check=False)
     oracle.reset()
     rec: dict = {k: [] for k in HIST_KEYS}

@@ -1,25 +1,20 @@
 """Battery oracle: PyBaMM DFN simulations + EIS + ECM fitting.
 
-Public
-------
-OracleFailure           — raised when simulation fails; caller should end the AL loop
 PyBaMMOracle            — stateful battery oracle (DFN → EIS → ECM); see ``run_cycle``
-CycleResult             — named, schema-aware result of one ``PyBaMMOracle.run_cycle`` call
 make_pybamm_candidates  — build a 6-D protocol candidate grid for the CLI
-randles_stub_ecm        — fast analytic Randles fallback (no AutoEIS required)
-autoeis_ecm             — ECM fit via AutoEIS Bayesian inference; falls back to Randles stub
+oracle_parameter_values — the parameter values an oracle simulates
 
-See also ``battery_oracle.protocol.Protocol`` (the named protocol-vector counterpart).
+Its parts: settings ``oracle_config``, failures ``failures``, output layout and
+``CycleResult`` ``state``, degradation presets ``degradation``, ECM fits ``ecm``,
+protocol vectors ``protocol``.
 """
 from __future__ import annotations
 
-import copy
 import logging
 import threading
 import types
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from enum import Enum
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -40,9 +35,6 @@ from battery_oracle._circuit import (
 from battery_oracle._circuit import (
     _param_labels_from_circuit as _param_labels_from_circuit,
 )
-from battery_oracle._circuit import (
-    randles_pairs_from_circuit as _randles_pairs_from_circuit,
-)
 from battery_oracle._eis.kk import linkk_rmse as _linkk_rmse
 from battery_oracle._eis.noise import (
     add_flicker_noise as _add_flicker_noise,
@@ -55,119 +47,16 @@ from battery_oracle._eis.noise import (
     add_white_noise as _add_white_noise,
 )
 from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
+from battery_oracle.degradation import _build_degradation_config
+from battery_oracle.ecm import _AUTOEIS_AVAILABLE, autoeis_ecm, randles_stub_ecm
+from battery_oracle.failures import FailureKind, OracleFailure, _SilentTruncation
 from battery_oracle.oracle_config import OracleConfig
 from battery_oracle.parameter_sets import CUSTOM_PARAMETER_SETS, resolve_parameter_values
 from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES, Protocol
+from battery_oracle.state import CycleResult, state_vector_schema
 
 log = logging.getLogger(__name__)
-
-try:
-    import autoeis as _autoeis
-    import autoeis.utils as _ae_utils
-    _AUTOEIS_AVAILABLE = True
-except ImportError:
-    _autoeis = None
-    _ae_utils = None
-    _AUTOEIS_AVAILABLE = False
-
-# AutoEIS's numpyro/JAX inference keeps global (param-store) and tracing state that
-# is NOT thread-safe: two threads fitting concurrently collide with "all sites must
-# have unique names" / JAX tracer-escape errors, silently degrading a fit to the
-# Randles stub. The tune engine now parallelises by process (each has its own JAX
-# state), but this module-level lock defends any in-process threaded caller (e.g. a
-# threaded active-learning loop) by serialising the inference call. Within a single
-# process it is uncontended, so it costs nothing on the common path.
-_AUTOEIS_INFERENCE_LOCK = threading.Lock()
-
-_AUTOEIS_PATCHED = False
-
-
-def _init_autoeis_patches() -> None:
-    """Apply the mpire/AutoEIS monkeypatches, once, on first AutoEIS use.
-
-    Deferred out of module import (previously these ran at ``import
-    battery_oracle`` time) so importing the package no longer mutates
-    third-party libraries as a side effect. Called from :func:`_autoeis_ecm`
-    before any AutoEIS use; a no-op if already patched or AutoEIS isn't
-    installed.
-    """
-    global _AUTOEIS_PATCHED
-    if _AUTOEIS_PATCHED or not _AUTOEIS_AVAILABLE:
-        return
-
-    # Force mpire (used by AutoEIS) to spawn worker processes instead of forking.
-    # On Linux the default is fork, which copies the parent's SUNDIALS/CasADi JIT
-    # state to children at the same virtual addresses.  When the child touches
-    # those addresses after the OS copy-on-write triggers, it segfaults — and the
-    # shared-memory corruption can propagate back, killing the parent too.  Spawn
-    # starts a fresh interpreter with no inherited native JIT state.
-    # Must run before AutoEIS is used, as mpire is pulled in at autoeis import.
-    try:
-        import mpire as _mpire
-        _orig_wp_init = _mpire.WorkerPool.__init__
-        def _spawn_wp_init(self, *args, **kwargs):
-            kwargs.setdefault('start_method', 'spawn')
-            _orig_wp_init(self, *args, **kwargs)
-        _mpire.WorkerPool.__init__ = _spawn_wp_init
-        # Note: _orig_wp_init must stay reachable — _spawn_wp_init looks it up
-        # via closure over this function's locals, so it must not be
-        # garbage-collected while the patched __init__ can still be called.
-    except Exception:
-        pass
-
-    # Monkeypatch autoeis.utils.initialize_priors to fix its excessively wide prior
-    # (the same fix as inference.py's training-path patch). Without it the admittance
-    # terms draw from a +-12-decade log-normal and converge 10-500x away from the
-    # training distribution.
-    def _corrected_initialize_priors(p0):
-        priors = {}
-        variables = [k for k in p0.keys() if _ae_utils.parser.validate_parameter(k, raises=False)]
-        for var in variables:
-            value = p0[var]
-            if "n" in var:
-                priors[var] = _ae_utils.dist.Uniform(0, 1)
-            else:
-                mean = _ae_utils.jnp.log(value)
-                std_dev = _ae_utils.jnp.log(100) / 3.0  # ±3σ spans [p0/100, p0*100]
-                priors[var] = _ae_utils.dist.LogNormal(mean, std_dev)
-        return priors
-
-    _ae_utils.initialize_priors = _corrected_initialize_priors
-
-    _AUTOEIS_PATCHED = True
-
-# The oracle fits the SAME AutoEIS circuit as the rest of the pipeline
-# (``battmap._DEFAULT_CIRCUIT``, from config/datasets.yaml) and returns its
-# parameters under the canonical AutoEIS labels (``battmap.ECM_PARAM_NAMES``) —
-# there is NO oracle-specific circuit alias and NO remapping step.
-
-# CPE initial-guess seeds, keyed by the canonical AutoEIS label. Admittance seeds
-# are the jones2022 training-partition medians — they keep the poorly-identified
-# CPE terms near the training scale (without them the wide LogNormal prior lets
-# the posterior mean wander orders of magnitude off). Exponents are typical for
-# Li-ion cells at moderate SOC. Both circuits are seeded: the package's 7-param
-# R1-[R2,P3]-[R4,P5] and battery-forecast's 9-param R1-P2-[R3,P4]-[R5,P6] (what its
-# surrogates are trained on); the arcs carry the same values in both, P2 is the
-# 9-param series CPE. Unknown labels fall back to the defaults.
-_CPE_W_SEED    = {"P3w": 0.071, "P5w": 0.043,                 # 7-param arcs
-                  "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}    # 9-param
-_CPE_N_SEED    = {"P3n": 0.80, "P5n": 0.75,                   # 7-param arcs
-                  "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}      # 9-param
-_CPE_W_DEFAULT = 0.1
-_CPE_N_DEFAULT = 0.80
-
-# Spectrum-rescaling target ohmic resistance for the AutoEIS fit (Option B).
-# The oracle's PyBaMM cell (5 Ah) has ~16x smaller impedance than the real coin
-# cell (~43 mAh), which pushes the fitted CPE admittances (~1/Z) ~16x above the
-# training distribution. AutoEIS is scale-equivariant (Z -> s*Z gives R -> s*R,
-# Q -> Q/s, n -> n), so fitting the spectrum rescaled to this target ohmic R lands
-# the admittances/exponents in distribution; resistances are divided back by s
-# afterwards to report the oracle's native scale. Value = pooled training-median
-# R1 (ohmic) across jones2022 featurized records. Set to None to disable.
-# Rescaling does not change arc collapse (a scale-invariant property of the spectrum).
-_ECM_RESCALE_TARGET_R0 = 0.1334
-
 
 # The cycling and EIS models are both PyBaMM's DFN, built with the degradation option
 # dict from ``_build_degradation_config`` (and, for EIS, ``surface form: differential``).
@@ -191,696 +80,6 @@ _SUPPORTED_CHEMISTRIES = {
     "NMC532":    "Xu2019",
     "LFP":       "Prada2013",
 }
-
-
-# ---------------------------------------------------------------------------
-# Public exception
-# ---------------------------------------------------------------------------
-
-class FailureKind(str, Enum):
-    """Machine-readable classification of an oracle failure/degradation.
-
-    A ``str``-Enum so the value serialises directly to CSV/JSON (``fk.value``)
-    and compares equal to its string form. Stored on :class:`OracleFailure` and
-    (for non-fatal degradations) in the per-cycle history dict, so an audit hook
-    can correlate failure modes with calibration outcomes without string-matching
-    the human-readable message.
-    """
-
-    SOLVER_TRUNCATION  = "solver_truncation"   # step-count mismatch detected by _is_truncated
-    SOLVER_FAILURE     = "solver_failure"       # solver raised and no recovery succeeded
-    VOLTAGE_INFEASIBLE = "voltage_infeasible"   # experiment voltage window violated
-    END_OF_LIFE        = "end_of_life"          # SOH < eol_capacity_fraction
-    SOLVER_DEGRADED    = "solver_degraded"      # the emergency solver was needed (non-fatal)
-
-
-class OracleFailure(RuntimeError):
-    """Raised when the PyBaMM simulation fails and no recovery is possible.
-
-    The caller should treat this as battery end-of-life: do not reset the
-    oracle, do not substitute synthetic data — end the active learning loop.
-    The last protocol that triggered the failure is stored in
-    ``self.protocol`` for diagnostics, and a machine-readable
-    :class:`FailureKind` in ``self.failure_kind``.
-
-    Note: ``FailureKind.SOLVER_DEGRADED`` is a *non-fatal* status recorded in the
-    history dict, never raised — raising it would end the AL loop.
-    """
-    def __init__(
-        self,
-        message: str,
-        protocol: np.ndarray | None = None,
-        *,
-        failure_kind: FailureKind,
-    ) -> None:
-        super().__init__(message)
-        self.protocol = protocol
-        self.failure_kind = failure_kind
-
-
-class _SilentTruncation(Exception):
-    """Internal signal: PyBaMM returned a solution with fewer steps than requested
-    (a swallowed IDA_ERR_FAIL). Used inside the solver-fallback ladder to route a
-    truncated solve to the next tier; never surfaces to callers."""
-
-
-# ---------------------------------------------------------------------------
-# State-vector layout
-# ---------------------------------------------------------------------------
-
-def state_vector_schema(
-    n_params: int,
-    *,
-    has_std: bool = True,
-    has_t_cell: bool = False,
-) -> dict[str, tuple[int, int]]:
-    """Ordered ``{block_name: (lo, hi)}`` map describing the returned state vector.
-
-    The layout is *derived*, never hardcoded (see the project's
-    no-hardcoded-vector-lengths rule): per-half width is ``n_params`` (=
-    ``len(_param_labels_from_circuit(circuit))``), and which blocks exist — and
-    therefore the total length — is a function of the active feature flags:
-
-        [means_charge | means_discharge]                      always
-        [std_charge   | std_discharge]                        when ``has_std``
-        [T_cell_K]                                            when ``has_t_cell`` (single scalar, tail)
-
-    Downstream code (DMDc, audit hook) should slice by name via this map rather
-    than by magic index. ``has_t_cell`` is populated by the Phase-2 thermal work.
-    """
-    blocks = ["means_charge", "means_discharge"]
-    if has_std:
-        blocks += ["std_charge", "std_discharge"]
-    schema: dict[str, tuple[int, int]] = {}
-    off = 0
-    for b in blocks:
-        schema[b] = (off, off + n_params)
-        off += n_params
-    if has_t_cell:
-        schema["T_cell_K"] = (off, off + 1)
-    return schema
-
-
-# Default-circuit instance, for documentation / downstream that only needs the
-# shipped layout. Per-oracle layout lives on ``self.state_vector_schema``.
-STATE_VECTOR_SCHEMA = state_vector_schema(len(_param_labels_from_circuit(_PROJECT_CIRCUIT)))
-
-
-# ---------------------------------------------------------------------------
-# ECM fitting helpers
-# ---------------------------------------------------------------------------
-
-def _randles_stub_ecm(
-    frequencies: np.ndarray,
-    Z_real: np.ndarray,
-    Z_imag: np.ndarray,
-    *,
-    circuit: str | None = None,
-    cpe_n_seed: dict | None = None,
-    cpe_n_default: float = _CPE_N_DEFAULT,
-) -> np.ndarray:
-    """Fast Randles stub — fallback when AutoEIS is unavailable or fails.
-
-    Estimates the ohmic R from the high-frequency asymptote, splits the
-    remaining low-frequency resistance across the circuit's [R,CPE] arcs
-    (0.6/0.4 for two arcs, evenly otherwise), and seeds each CPE admittance
-    from 1/(R·ω_peak). The half-vector layout is derived from *circuit*
-    (default: the package circuit ``DEFAULT_CIRCUIT``) — the same labels
-    :func:`_autoeis_ecm` and the real-experiment featurization use — and is
-    duplicated for charge and discharge.
-
-    ``cpe_n_seed`` (default ``None`` -> the module ``_CPE_N_SEED``) supplies
-    the CPE exponent seeds by label, with ``cpe_n_default`` as the fallback;
-    ``PyBaMMOracle`` passes its own (YAML-overridable, ``ecm.cpe_seeds.n`` in
-    config_oracle_defaults.yml) map.
-    """
-    circuit = circuit or _PROJECT_CIRCUIT
-    cpe_n_seed = cpe_n_seed or _CPE_N_SEED
-    # argmax/argmin give the highest/lowest frequency regardless of sort order
-    hf_idx = np.argmax(frequencies)   # HF limit → ohmic resistance R_∞
-    lf_idx = np.argmin(frequencies)   # LF limit → R_∞ + sum(R_RC)
-    R_ohmic = float(Z_real[hf_idx])
-    R_total_rc = max(float(Z_real[lf_idx]) - R_ohmic, 0.0)
-    peak_idx = int(np.argmax(-Z_imag))
-    omega_peak = 2 * np.pi * frequencies[peak_idx]
-
-    labels = _param_labels_from_circuit(circuit)
-    pairs = _randles_pairs_from_circuit(circuit)
-    arc_rs = {r for r, _ in pairs}
-    arc_ps = {p for _, p in pairs}
-    ohmic_label = next((l for l in labels if l.startswith("R") and l not in arc_rs),
-                       labels[0])
-    weights = [0.6, 0.4] if len(pairs) == 2 else [1.0 / max(len(pairs), 1)] * len(pairs)
-
-    values = {ohmic_label: R_ohmic}
-    for (r, p), w in zip(pairs, weights):
-        values[r] = R_total_rc * w
-        values[f"{p}w"] = 1.0 / max(values[r] * omega_peak, 1e-9)
-        values[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
-    for l in labels:                                   # series CPE(s): P not in any arc
-        if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
-            values[l] = 1.0 / max(R_ohmic * omega_peak, 1e-9)
-            values[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
-
-    half = np.array([values[l] for l in labels], dtype=np.float64)
-    return np.concatenate([half, half])
-
-
-def _autoeis_ecm(
-    frequencies: np.ndarray,
-    Z_real: np.ndarray,
-    Z_imag: np.ndarray,
-    *,
-    circuit: str | None = None,
-    _diag: dict | None = None,
-    return_samples: bool = False,
-    cpe_w_seed: dict | None = None,
-    cpe_n_seed: dict | None = None,
-    cpe_w_default: float = _CPE_W_DEFAULT,
-    cpe_n_default: float = _CPE_N_DEFAULT,
-    rescale_target_r0: float | None = _ECM_RESCALE_TARGET_R0,
-    num_warmup: int = 500,
-    num_samples: int = 200,
-    seed: int | None = None,
-) -> np.ndarray:
-    """Fit ECM parameters to an EIS spectrum using AutoEIS Bayesian inference.
-
-    Fits *circuit* directly (default: the package circuit ``DEFAULT_CIRCUIT``,
-    which mirrors the study's ``datasets.yaml default_circuit``) and returns its
-    parameters under the canonical AutoEIS labels — no oracle-specific circuit
-    alias and no remapping step. For the default 7-param circuit
-    ``R1-[R2,P3]-[R4,P5]`` this is the half-vector
-    ``[R1, R2, P3w, P3n, R4, P5w, P5n]``, duplicated for charge and discharge
-    into the 14-D state. The initial guess ``p0`` is built generically from the
-    circuit (ohmic R, arc [R,P] pairs, series CPEs), so any circuit works
-    unchanged (e.g. battery-forecast's 9-param ``R1-P2-[R3,P4]-[R5,P6]``).
-
-    ``cpe_w_seed``/``cpe_n_seed``/``cpe_w_default``/``cpe_n_default``/
-    ``rescale_target_r0``/``num_warmup``/``num_samples`` default to the module
-    constants (mirroring config_oracle_defaults.yml's ``ecm`` section);
-    ``PyBaMMOracle`` passes its own (YAML-overridable) values here.
-
-    ``seed`` is forwarded to ``autoeis.perform_bayesian_inference``'s own
-    ``seed`` kwarg (its NumPyro/JAX MCMC sampler *does* accept one, despite
-    this module's noise-only ``PyBaMMOracle(seed=...)`` docs elsewhere
-    describing AutoEIS as unseeded — ``PyBaMMOracle`` draws a fresh int from
-    its noise RNG for each fit so the two stay in the same reproducible
-    stream). ``None`` (default) leaves the sampler unseeded.
-
-    Falls back to :func:`_randles_stub_ecm` if AutoEIS inference fails.
-    """
-    if not _AUTOEIS_AVAILABLE:
-        raise ImportError(
-            "autoeis is required for _autoeis_ecm. "
-            "Install it or use _randles_stub_ecm as the ecm_model_fn."
-        )
-    _init_autoeis_patches()
-
-    circuit = circuit or _PROJECT_CIRCUIT
-    cpe_w_seed = cpe_w_seed or _CPE_W_SEED
-    cpe_n_seed = cpe_n_seed or _CPE_N_SEED
-
-    # Option B: rescale the spectrum to the training ohmic-R scale before fitting
-    # so the CPE admittances land in the training distribution (see
-    # rescale_target_r0). The fit then runs at real-cell scale; resistances
-    # are restored to the oracle's native scale after fitting.
-    _R0_native = float(Z_real[np.argmax(frequencies)])
-    if rescale_target_r0 and _R0_native > 1e-9:
-        _scale = float(rescale_target_r0) / _R0_native
-    else:
-        _scale = 1.0
-    # Rescaled copies feed the fit; native Z_real/Z_imag are kept for the stub
-    # fallback (which produces native-scale resistances directly).
-    Z_real_fit = Z_real * _scale
-    Z_imag_fit = Z_imag * _scale
-    Z = Z_real_fit + 1j * Z_imag_fit
-
-    R0_est = float(Z_real_fit[np.argmax(frequencies)])
-    R_rc   = max(float(Z_real_fit[np.argmin(frequencies)]) - R0_est, 0.0)
-    # Build p0 generically from the circuit (canonical AutoEIS labels), so it
-    # works for the default circuit and any migrated one with no remapping:
-    #   - ohmic resistor (the R not inside a parallel [R,P] arc) <- HF intercept
-    #   - each arc resistor <- share of the RC resistance (0.6/0.4 for two arcs,
-    #     else split evenly); its CPE admittance/exponent from the seed maps
-    #   - any series CPE (a P not paired with an R) from the seed maps
-    labels = _param_labels_from_circuit(circuit)
-    pairs  = _randles_pairs_from_circuit(circuit)      # [("R3","P4"), ("R5","P6")] for C9
-    arc_rs = [r for r, _ in pairs]
-    arc_ps = {p for _, p in pairs}
-    ohmic  = next((l for l in labels if l.startswith("R") and l not in arc_rs), "R1")
-    weights = [0.6, 0.4] if len(pairs) == 2 else [1.0 / max(len(pairs), 1)] * len(pairs)
-    p0 = {ohmic: max(R0_est, 1e-4)}
-    for (r, p), w in zip(pairs, weights):
-        p0[r] = R_rc * w
-        p0[f"{p}w"] = cpe_w_seed.get(f"{p}w", cpe_w_default)
-        p0[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
-    for l in labels:                                   # series CPE(s): P not in any arc
-        if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
-            p0[l] = cpe_w_seed.get(l, cpe_w_default)
-            p0[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
-
-    _raw_samples: dict | None = None
-    _variables: list[str] = []
-    try:
-        # Serialise the numpyro/JAX inference: its global param-store + tracing
-        # state is not thread-safe (see _AUTOEIS_INFERENCE_LOCK). Uncontended in the
-        # single-threaded-per-process tune workers; guards any threaded caller.
-        with _AUTOEIS_INFERENCE_LOCK:
-            results = _autoeis.perform_bayesian_inference(
-                circuit, frequencies, Z,
-                p0=p0,
-                num_warmup=num_warmup, num_samples=num_samples,
-                seed=seed,
-                progress_bar=False, parallel=False,
-            )
-        _raw_samples = results[0].samples
-        _variables = list(results[0].variables)
-        # Restore resistances to the oracle's native impedance scale. Admittances
-        # (P*w) and exponents (P*n) are kept at the rescaled = training scale,
-        # where they are in distribution; only resistors (names starting "R")
-        # carry the cell-size scale and are divided back by _scale.
-        if _scale != 1.0:
-            for _k in _variables:
-                if _k.startswith("R"):
-                    _raw_samples[_k] = np.asarray(_raw_samples[_k]) / _scale
-        # Emit the posterior MEDIAN, not the mean: the featurized training data
-        # (jones2022-featurized-robust) summarises each parameter by its posterior
-        # median, and for the heavy-tailed series-CPE admittance (P2w) the mean is
-        # a ~64x chain-unstable statistic that lands far in the training tail while
-        # the median is stable. Matching the training statistic keeps the oracle's
-        # observed state in-distribution (fixes the P2w VarianceAlignment collapse).
-        half = np.array(
-            [float(np.median(_raw_samples[k])) for k in _variables],
-            dtype=np.float64,
-        )
-        if _diag is not None:
-            cvs = [
-                np.std(_raw_samples[k]) / max(abs(np.median(_raw_samples[k])), 1e-10)
-                for k in _variables
-            ]
-            _diag["max_cv"]    = float(max(cvs)) if cvs else float("nan")
-            _diag["converged"] = True
-            _diag["ecm_params"] = {
-                "elements": _variables,
-                "values":   {k: float(np.median(_raw_samples[k])) for k in _variables},
-            }
-    except Exception as exc:
-        log.warning("[AutoEIS] inference failed (%s); using Randles stub fallback", exc)
-        half = _randles_stub_ecm(frequencies, Z_real, Z_imag,
-                                 circuit=circuit, cpe_n_seed=cpe_n_seed)[:len(labels)]
-        if _diag is not None:
-            _diag["max_cv"]    = float("nan")
-            _diag["converged"] = False
-            _diag["ecm_params"] = None  # stub doesn't produce named element values
-    finally:
-        # NumPyro (via JAX/XLA) JIT-compiles a new set of LLVM kernels for each
-        # inference call and never releases them in a long-running process.  After
-        # ~40 iterations the XLA compilation cache exhausts available address space
-        # and the process segfaults with "Cannot allocate memory" from execution_engine.
-        # clear_caches() frees all compiled XLA kernels; the next call re-compiles
-        # (adds ~0.5 s) but prevents memory growth.
-        try:
-            import jax as _jax
-            _jax.clear_caches()
-        except Exception:
-            pass
-
-    out = np.concatenate([half, half])
-    if return_samples:
-        samples_out = (
-            {k: np.asarray(v) for k, v in _raw_samples.items()}
-            if _raw_samples is not None else None
-        )
-        return out, samples_out, _variables
-    return out
-
-
-# Public aliases (A3.6: __all__ hygiene — no exported name should start with
-# an underscore). The underscore names remain the canonical definitions (used
-# throughout this module and in comparisons like ``self.ecm_model_fn is
-# _autoeis_ecm``); these are the names re-exported from the package root.
-randles_stub_ecm = _randles_stub_ecm
-autoeis_ecm = _autoeis_ecm
-
-
-# ---------------------------------------------------------------------------
-# Degradation configuration helper
-# ---------------------------------------------------------------------------
-
-# Numeric per-preset degradation constants, mirroring
-# config_oracle_defaults.yml's degradation.preset_constants section (which is
-# the actual, YAML-overridable source — see experiment.oracle_kwargs_from_config).
-# This module-level dict is only the fallback used when _build_degradation_config
-# is called directly with preset_constants=None (e.g. from a bare PyBaMMOracle()).
-_DEFAULT_PRESET_CONSTANTS: dict[str, dict] = {
-    "nominal": {},
-    "accelerated": {
-        "plating_kinetic_rate_constant_m_s": 1e-8,
-        "dead_lithium_decay_constant_s": 4e-6,
-        "initial_plated_lithium_concentration_mol_m3": 0.0,
-    },
-    "severe": {
-        "plating_kinetic_rate_constant_m_s": 1e-7,
-        "dead_lithium_decay_constant_s": 1e-4,
-        "initial_plated_lithium_concentration_mol_m3": 0.0,
-    },
-}
-
-
-def _build_degradation_config(
-    preset: str,
-    pv,
-    kinetics_scale: float = 1.0,
-    sei_rate_scale: float = 1.0,
-    dead_li_decay_scale: float = 1.0,
-    plating_rate_scale: float = 1.0,
-    ec_diffusivity_base_factor: float = 0.25,
-    preset_constants: dict | None = None,
-) -> tuple[dict, object]:
-    """Return (model_options, pv_modified) for the requested degradation preset.
-
-    All presets apply a ×0.25 correction to the Chen2020 EC diffusivity, calibrated
-    to match commercial CR2032 cells with FEC/VC-containing electrolytes that form a
-    more passivating SEI than the LP30 baseline (Reniers et al., 2019).  Preset
-    lifetimes differ only through which physical mechanisms are active.
-
-    ``kinetics_scale`` (default 1.0, no change) multiplies both electrodes'
-    exchange-current density. Chen2020 is parameterised from a high-power
-    automotive NMC/graphite pouch cell; jones2022's small research coin cells
-    have measurably slower charge-transfer kinetics (real R3/R1 EIS ratios are
-    roughly an order of magnitude larger than the oracle's at kinetics_scale=1.0
-    — see jones_oracle_study.py comparisons). Pass a value < 1 to slow the
-    kinetics and grow the relative charge-transfer arc.
-
-    ``sei_rate_scale`` (default 1.0, no change) multiplies the EC diffusivity
-    correction below — additional factor on top of the existing ×0.25, so the
-    final factor is ``0.25 * sei_rate_scale``. Has sharply diminishing effect on
-    R1 growth once D_EC is low enough that growth becomes reaction-limited
-    (confirmed empirically on PJ121: 0.5/0.25/0.1 only reduced 15-cycle R1
-    growth 133%/111%/82.5%, far from linear, against a real target of ~10%).
-    Scaling "SEI kinetic rate constant [m.s-1]" (the actual reaction-kinetics
-    parameter for "ec reaction limited") was tried as a second lever and
-    reverted — it moved R1 growth in the *wrong* direction (236% at 0.1x), so
-    R1/SEI growth-rate calibration is not yet fully solved by this knob alone.
-    Added because lowering
-    ``kinetics_scale`` has a side effect on R1/SEI growth rate that's independent
-    of its intended effect on the EIS arc shape: lower exchange-current density
-    raises the electrode overpotential needed for the same applied current, and
-    the SEI growth law is exponential in that overpotential (η_SEI; see
-    ORACLE.md §2.1), so kinetics_scale alone *also* accelerates SEI growth as an
-    unintended side effect. sei_rate_scale lets R1 growth rate be tuned back down
-    independently, without re-perturbing the arc-shape calibration kinetics_scale
-    was actually tuned for.
-
-    ``"nominal"``
-        SEI (``"ec reaction limited"``) + particle cracking, using Ai2020's
-        unmodified critical stress (60 MPa).  PyBaMM's LAM rate is a smooth power
-        law ``beta_LAM * (sigma_h/sigma_critical)^m_LAM`` with no threshold — there
-        is no C-rate "onset"; sensitivity comes entirely from how sigma_hyd scales
-        with C-rate, which Ai2020's stress model already provides.  No plating,
-        no SEI-on-cracks.
-        Target EOL: ~80–150 cycles at 1C (commercial CR2032-calibrated).
-
-    ``"accelerated"``  *(default)*
-        SEI + cracking (Ai2020 default critical stress) + partially-reversible
-        lithium plating.  No "SEI on cracks": the three-way crack→SEI-on-cracks→
-        plating coupling causes IDA solver stiffness (h → 0); cracking + plating
-        together already provide C-rate sensitivity.
-        Plating kinetic rate 1e-8 m/s, dead-Li decay 4e-6 s⁻¹.
-        Target EOL: ~40–70 cycles at 1C.
-
-    ``"severe"``
-        Same model options as accelerated; faster plating (1e-7 m/s, decay 1e-4 s⁻¹).
-        Target EOL: ~20–50 cycles at 1C.
-
-    An earlier version of this function reduced critical stress to 15 MPa for all
-    presets, reasoning that this would create a C-rate "activation threshold" for
-    cracking.  That reasoning was wrong: the LAM rate has no threshold/switch at
-    sigma_critical (it is a smooth power law), so the C-rate sensitivity RATIO
-    (sigma_1C/sigma_critical)^2 / (sigma_0.3C/sigma_critical)^2 =
-    (sigma_1C/sigma_0.3C)^2 is invariant to sigma_critical — it cancels out.
-    Lowering sigma_critical 4x (60->15 MPa) bought zero C-rate differentiation
-    while amplifying the Jacobian sensitivity d(rate)/d(sigma) ~ 1/sigma_critical^2
-    by 16x, which is what was causing repeated IDA_ERR_FAIL convergence failures
-    in the IDA solver.  Reverted to Ai2020 defaults for all presets.
-
-    Physical basis: Reniers et al. (2019) for SEI; Ai et al. (2020) for crack/LAM
-    parameters and the underlying sigma_hyd(C-rate) stress model; OKane et al.
-    (2022) for plating kinetics.
-
-    ``ec_diffusivity_base_factor`` (default 0.25) is the universal EC
-    diffusivity correction factor described below; ``preset_constants``
-    (default ``None`` -> :data:`_DEFAULT_PRESET_CONSTANTS`) supplies the
-    numeric per-preset plating/dead-Li constants used in the accelerated/severe
-    branches. Both mirror config_oracle_defaults.yml's ``degradation`` section
-    (``ec_diffusivity_base_factor`` and ``preset_constants`` respectively) —
-    ``PyBaMMOracle`` passes its own (YAML-overridable) values here.
-    """
-
-    if preset not in ("nominal", "accelerated", "severe"):
-        raise ValueError(
-            f"Unknown degradation_preset {preset!r}; "
-            "choose 'nominal', 'accelerated', or 'severe'."
-        )
-
-    pv = copy.deepcopy(pv)
-    pc = preset_constants if preset_constants is not None else _DEFAULT_PRESET_CONSTANTS[preset]
-
-    # Universal EC diffusivity correction: commercial-grade electrolyte (FEC/VC additives)
-    # forms a denser, more passivating SEI, reducing effective EC transport through the
-    # film by ~4× relative to Chen2020's LP30 baseline (Reniers et al., 2019;
-    # Pinson & Bazant, 2013).  Applied identically to all presets because electrolyte
-    # quality is a cell property, not a degradation severity setting.
-    try:
-        pv["EC diffusivity [m2.s-1]"] = (
-            float(pv["EC diffusivity [m2.s-1]"]) * ec_diffusivity_base_factor * sei_rate_scale
-        )
-    except Exception:
-        pass
-
-    # sei_rate_scale scales EC diffusivity only. Scaling "SEI kinetic rate constant
-    # [m.s-1]" too (the parameter "ec reaction limited" reads for its kinetics) is not
-    # monotonic in growth rate: 0.1x made SEI growth faster.
-
-    # Charge-transfer kinetics correction (see kinetics_scale docstring above).
-    # Wraps Chen2020's concentration-dependent exchange-current-density functions
-    # rather than overwriting with a scalar, since they're functions of
-    # (c_e, c_s_surf, c_s_max, T), not plain floats.
-    if kinetics_scale != 1.0:
-        for key in (
-            "Negative electrode exchange-current density [A.m-2]",
-            "Positive electrode exchange-current density [A.m-2]",
-        ):
-            try:
-                orig_fn = pv[key]
-                pv[key] = (lambda fn, s: lambda *a, **kw: fn(*a, **kw) * s)(orig_fn, kinetics_scale)
-            except Exception:
-                pass
-
-    if preset == "nominal":
-        # PyBaMM 26.6.2.0 regression: particle mechanics ('swelling and cracking')
-        # fails at t=0 with IDAGetDky: IDA_BAD_K when the Chen2020 LGM50 graphite
-        # OCP ('graphite_LGM50_ocp_Chen2020') is used. The cracking stress submodel
-        # internally evaluates dOCP/dc at initial conditions; the LGM50 function
-        # returns inconsistent derivatives at the initial stoichiometry that make
-        # the IDA DAE initialization fail. Ai2020's OCP works; Chen2020's does not.
-        # Replacing only 'Negative electrode OCP [V]' with Chen2020's value causes
-        # the failure; all other Ai2020 params are fine.
-        # Workaround: drop 'particle mechanics' from all presets; use plating
-        # kinetics for C-rate sensitivity in accelerated/severe instead.
-        opts = {
-            "SEI": "ec reaction limited",
-        }
-        _override: dict = {}
-
-    elif preset == "accelerated":
-        # SEI + plating.  Particle cracking dropped (see nominal comment above for
-        # the PyBaMM 26.6.2.0 regression). Partially-reversible lithium plating
-        # provides strong C-rate sensitivity: plating rate scales exponentially
-        # with the local overpotential, which rises steeply at high C-rates.
-        opts = {
-            "SEI": "ec reaction limited",
-            "lithium plating": "partially reversible",
-        }
-        _override = {
-            "Lithium plating kinetic rate constant [m.s-1]": (
-                pc.get("plating_kinetic_rate_constant_m_s", 1e-8) * plating_rate_scale
-            ),
-            "Dead lithium decay constant [s-1]": (
-                pc.get("dead_lithium_decay_constant_s", 4e-6) * dead_li_decay_scale
-            ),
-            # Zero out OKane2022's formation-cycle plated Li: the oracle starts with
-            # a fresh cell.  Non-zero initial concentration strips during early cycling
-            # at low C-rates and drives "Loss of capacity to ... plating" negative.
-            "Initial plated lithium concentration [mol.m-3]": (
-                pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
-            ),
-        }
-
-    else:  # severe
-        opts = {
-            "SEI": "ec reaction limited",
-            "lithium plating": "partially reversible",
-            # Particle cracking also dropped for severe — same PyBaMM 26.6.2.0 OCP
-            # regression applies here (see nominal preset comment above).
-        }
-        _override = {
-            "Lithium plating kinetic rate constant [m.s-1]": (
-                pc.get("plating_kinetic_rate_constant_m_s", 1e-7) * plating_rate_scale
-            ),
-            "Dead lithium decay constant [s-1]": (
-                pc.get("dead_lithium_decay_constant_s", 1e-4) * dead_li_decay_scale
-            ),
-            "Initial plated lithium concentration [mol.m-3]": (
-                pc.get("initial_plated_lithium_concentration_mol_m3", 0.0)
-            ),
-        }
-
-    # Borrow plating parameters that Chen2020 lacks from OKane2022.
-    # Only copy keys that are genuinely absent so caller-supplied values win.
-    _PLATING_BORROW_KEYS = [
-        "Exchange-current density for plating [A.m-2]",
-        "Exchange-current density for stripping [A.m-2]",
-        "Initial plated lithium concentration [mol.m-3]",
-        "Typical plated lithium concentration [mol.m-3]",
-        "Lithium plating transfer coefficient",
-        "Lithium plating kinetic rate constant [m.s-1]",
-        "Dead lithium decay constant [s-1]",
-        "Dead lithium decay rate [s-1]",
-        "Lithium metal partial molar volume [m3.mol-1]",     # plated / dead Li thickness
-    ]
-    try:
-        pv_ref = _pb.ParameterValues("OKane2022")
-        for k in _PLATING_BORROW_KEYS:
-            try:
-                _ = pv[k]   # already present — leave it
-            except (KeyError, Exception):
-                try:
-                    pv[k] = pv_ref[k]
-                except Exception:
-                    pass
-    except Exception:
-        pass   # OKane2022 unavailable — plating parameters stay as-is
-
-    for key, val in _override.items():
-        try:
-            pv[key] = val
-        except Exception:
-            pass   # key absent — skip silently
-
-    return opts, pv
-
-
-# ---------------------------------------------------------------------------
-# CycleResult
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class CycleResult:
-    """Named, schema-aware result of one :meth:`PyBaMMOracle.run_cycle` call.
-
-    ``PyBaMMOracle.__call__`` (the hard array-in/array-out compatibility
-    contract consumed by the downstream AL/DMDc loop) returns only
-    :attr:`state`; ``run_cycle`` returns the full ``CycleResult`` so a novice
-    caller doesn't have to reach into the private ``oracle._history`` list
-    (see :attr:`PyBaMMOracle.history`) to get the SOH, SOC, EIS spectra, or
-    fitted ECM parameters behind a given state vector.
-
-    Parameters
-    ----------
-    state : np.ndarray
-        The same vector ``PyBaMMOracle.__call__`` returns for this cycle
-        (``[means_charge | means_discharge | std_charge | std_discharge |
-        T_cell_K?]`` -- see :attr:`schema`).
-    schema : dict
-        The oracle's ``state_vector_schema`` at the time of this call (``{block
-        name: (lo, hi)}``); pass a block name to :meth:`block` to slice ``state``.
-    soh : float
-        State of health (1.0 = fresh cell) at the end of this cycle.
-    soc_charge, soc_discharge : float
-        Fractional state of charge read after the post-charge / post-discharge
-        rest.
-    capacity_ah : float
-        Measured or voltage-limited discharge capacity for this cycle, in Ah.
-    fidelity : str
-        ``"full"`` for every completed cycle (the model is never swapped; an
-        emergency-solver retry is recorded in ``failure_kind`` instead).
-    failure_kind : FailureKind or None
-        Non-fatal degradation classification recorded for this cycle, if any.
-        ``None`` for a full-fidelity cycle. (A *fatal* failure raises
-        :class:`OracleFailure` instead of returning a ``CycleResult``.)
-    protocol : np.ndarray
-        The protocol vector exactly as received by ``run_cycle`` (before
-        sanitisation).
-    protocol_applied : Protocol
-        The sanitised protocol actually simulated -- see
-        ``PyBaMMOracle._protocol_to_experiment`` and the loud-sanitisation
-        warning it emits when a value was clamped.
-    eis_charge, eis_discharge : tuple of (np.ndarray, np.ndarray)
-        ``(frequencies_hz, Z)`` for the post-charge / post-discharge
-        synthesised EIS spectrum; ``Z`` is complex (``Z.real``/``Z.imag`` in Ohm).
-    ecm_charge, ecm_discharge : dict of str to float
-        Fitted ECM parameter means for this cycle, keyed by the circuit's
-        AutoEIS parameter label (e.g. ``"R1"``, ``"P3w"``, ``"P3n"``).
-    ecm_std_charge, ecm_std_discharge : dict of str to float
-        Per-parameter AutoEIS posterior standard deviation, same keys as
-        :attr:`ecm_charge`/:attr:`ecm_discharge`. All-NaN values when AutoEIS
-        was unavailable and the Randles stub fitted instead.
-    raw : Mapping
-        The full per-cycle history row (read-only view; the same dict
-        appended to ``oracle.history``), for diagnostics not otherwise
-        surfaced above.
-
-    Examples
-    --------
-    >>> result = oracle.run_cycle(protocol)
-    >>> result.soh
-    0.97...
-    >>> np.asarray(result).shape == (oracle.state_vector_len,)
-    True
-    >>> result.block("means_charge").shape
-    (7,)
-    """
-
-    state: np.ndarray
-    schema: dict
-    soh: float
-    soc_charge: float
-    soc_discharge: float
-    capacity_ah: float
-    fidelity: str
-    failure_kind: "FailureKind | None"
-    protocol: np.ndarray
-    protocol_applied: Protocol
-    eis_charge: tuple
-    eis_discharge: tuple
-    ecm_charge: dict
-    ecm_discharge: dict
-    ecm_std_charge: dict
-    ecm_std_discharge: dict
-    raw: Mapping = field(default_factory=dict)
-
-    def __array__(self, dtype=None) -> np.ndarray:
-        """Allow ``np.asarray(result)`` to yield :attr:`state` directly."""
-        return np.asarray(self.state, dtype=dtype)
-
-    def block(self, name: str) -> np.ndarray:
-        """Slice :attr:`state` by schema block name (e.g. ``"means_charge"``).
-
-        Parameters
-        ----------
-        name : str
-            A key of :attr:`schema` (``"means_charge"``, ``"means_discharge"``,
-            ``"std_charge"``, ``"std_discharge"``, and ``"T_cell_K"`` when the
-            oracle uses lumped thermal).
-
-        Returns
-        -------
-        np.ndarray
-            ``state[lo:hi]`` for the block's ``(lo, hi)`` schema range.
-        """
-        lo, hi = self.schema[name]
-        return self.state[lo:hi]
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +132,7 @@ class PyBaMMOracle:
     ecm_model_fn : callable, optional
         Maps ``(frequencies, Z_real, Z_imag)`` to a full circuit-derived vector
         (charge half ++ discharge half); the oracle takes ``n_params`` per half.
-        Defaults to :func:`_autoeis_ecm`; pass :func:`_randles_stub_ecm` for a
+        Defaults to :func:`autoeis_ecm`; pass :func:`randles_stub_ecm` for a
         fast no-AutoEIS fallback.
     n_cycles : int
         Number of charge/discharge cycles to simulate per oracle call.
@@ -980,7 +179,7 @@ class PyBaMMOracle:
     seed : int, optional
         Seeds the synthetic EIS noise generator (``_eis/noise.py``'s white/
         flicker terms). When the default ``ecm_model_fn``
-        (:func:`_autoeis_ecm`) is used, each fit also draws a fresh int seed
+        (:func:`autoeis_ecm`) is used, each fit also draws a fresh int seed
         from this same RNG stream and forwards it to AutoEIS's
         ``perform_bayesian_inference(..., seed=...)``, so a fixed ``seed``
         reproduces both the EIS noise *and* the AutoEIS MCMC fit. The PyBaMM
@@ -1054,7 +253,7 @@ class PyBaMMOracle:
         if ecm_model_fn is not None:
             self.ecm_model_fn = ecm_model_fn
         elif _AUTOEIS_AVAILABLE:
-            self.ecm_model_fn = _autoeis_ecm
+            self.ecm_model_fn = autoeis_ecm
         else:
             # Bare install (no [autoeis] extra): fall back to the analytic
             # Randles stub rather than raising on the first cycle. Posterior-std
@@ -1064,7 +263,7 @@ class PyBaMMOracle:
                 "(posterior-std state slots will be NaN). Install "
                 "battery-oracle[autoeis] for Bayesian ECM fitting."
             )
-            self.ecm_model_fn = _randles_stub_ecm
+            self.ecm_model_fn = randles_stub_ecm
         self.n_cycles = cfg.n_cycles
         # Real-cell-specific protocol scaling: jones2022 cells vary in actual
         # measured capacity (e.g. PJ121 ~42 mAh, not the ~200 mAh assumed by the
@@ -2367,13 +1566,13 @@ class PyBaMMOracle:
         _n_params = len(self._ecm_param_names)
 
         def _fit_half(Z: np.ndarray, _diag: dict) -> np.ndarray:
-            if self.ecm_model_fn is _autoeis_ecm:
+            if self.ecm_model_fn is autoeis_ecm:
                 # Draw a fresh int seed from the oracle's noise RNG for AutoEIS's
                 # sampler (autoeis.perform_bayesian_inference's own `seed` kwarg),
                 # so both the EIS noise and the MCMC fit are reproducible from the
                 # same PyBaMMOracle(seed=...) under a single deterministic stream.
                 _autoeis_seed = int(self._rng.integers(0, 2**31 - 1))
-                full, raw_samples, raw_variables = _autoeis_ecm(
+                full, raw_samples, raw_variables = autoeis_ecm(
                     self.frequencies, Z.real, Z.imag,
                     circuit=self._circuit, _diag=_diag, return_samples=True,
                     cpe_w_seed=self._cpe_w_seed, cpe_n_seed=self._cpe_n_seed,
@@ -2384,8 +1583,8 @@ class PyBaMMOracle:
                 )
                 _diag["_raw_samples"] = raw_samples
                 _diag["_raw_variables"] = raw_variables
-            elif self.ecm_model_fn is _randles_stub_ecm:
-                full = _randles_stub_ecm(
+            elif self.ecm_model_fn is randles_stub_ecm:
+                full = randles_stub_ecm(
                     self.frequencies, Z.real, Z.imag,
                     circuit=self._circuit, cpe_n_seed=self._cpe_n_seed,
                     cpe_n_default=self._cpe_n_default,
@@ -2398,7 +1597,7 @@ class PyBaMMOracle:
             """Per-parameter AutoEIS posterior std, aligned to the mean vector.
 
             The mean half is built by iterating ``_raw_variables`` (see
-            ``_autoeis_ecm``: ``half = [median(samples[k]) for k in _variables]``),
+            ``autoeis_ecm``: ``half = [median(samples[k]) for k in _variables]``),
             so the std MUST iterate the same order to line up with the means.
             Returns all-NaN when AutoEIS fell back to the Randles stub (no samples),
             which a downstream DMDc/audit consumer drops or imputes.
@@ -2895,7 +2094,7 @@ def oracle_parameter_values(**oracle_kwargs):
     """The parameter values a :class:`PyBaMMOracle` built with ``oracle_kwargs`` simulates:
     the degradation preset's edits and ``kinetics_scale`` included, with the oracle's own
     voltage limits as the cut-offs (so fitted values are relative to exactly that)."""
-    oracle = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, **oracle_kwargs)
+    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, **oracle_kwargs)
     pv = oracle._pv.copy()
     pv.update({"Upper voltage cut-off [V]": oracle._V_CHARGE_MAX,
                "Lower voltage cut-off [V]": oracle._V_DISCHARGE_MIN})

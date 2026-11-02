@@ -63,7 +63,9 @@ from battery_oracle._circuit import (
     randles_pairs_from_circuit,
 )
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
-from battery_oracle.oracle import OracleFailure, PyBaMMOracle, _randles_stub_ecm
+from battery_oracle.ecm import randles_stub_ecm
+from battery_oracle.failures import OracleFailure
+from battery_oracle.oracle import PyBaMMOracle
 
 log = logging.getLogger(__name__)
 
@@ -452,7 +454,7 @@ def run_oracle_candidate(
         circuit=circuit,   # ECM layout matches the index-based reads below
     )
     if ecm_stub:
-        kwargs["ecm_model_fn"] = _randles_stub_ecm
+        kwargs["ecm_model_fn"] = randles_stub_ecm
     # Extra kwargs (BOL scales, discharge_mode, widened current bounds, ...); the
     # keys this function sets itself stay owned by its arguments.
     kwargs.update(_extra_oracle_kwargs(oracle_kwargs))
@@ -701,7 +703,7 @@ def run_crate_sensitivity_probe(
             circuit=circuit,
             # Probes read only SOH, never the ECM fit: the analytic stub avoids
             # an AutoEIS MCMC fit per probe cycle.
-            ecm_model_fn=_randles_stub_ecm,
+            ecm_model_fn=randles_stub_ecm,
             **_extra_oracle_kwargs(oracle_kwargs),
         )
         oracle.reset()

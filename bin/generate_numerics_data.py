@@ -182,7 +182,7 @@ def worker_jax_cache(out: Path) -> None:
 
     rec = {"name": "jax_cache", "available": False, "with_clear": [], "without_clear": [], "note": None}
     try:
-        from battery_oracle.oracle import _AUTOEIS_AVAILABLE, _autoeis_ecm
+        from battery_oracle.ecm import _AUTOEIS_AVAILABLE, autoeis_ecm
     except Exception as exc:  # noqa: BLE001
         rec["note"] = f"import failed: {exc}"; out.write_text(json.dumps(rec)); return
     if not _AUTOEIS_AVAILABLE:
@@ -203,7 +203,7 @@ def worker_jax_cache(out: Path) -> None:
         key = "with_clear" if clear else "without_clear"
         for i in range(n_iter):
             try:
-                _autoeis_ecm(freq, Z.real, Z.imag)
+                autoeis_ecm(freq, Z.real, Z.imag)
             except Exception as exc:  # noqa: BLE001
                 rec[key].append({"iter": i, "rss_mb": rss_mb(), "error": f"{type(exc).__name__}"})
                 out.write_text(json.dumps(rec)); break

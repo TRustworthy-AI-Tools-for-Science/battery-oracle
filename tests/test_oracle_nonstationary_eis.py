@@ -73,14 +73,15 @@ def test_oracle_spectrum_of_a_relaxed_cell_equals_pybamm_eis():
     full options (lumped thermal, SEI growth, plating, contact resistance)."""
     import pybamm
 
-    from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
 
     f = np.logspace(3, -1, 9)
     # side reactions off (no plating; SEI growth ~0): a resting cell with SEI growth
     # carries a small steady interfacial current, so it is never fully relaxed and its
     # low-frequency impedance differs from the equilibrium one -- physically right,
     # but not a clean reference
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032",
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, chemistry="LiR2032",
                      thermal="lumped", T_ambient_K=298.15, contact_resistance_ohm=0.05,
                      degradation_preset="nominal", sei_rate_scale=1e-9,
                      eis_mode="nonstationary", eis_noise_level=0.0, frequencies=f, rest_s=600.0)
@@ -98,10 +99,11 @@ def test_oracle_spectrum_of_a_relaxed_cell_equals_pybamm_eis():
 
 @pytest.mark.slow
 def test_oracle_cycle_measures_spectra_inside_the_sweep():
-    from battery_oracle.oracle import PyBaMMOracle, _randles_stub_ecm
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
 
     f = np.logspace(3, -1, 12)
-    o = PyBaMMOracle(ecm_model_fn=_randles_stub_ecm, chemistry="LiR2032",
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, chemistry="LiR2032",
                      thermal="lumped", T_ambient_K=296.15, contact_resistance_ohm=0.1,
                      eis_mode="nonstationary", eis_noise_level=0.0, frequencies=f,
                      real_cell_capacity_mah=42.0, c_max_mA=150.0, c2_max_mA=150.0, dfn_max_crate=4.0)
