@@ -225,6 +225,28 @@ class PyBaMMOracle:
         cfg = (config or OracleConfig()).replace(**settings)
         self.config = cfg
         self._pb = _pb
+        self._init_interface(cfg, ecm_model_fn)
+        self._init_settings(cfg)
+        self._init_parameter_values(cfg, parameter_values)
+
+        # EIS model is built fresh each __call__ so degraded ParameterValues can
+        # be injected for LAM before each simulation (see §4.4 ORACLE.md).
+
+        # Same discretisation as stage A: harmonic averaging of coefficients at the
+        # electrode|separator interfaces (battery_oracle.patches). Non-strict: on an
+        # untested PyBaMM it warns and the stock (arithmetic) averaging is used.
+        from battery_oracle import patches as _patches
+        _patches.apply(["harmonic_flux_coefficients"], strict=False)
+
+        self._build_native_state()
+
+        self._lock = threading.Lock()
+        self._eis_lin_ok: bool | None = None       # state layout check (first spectrum)
+        self._clear_cell_state()
+        self._init_film_resistances()
+
+    def _init_interface(self, cfg: OracleConfig, ecm_model_fn) -> None:
+        """ECM circuit and fitter, action names and the returned-state layout."""
         # ECM circuit fitted to every spectrum + the protocol/action feature
         # names. Default to the package canonical circuit (battery_oracle._circuit
         # DEFAULT_CIRCUIT); a study pipeline passes its own so featurized records
@@ -244,12 +266,6 @@ class PyBaMMOracle:
         # (never a hardcoded length). Rebuilt via _refresh_state_schema() whenever
         # a length-affecting flag (thermal, in Phase 2) changes.
         self._refresh_state_schema()
-        # OCV rest duration (s) on each side of a cycle. Default 1200 s (20 min)
-        # per Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806): each cycle rests
-        # 20 min at OCV in both the discharged and charged states before EIS. (The
-        # CR2032 config's 10 s charged-state value is potentiostat switching
-        # overhead, not a protocol rest.) See _protocol_to_experiment.
-        self._rest_s = float(cfg.rest_s)
         if ecm_model_fn is not None:
             self.ecm_model_fn = ecm_model_fn
         elif _AUTOEIS_AVAILABLE:
@@ -264,6 +280,15 @@ class PyBaMMOracle:
                 "battery-oracle[autoeis] for Bayesian ECM fitting."
             )
             self.ecm_model_fn = randles_stub_ecm
+
+    def _init_settings(self, cfg: OracleConfig) -> None:
+        """Scalar settings: protocol, noise, solver, sanitisation and ECM-fit options."""
+        # OCV rest duration (s) on each side of a cycle. Default 1200 s (20 min)
+        # per Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806): each cycle rests
+        # 20 min at OCV in both the discharged and charged states before EIS. (The
+        # CR2032 config's 10 s charged-state value is potentiostat switching
+        # overhead, not a protocol rest.) See _protocol_to_experiment.
+        self._rest_s = float(cfg.rest_s)
         self.n_cycles = cfg.n_cycles
         # Real-cell-specific protocol scaling: jones2022 cells vary in actual
         # measured capacity (e.g. PJ121 ~42 mAh, not the ~200 mAh assumed by the
@@ -310,55 +335,23 @@ class PyBaMMOracle:
         # to a literature magnitude or a deep-DoD dataset BEFORE enabling --
         # jones2022's shallow range cannot fix it. 0.0 = contributes nothing.
         self._dod_lam_scale = float(cfg.dod_lam_scale)
-        self._cumulative_dod_lam_frac = 0.0   # dimensionless cumulative loss fraction
-        self._cumulative_dod_lam_ah = 0.0     # = frac * nominal_cap (eol_loss budget)
-        self._cumulative_dod_throughput_ah = 0.0
         self.frequencies = (
             np.asarray(cfg.frequencies, float) if cfg.frequencies is not None else np.logspace(-2, 4, 60)
         )
-        # Chemistry (#14): validate early (before any heavy PyBaMM work). An
-        # explicit parameter_values wins; otherwise resolve the chemistry name.
-        self._chemistry = str(cfg.chemistry)
-        if self._chemistry not in _SUPPORTED_CHEMISTRIES:
-            raise ValueError(
-                f"Unknown chemistry {cfg.chemistry!r}; choose one of "
-                f"{sorted(_SUPPORTED_CHEMISTRIES)}."
-            )
-        self._pv = parameter_values or resolve_parameter_values(
-            _SUPPORTED_CHEMISTRIES[self._chemistry]
-        )
         self.eol_capacity_fraction = cfg.eol_capacity_fraction
         self.capacity_check = cfg.capacity_check
-        self._temperature_K = float(cfg.temperature_K)
-        if self._temperature_K != 298.15:
-            self._pv["Ambient temperature [K]"] = self._temperature_K
         self._eis_noise_level = float(cfg.eis_noise_level)
         self._eis_noise_model = cfg.eis_noise_model
         if cfg.eis_mode not in ("equilibrium", "nonstationary"):
             raise ValueError(f"Unknown eis_mode {cfg.eis_mode!r}; choose 'equilibrium' or 'nonstationary'.")
         self._eis_mode = str(cfg.eis_mode)
         self._eis_amplitude_mA = float(cfg.eis_amplitude_mA)
-        # Sweep timing (jones2022: 57 points, 20 kHz -> 0.02 Hz in ~297 s, high to
-        # low): each frequency's window = periods / f + a fixed instrument overhead
-        # (1.15 s/point reproduces the measured sweep length). Offsets from the sweep
-        # start, in self.frequencies order.
-        _f = np.asarray(self.frequencies, float)
-        _order = np.argsort(-_f)
-        _len = float(cfg.eis_sweep_periods) / _f[_order] + float(cfg.eis_sweep_overhead_s)
-        _end = np.cumsum(_len)
-        self._eis_win_lo = np.empty_like(_f)
-        self._eis_win_hi = np.empty_like(_f)
-        self._eis_win_lo[_order] = _end - _len
-        self._eis_win_hi[_order] = _end
-        self._eis_sweep_s = float(_end[-1]) + 1.0
-        self._eis_lin_ok: bool | None = None       # state layout check (first spectrum)
+        self._init_eis_sweep(cfg)
         # Seedable randomness (#A4): covers only the synthetic EIS noise terms
-        # (_eis/noise.py); PyBaMM solver and AutoEIS MCMC are unaffected. Stored
-        # separately from self._rng so reset() can re-derive a fresh generator
-        # from the same seed for reproducible reset->run sequences.
+        # (_eis/noise.py) and the AutoEIS sampler seeds; the PyBaMM solver is
+        # unaffected. The generator itself is (re)created from the seed in
+        # _clear_cell_state, so reset()->run reproduces a fresh instance.
         self._seed = cfg.seed
-        self._rng = np.random.default_rng(cfg.seed)
-
         # Solver tolerances (see _build_native_state).
         self._emergency_solver_rtol = float(cfg.emergency_solver_rtol)
         self._emergency_solver_atol = float(cfg.emergency_solver_atol)
@@ -402,6 +395,40 @@ class PyBaMMOracle:
         )
         self._autoeis_num_warmup = int(cfg.autoeis_num_warmup)
         self._autoeis_num_samples = int(cfg.autoeis_num_samples)
+
+    def _init_eis_sweep(self, cfg: OracleConfig) -> None:
+        """Sweep timing of the frequency grid (non-stationary EIS windows)."""
+        # Sweep timing (jones2022: 57 points, 20 kHz -> 0.02 Hz in ~297 s, high to
+        # low): each frequency's window = periods / f + a fixed instrument overhead
+        # (1.15 s/point reproduces the measured sweep length). Offsets from the sweep
+        # start, in self.frequencies order.
+        _f = np.asarray(self.frequencies, float)
+        _order = np.argsort(-_f)
+        _len = float(cfg.eis_sweep_periods) / _f[_order] + float(cfg.eis_sweep_overhead_s)
+        _end = np.cumsum(_len)
+        self._eis_win_lo = np.empty_like(_f)
+        self._eis_win_hi = np.empty_like(_f)
+        self._eis_win_lo[_order] = _end - _len
+        self._eis_win_hi[_order] = _end
+        self._eis_sweep_s = float(_end[-1]) + 1.0
+
+    def _init_parameter_values(self, cfg: OracleConfig, parameter_values) -> None:
+        """Parameter values and model options: chemistry, preset, BOL fit, contact
+        resistance, thermal submodel and mesh."""
+        # Chemistry (#14): validate early (before any heavy PyBaMM work). An
+        # explicit parameter_values wins; otherwise resolve the chemistry name.
+        self._chemistry = str(cfg.chemistry)
+        if self._chemistry not in _SUPPORTED_CHEMISTRIES:
+            raise ValueError(
+                f"Unknown chemistry {cfg.chemistry!r}; choose one of "
+                f"{sorted(_SUPPORTED_CHEMISTRIES)}."
+            )
+        self._pv = parameter_values or resolve_parameter_values(
+            _SUPPORTED_CHEMISTRIES[self._chemistry]
+        )
+        self._temperature_K = float(cfg.temperature_K)
+        if self._temperature_K != 298.15:
+            self._pv["Ambient temperature [K]"] = self._temperature_K
         # Build degradation model options and (optionally) override parameters.
         # "ec reaction limited" is always the SEI base; accelerated/severe add
         # lithium plating and particle cracking on top of it.
@@ -482,26 +509,20 @@ class PyBaMMOracle:
         # rebuild the schema now that self._thermal is known.
         self._refresh_state_schema()
 
-        # EIS model is built fresh each __call__ so degraded ParameterValues can
-        # be injected for LAM before each simulation (see §4.4 ORACLE.md).
-
-        # Same discretisation as stage A: harmonic averaging of coefficients at the
-        # electrode|separator interfaces (battery_oracle.patches). Non-strict: on an
-        # untested PyBaMM it warns and the stock (arithmetic) averaging is used.
-        from battery_oracle import patches as _patches
-        _patches.apply(["harmonic_flux_coefficients"], strict=False)
-
-        self._build_native_state()
-
+    def _clear_cell_state(self) -> None:
+        """Fresh-cell state: accumulated degradation, history, cached status, and the
+        EIS noise generator re-seeded from ``seed`` (shared by __init__ and reset)."""
+        self._rng = np.random.default_rng(self._seed)
         self._prev_solution = None
-        self._lock = threading.Lock()
-
-        # Per-call history for diagnostic plots and EOL tracking (cleared by reset()).
+        # Per-call history for diagnostic plots and EOL tracking.
         self._history: list[dict] = []
         self._last_Z: np.ndarray | None = None
         self._initial_capacity_ah: float | None = None
         self._initial_lli_ah: float | None = None  # formation-cycle LLI baseline
-        # Per-call fidelity status (reset each __call__; downgraded by Phase-1 fallback).
+        self._cumulative_dod_lam_frac = 0.0   # dimensionless cumulative loss fraction
+        self._cumulative_dod_lam_ah = 0.0     # = frac * nominal_cap (eol_loss budget)
+        self._cumulative_dod_throughput_ah = 0.0
+        # Per-call fidelity status (reset each run_cycle; downgraded by the fallback).
         self._last_failure_kind: FailureKind | None = None
         self._last_fidelity: str = "full"
         # Most recent CycleResult (None until the first successful run_cycle()).
@@ -512,6 +533,9 @@ class PyBaMMOracle:
         # _warn_clamps / _protocol_to_experiment.
         self._warned_clamp_signatures: set[str] = set()
 
+    def _init_film_resistances(self) -> None:
+        """SEI / dead-lithium thickness -> ohmic resistance factors [Ohm/m], and the
+        nominal ε_s for the LAM injection."""
         # Pre-compute SEI-thickness → ohmic resistance factor (Ohm / m).
         # Specific surface area of spherical particles: a_s = 3 * eps_s / r_p
         # [Doyle, Fuller & Newman, J. Electrochem. Soc. 140(6):1526, 1993, §2.1]
@@ -703,19 +727,7 @@ class PyBaMMOracle:
         ``reset()``-then-run sequence reproduces the same noise realisation
         as a fresh instance.
         """
-        self._rng = np.random.default_rng(self._seed)
-        self._prev_solution = None
-        self._history = []
-        self._last_Z  = None
-        self._initial_capacity_ah = None
-        self._initial_lli_ah = None
-        self._cumulative_dod_lam_frac = 0.0
-        self._cumulative_dod_lam_ah = 0.0
-        self._cumulative_dod_throughput_ah = 0.0
-        self._last_failure_kind = None
-        self._last_fidelity = "full"
-        self._last_result = None
-        self._warned_clamp_signatures = set()
+        self._clear_cell_state()
         self._build_native_state()
 
     # Protocol bounds -- _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/
@@ -1204,108 +1216,245 @@ class PyBaMMOracle:
         experiment, protocol_applied = self._protocol_to_experiment(protocol)
         # On the first call (no prior solution), start at 80 % SOC so the initial
         # OCV (~3.9–4.0 V) sits safely inside the experiment voltage window.
-        _first_call = self._prev_solution is None
-        _solve_kw: dict = {"initial_soc": self._initial_soc} if _first_call else {}
-
-        # Per-cycle ambient temperature (#10): a 7-D protocol's slot 6 overrides
-        # the lumped-thermal ambient for this call. The fresh Simulation built in
-        # _solve_with_fallbacks re-processes self._pv, so mutating the ambient here
-        # takes effect. Bounded to a physical window; T_cell is then read from the
-        # solution (self-heated above ambient).
-        if self._use_temperature_protocol and len(protocol) >= 7:
-            self._T_ambient_K = float(np.clip(protocol[6], 253.15, 333.15))
-            self._pv["Ambient temperature [K]"] = self._T_ambient_K
-            if _first_call:
-                self._pv["Initial temperature [K]"] = self._T_ambient_K
-            # Keep protocol_applied's T_ambient_K in sync with the clamp above
-            # (frozen dataclass, so replace rather than mutate).
-            protocol_applied = replace(protocol_applied, T_ambient_K=self._T_ambient_K)
+        first_call = self._prev_solution is None
+        solve_kw: dict = {"initial_soc": self._initial_soc} if first_call else {}
+        protocol_applied = self._apply_ambient(protocol, protocol_applied, first_call)
 
         # Lock protects _prev_solution so sequential state accumulation is safe
         # even if callers inadvertently share this oracle across threads.
         with self._lock:
             sol, self._last_fidelity, self._last_failure_kind = \
-                self._solve_with_fallbacks(experiment, protocol, _solve_kw)
+                self._solve_with_fallbacks(experiment, protocol, solve_kw)
             self._prev_solution = sol
 
-        # Following the jones2022 protocol, EIS is collected at two points per
-        # cycle: (i) after the two-step charge/CV-hold (step 5) and (ii) after
-        # the discharge (step 1).  Step indices are stable regardless of whether
-        # capacity_check is enabled — the cap-check steps are appended at the end.
-        x100 = (
-            float(self._pv["Initial concentration in negative electrode [mol.m-3]"])
-            / float(self._pv["Maximum concentration in negative electrode [mol.m-3]"])
-        )
         # With tuple-based experiment, steps live in sol.cycles[-1].steps[i].
         # Faithful 5-step cycle (see _protocol_to_experiment):
         #   [0] discharge  [1] discharged-state rest  [2] charge CC1
         #   [3] charge CC2  [4] charged-state rest
         # EIS is read at the relaxed post-rest states: step 4 (charged), step 1
-        # (discharged), matching the paper's "rest 20 min then EIS".
+        # (discharged), matching the paper's "rest 20 min then EIS". Step indices are
+        # stable whether or not capacity_check is enabled (its steps are appended).
         last_cycle = sol.cycles[-1] if sol.cycles else None
+        soc_charge, soc_discharge = self._rest_socs(sol, last_cycle)
+        T_cell_chg, T_cell_dis = self._rest_temperatures(sol, last_cycle)
+        T_cell_K = T_cell_chg
+
+        # DoD damage is accumulated BEFORE the EIS linearisation so it reduces ε_s
+        # there and shows up in the impedance (see _accumulate_dod_lam).
+        self._accumulate_dod_lam(protocol)
+        eis_pv, lam_frac = self._eis_parameter_values(sol)
+        sei_thick, dead_li_thick, delta_R_ohmic = self._ohmic_films(sol)
+
+        self._last_eis_mode_used = "equilibrium"
+        steps = last_cycle.steps if last_cycle is not None else None
+        # non-stationary EIS starts from the first state of each rest (current already
+        # zero): step 4 for the charged spectrum, step 1 for the discharged one
+        self._last_eis_leakage = None
+        Z_charge = self._cycle_spectrum(soc_charge, T_cell_chg, steps[4] if steps else None,
+                                        eis_pv, sei_thick, delta_R_ohmic)
+        leak_charge, self._last_eis_leakage = self._last_eis_leakage, None
+        Z_discharge = self._cycle_spectrum(soc_discharge, T_cell_dis, steps[1] if steps else None,
+                                           eis_pv, sei_thick, delta_R_ohmic)
+        leak_discharge = self._last_eis_leakage
+
+        cap_ah = self._capacity_ah(sol, last_cycle)
+        if self._initial_capacity_ah is None:
+            self._initial_capacity_ah = cap_ah
+        soh, budget = self._state_of_health(sol, lam_frac, protocol)
+
+        self._history.append({
+            "call_idx":           len(self._history),
+            "chemistry":          self._chemistry,
+            "protocol":           np.asarray(protocol).copy(),
+            # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
+            # here, never raised. Successful full-fidelity steps carry None/"full".
+            "failure_kind":       self._last_failure_kind,
+            "fidelity":           self._last_fidelity,
+            "eis_mode_used":      self._last_eis_mode_used,
+            # lock-in drift leakage included in Z (non-stationary EIS only) [Ohm]
+            "eis_leakage_charge": None if leak_charge is None else np.asarray(leak_charge).copy(),
+            "eis_leakage_discharge": None if leak_discharge is None else np.asarray(leak_discharge).copy(),
+            "sei_thickness_nm":   sei_thick * 1e9 if self._sei_to_R > 0.0 else float("nan"),
+            "dead_li_nm":         dead_li_thick * 1e9,
+            "lam_pct":            lam_frac * 100.0,
+            "lam_cap_loss_ah":    budget["lam_cap_loss_ah"],
+            "end_soh":            soh,
+            "T_cell_K":           T_cell_K,
+            "capacity_ah":              cap_ah,
+            "cumulative_sei_loss_ah":   budget["cumulative_sei_loss_ah"],
+            "cumulative_plating_ah":    budget["cumulative_plating_ah"],
+            "cumulative_lli_total_ah":  budget["cumulative_lli_total_ah"],
+            "delta_lli_ah":             budget["delta_lli_ah"],
+            "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
+            # Per-step throughput / duration / end voltage (see _step_stats) --
+            # what the tune engine's step-shape term compares to real GCPL steps.
+            "step_stats":         self._step_stats(last_cycle),
+            # EIS spectra at this call, jones2022 raw-data convention
+            # (freq/Hz, Re(Z)/Ohm, -Im(Z)/Ohm) so a Nyquist plot is just
+            # ax.plot(Z_charge_real, Z_charge_neg_imag).
+            "Z_charge_real":        Z_charge.real.copy(),
+            "Z_charge_neg_imag":    -Z_charge.imag.copy(),
+            "Z_discharge_real":     Z_discharge.real.copy(),
+            "Z_discharge_neg_imag": -Z_discharge.imag.copy(),
+        })
+        self._last_Z = Z_charge.copy()
+
+        # linKK and DRT use the post-charge spectrum (primary measurement)
+        linkk_rmse = _linkk_rmse(self.frequencies, Z_charge, c=self._linkk_c, max_M=self._linkk_max_M)
+        drt_peaks = self._drt_peaks(Z_charge)
+
+        # ECM fit: charge and discharge spectra fitted independently
+        diag_chg: dict = {}
+        diag_dis: dict = {}
+        params_charge = self._fit_ecm_half(Z_charge, diag_chg)
+        params_discharge = self._fit_ecm_half(Z_discharge, diag_dis)
+        std_charge = self._ecm_std_half(diag_chg)
+        std_discharge = self._ecm_std_half(diag_dis)
+        # Layout matches self.state_vector_schema: means_charge | means_discharge |
+        # std_charge | std_discharge [| T_cell_K when lumped thermal]. Every block
+        # is registered in the schema; the length is derived, never hardcoded.
+        blocks = [params_charge, params_discharge, std_charge, std_discharge]
+        if "T_cell_K" in self.state_vector_schema:
+            blocks.append(np.array([T_cell_K], dtype=float))
+        state = np.concatenate(blocks)
+
+        self._history[-1].update({
+            "linkk_rmse":          linkk_rmse,
+            "max_cv":              diag_chg.get("max_cv",    float("nan")),
+            "converged":           diag_chg.get("converged", True),
+            "ecm_params":          diag_chg.get("ecm_params", None),
+            "drt_peaks":           drt_peaks,
+            "ecm_params_charge":   params_charge.copy(),
+            "ecm_params_discharge": params_discharge.copy(),
+            "ecm_std_charge":      std_charge.copy(),
+            "ecm_std_discharge":   std_discharge.copy(),
+            # Raw AutoEIS MCMC posterior samples behind ecm_params_{charge,discharge}
+            # above (dict: AutoEIS variable name -> (num_samples,) array), so callers
+            # comparing oracle vs. real posterior distributions (e.g.
+            # jones_oracle_study.py) don't need to refit — None if AutoEIS fell back
+            # to the Randles stub for that state.
+            "ecm_samples_charge":      diag_chg.get("_raw_samples"),
+            "ecm_samples_discharge":   diag_dis.get("_raw_samples"),
+            "ecm_variables_charge":    diag_chg.get("_raw_variables", []),
+            "ecm_variables_discharge": diag_dis.get("_raw_variables", []),
+        })
+
+        result = CycleResult(
+            state=state,
+            schema=self.state_vector_schema,
+            soh=soh,
+            soc_charge=soc_charge,
+            soc_discharge=soc_discharge,
+            capacity_ah=cap_ah,
+            fidelity=self._last_fidelity,
+            failure_kind=self._last_failure_kind,
+            protocol=np.asarray(protocol).copy(),
+            protocol_applied=protocol_applied,
+            eis_charge=(self.frequencies, Z_charge.copy()),
+            eis_discharge=(self.frequencies, Z_discharge.copy()),
+            ecm_charge=dict(zip(self._ecm_param_names, params_charge.tolist())),
+            ecm_discharge=dict(zip(self._ecm_param_names, params_discharge.tolist())),
+            ecm_std_charge=dict(zip(self._ecm_param_names, std_charge.tolist())),
+            ecm_std_discharge=dict(zip(self._ecm_param_names, std_discharge.tolist())),
+            raw=types.MappingProxyType(self._history[-1]),
+        )
+        self._last_result = result
+        return result
+
+    # ── run_cycle steps ──────────────────────────────────────────────────────
+
+    def _apply_ambient(self, protocol: np.ndarray, protocol_applied: Protocol,
+                       first_call: bool) -> Protocol:
+        """Per-cycle ambient temperature (#10): a 7-D protocol's slot 6 overrides the
+        lumped-thermal ambient for this call.
+
+        The fresh Simulation built in _solve_with_fallbacks re-processes self._pv, so
+        mutating the ambient here takes effect. Bounded to a physical window; T_cell is
+        then read from the solution (self-heated above ambient).
+        """
+        if not (self._use_temperature_protocol and len(protocol) >= 7):
+            return protocol_applied
+        self._T_ambient_K = float(np.clip(protocol[6], 253.15, 333.15))
+        self._pv["Ambient temperature [K]"] = self._T_ambient_K
+        if first_call:
+            self._pv["Initial temperature [K]"] = self._T_ambient_K
+        # Keep protocol_applied's T_ambient_K in sync with the clamp above
+        # (frozen dataclass, so replace rather than mutate).
+        return replace(protocol_applied, T_ambient_K=self._T_ambient_K)
+
+    def _rest_socs(self, sol, last_cycle) -> tuple[float, float]:
+        """SOC at the end of the charged (step 4) and discharged (step 1) rests,
+        from the negative-electrode stoichiometry relative to its initial value."""
+        x100 = (
+            float(self._pv["Initial concentration in negative electrode [mol.m-3]"])
+            / float(self._pv["Maximum concentration in negative electrode [mol.m-3]"])
+        )
         try:
             x_neg_chg = float(
                 last_cycle.steps[4]["Average negative particle stoichiometry"].entries[-1]
             )
         except Exception:
             x_neg_chg = float(sol["Average negative particle stoichiometry"].entries[-1])
-        soc_charge = float(np.clip(x_neg_chg / x100, self._soc_clip_min, self._soc_clip_max))
-
         try:
             x_neg_dis = float(
                 last_cycle.steps[1]["Average negative particle stoichiometry"].entries[-1]
             )
         except Exception:
             x_neg_dis = x_neg_chg
-        soc_discharge = float(np.clip(x_neg_dis / x100, self._soc_clip_min, self._soc_clip_max))
+        return (float(np.clip(x_neg_chg / x100, self._soc_clip_min, self._soc_clip_max)),
+                float(np.clip(x_neg_dis / x100, self._soc_clip_min, self._soc_clip_max)))
 
-        # --- Cell temperature (#9) ------------------------------------------
-        # Volume-averaged cell temperature at the two post-rest EIS states. For
-        # isothermal runs it is exactly the setpoint; for lumped thermal it is the
-        # self-heated temperature read from the solution. T_cell_chg/dis feed the
-        # Arrhenius EIS correction (#11); a single representative value goes into
-        # the state vector / history / CSV.
-        _T_VAR = "Volume-averaged cell temperature [K]"
-        if self._thermal == "lumped":
-            def _read_T(step_idx: int) -> float:
+    def _rest_temperatures(self, sol, last_cycle) -> tuple[float, float]:
+        """Volume-averaged cell temperature (#9) at the charged and discharged rests.
+
+        Isothermal runs return the setpoint; lumped thermal reads the self-heated
+        temperature from the solution. These feed the Arrhenius EIS correction (#11).
+        """
+        if self._thermal != "lumped":
+            return self._temperature_K, self._temperature_K
+        T_VAR = "Volume-averaged cell temperature [K]"
+
+        def read(step_idx: int) -> float:
+            try:
+                return float(last_cycle.steps[step_idx][T_VAR].entries[-1])
+            except Exception:
                 try:
-                    return float(last_cycle.steps[step_idx][_T_VAR].entries[-1])
+                    return float(sol[T_VAR].entries[-1])
                 except Exception:
-                    try:
-                        return float(sol[_T_VAR].entries[-1])
-                    except Exception:
-                        return self._T_ambient_K
-            T_cell_chg = _read_T(4)
-            T_cell_dis = _read_T(1)
-        else:
-            T_cell_chg = T_cell_dis = (
-                self._T_ambient_K if self._thermal == "lumped" else self._temperature_K
-            )
-        T_cell_K = T_cell_chg
+                    return self._T_ambient_K
+        return read(4), read(1)
 
-        # --- DoD / charge-induced-stress LAM increment (see __init__) -------
-        # Computed HERE, before the EIS linearisation, so depth-of-discharge
-        # damage reduces ε_s below and therefore shows up in the impedance as a
-        # grown charge-transfer arc (R3+R5) — the way real jones2022 cells age —
-        # rather than only in the hidden SOH. Accumulated as a dimensionless
-        # cell-fraction; mapped onto nominal_cap for the eol_loss budget later.
-        if self._dod_lam_scale > 0.0:
-            _p = np.asarray(protocol)
-            _dod_frac = max(0.0, float(_p[4]) * float(_p[5]) / self._real_cell_capacity_mah)
-            _stress = float(np.sqrt(
-                max(0.0, float(_p[0]) / self._real_cell_capacity_mah) * _dod_frac
-            ))
-            self._cumulative_dod_throughput_ah += _dod_frac
-            self._cumulative_dod_lam_frac += (
-                self._dod_lam_scale * _stress * _dod_frac
-                / (2.0 * np.sqrt(max(self._cumulative_dod_throughput_ah, 1e-9)))
-            )
+    def _accumulate_dod_lam(self, protocol: np.ndarray) -> None:
+        """DoD / charge-induced-stress LAM increment (see __init__).
 
-        # --- LAM a priori: reduce ε_s so the EIS linearisation sees the ---
-        # --- degraded electrode microstructure. [Doyle et al., 1993]    ---
+        Called before the EIS linearisation, so depth-of-discharge damage reduces ε_s
+        there and therefore shows up in the impedance as a grown charge-transfer arc
+        (R3+R5), the way real jones2022 cells age, rather than only in the hidden SOH.
+        Accumulated as a dimensionless cell fraction; mapped onto the nominal capacity
+        for the eol_loss budget in _state_of_health.
+        """
+        if self._dod_lam_scale <= 0.0:
+            return
+        p = np.asarray(protocol)
+        dod_frac = max(0.0, float(p[4]) * float(p[5]) / self._real_cell_capacity_mah)
+        stress = float(np.sqrt(
+            max(0.0, float(p[0]) / self._real_cell_capacity_mah) * dod_frac
+        ))
+        self._cumulative_dod_throughput_ah += dod_frac
+        self._cumulative_dod_lam_frac += (
+            self._dod_lam_scale * stress * dod_frac
+            / (2.0 * np.sqrt(max(self._cumulative_dod_throughput_ah, 1e-9)))
+        )
+
+    def _eis_parameter_values(self, sol) -> tuple:
+        """Parameter values for this cycle's EIS, and the cracking LAM fraction.
+
+        LAM a priori: ε_s is reduced so the EIS linearisation sees the degraded
+        electrode microstructure [Doyle et al., 1993].
+        """
         eis_pv = self._pv.copy()
         # For lumped thermal (#11), synthesise the EIS baseline at T_ref so the
-        # analytic Arrhenius scaling (T_ref -> T_cell in _eis_and_correct) is the
+        # analytic Arrhenius scaling (T_ref -> T_cell in _cycle_spectrum) is the
         # SOLE temperature effect — otherwise PyBaMM's own T-dependent parameters
         # (evaluated at the pv ambient = T_ambient_K) would double-count it.
         if self._thermal == "lumped":
@@ -1321,7 +1470,7 @@ class PyBaMMOracle:
                 # Total active-material loss seen by the spectrum = physical
                 # cracking (lam_frac, ~0 while particle mechanics is disabled)
                 # plus the DoD/charge-induced-stress LAM. lam_frac alone still
-                # feeds lam_cap_loss below; the DoD part is added to eol_loss
+                # feeds lam_cap_loss; the DoD part is added to eol_loss
                 # separately, so combining them here does not double-count.
                 eff_lam = float(np.clip(lam_frac + self._cumulative_dod_lam_frac, 0.0, self._lam_ceiling))
                 if eff_lam > 1e-4:
@@ -1330,111 +1479,105 @@ class PyBaMMOracle:
                     )
             except Exception:
                 pass
+        return eis_pv, lam_frac
 
-        # --- Pre-read state-variable degradation quantities (post-hoc shifts) ---
-        # SEI film is pure ohmic [Christensen & Newman, J. Electrochem. Soc. 151:A1977, 2004]
-        sei_thick       = 0.0
-        dead_li_thick   = 0.0
+    def _ohmic_films(self, sol) -> tuple[float, float, float]:
+        """SEI and dead-lithium thickness [m] and the ohmic resistance they add [Ohm].
 
+        The SEI film is purely ohmic [Christensen & Newman, J. Electrochem. Soc.
+        151:A1977, 2004].
+        """
+        sei_thick = 0.0
+        dead_li_thick = 0.0
         if self._sei_to_R > 0.0:
             try:
                 sei_thick = float(sol["X-averaged negative SEI thickness [m]"].entries[-1])
             except Exception:
                 pass
-
         if self._dead_li_to_R > 0.0:
             try:
                 dead_li_thick = float(sol["X-averaged negative dead lithium thickness [m]"].entries[-1])
             except Exception:
                 pass
-
         delta_R_ohmic = sei_thick * self._sei_to_R
         delta_R_ohmic += dead_li_thick * self._dead_li_to_R
+        return sei_thick, dead_li_thick, delta_R_ohmic
 
-        self._last_eis_mode_used = "equilibrium"
+    def _cycle_spectrum(self, soc: float, T_cell: float, step, eis_pv,
+                        sei_thick: float, delta_R_ohmic: float) -> np.ndarray:
+        """One noisy EIS spectrum: non-stationary from ``step`` when configured (and
+        the solve was full fidelity), otherwise the equilibrium spectrum at ``soc``
+        with the Arrhenius and ohmic-film corrections."""
+        native = False
+        if self._eis_mode == "nonstationary" and step is not None and self._last_fidelity == "full":
+            try:
+                Z = self._nonstationary_spectrum(step, eis_pv)
+                native = True
+                self._last_eis_mode_used = "nonstationary"
+            except Exception as exc:              # noqa: BLE001 - recorded, stock path below
+                log.warning("[PyBaMMOracle] non-stationary EIS failed (%s: %s); "
+                            "equilibrium EIS for this spectrum", type(exc).__name__, str(exc)[:200])
+                self._last_eis_mode_used = "equilibrium (non-stationary failed)"
+        if native:
+            # The model itself carries temperature, the SEI film and contact
+            # resistance and the relaxation drift: only effects it does not
+            # model (crack SEI, dead lithium) and the measurement noise follow.
+            d_r = delta_R_ohmic - sei_thick * self._sei_to_R
+            if d_r > 0.0:
+                Z = (Z.real + d_r) + 1j * Z.imag
+            return self._add_eis_noise(Z)
+        sim = _pb.EISSimulation(
+            _MODEL_CLS(options={"surface form": "differential"}),
+            parameter_values=eis_pv,
+        )
+        Z = np.array(sim.solve(self.frequencies, initial_soc=soc)["Impedance [Ohm]"])
+        # Arrhenius temperature dependence (#11): the EIS model is solved
+        # isothermally, so temperature enters analytically. Scale the
+        # charge-transfer arc by exp(E_a/R (1/T - 1/T_ref)) and the
+        # electrolyte/ohmic HF intercept by the electrolyte E_a. Applied to the
+        # native spectrum BEFORE the ohmic film add and noise, so both the ECM
+        # means and the posterior std are consistently corrected (the AutoEIS
+        # target-R0 rescale is scale-equivariant and does not cancel it). R0 =
+        # HF real intercept (highest frequency), the file-wide convention.
+        if self._thermal == "lumped" and abs(T_cell - self._T_ref_K) > 1e-9:
+            inv = 1.0 / T_cell - 1.0 / self._T_ref_K
+            arr_ct = float(np.exp(self._E_a / _R_GAS * inv))
+            arr_el = float(np.exp(self._E_a_el / _R_GAS * inv))
+            R0 = float(Z.real[int(np.argmax(self.frequencies))])
+            Z = (R0 * arr_el) + arr_ct * (Z - R0)
+        if delta_R_ohmic > 0.0:
+            Z = (Z.real + delta_R_ohmic) + 1j * Z.imag
+        return self._add_eis_noise(Z)
 
-        def _eis_and_correct(soc: float, T_cell: float, step=None) -> np.ndarray:
-            native = False
-            if self._eis_mode == "nonstationary" and step is not None and self._last_fidelity == "full":
-                try:
-                    Z = self._nonstationary_spectrum(step, eis_pv)
-                    native = True
-                    self._last_eis_mode_used = "nonstationary"
-                except Exception as exc:              # noqa: BLE001 - recorded, stock path below
-                    log.warning("[PyBaMMOracle] non-stationary EIS failed (%s: %s); "
-                                "equilibrium EIS for this spectrum", type(exc).__name__, str(exc)[:200])
-                    self._last_eis_mode_used = "equilibrium (non-stationary failed)"
-            if native:
-                # The model itself carries temperature, the SEI film and contact
-                # resistance and the relaxation drift: only effects it does not
-                # model (crack SEI, dead lithium) and the measurement noise follow.
-                d_r = delta_R_ohmic - sei_thick * self._sei_to_R
-                if d_r > 0.0:
-                    Z = (Z.real + d_r) + 1j * Z.imag
-                return self._add_eis_noise(Z)
-            sim = _pb.EISSimulation(
-                _MODEL_CLS(options={"surface form": "differential"}),
-                parameter_values=eis_pv,
-            )
-            Z = np.array(sim.solve(self.frequencies, initial_soc=soc)["Impedance [Ohm]"])
-            # Arrhenius temperature dependence (#11): the EIS model is solved
-            # isothermally, so temperature enters analytically. Scale the
-            # charge-transfer arc by exp(E_a/R (1/T - 1/T_ref)) and the
-            # electrolyte/ohmic HF intercept by the electrolyte E_a. Applied to the
-            # native spectrum BEFORE the ohmic film add and noise, so both the ECM
-            # means and the posterior std are consistently corrected (the AutoEIS
-            # target-R0 rescale is scale-equivariant and does not cancel it). R0 =
-            # HF real intercept (highest frequency), the file-wide convention.
-            if self._thermal == "lumped" and abs(T_cell - self._T_ref_K) > 1e-9:
-                inv = 1.0 / T_cell - 1.0 / self._T_ref_K
-                arr_ct = float(np.exp(self._E_a / _R_GAS * inv))
-                arr_el = float(np.exp(self._E_a_el / _R_GAS * inv))
-                R0 = float(Z.real[int(np.argmax(self.frequencies))])
-                Z = (R0 * arr_el) + arr_ct * (Z - R0)
-            if delta_R_ohmic > 0.0:
-                Z = (Z.real + delta_R_ohmic) + 1j * Z.imag
-            Z = self._add_eis_noise(Z)
-            return Z
+    def _capacity_ah(self, sol, last_cycle) -> float:
+        """Discharge capacity of this cycle [A.h].
 
-        _steps = last_cycle.steps if last_cycle is not None else None
-        # non-stationary EIS starts from the first state of each rest (current already
-        # zero): step 4 for the charged spectrum, step 1 for the discharged one
-        self._last_eis_leakage = None
-        Z_charge    = _eis_and_correct(soc_charge, T_cell_chg, _steps[4] if _steps else None)
-        leak_charge, self._last_eis_leakage = self._last_eis_leakage, None
-        Z_discharge = _eis_and_correct(soc_discharge, T_cell_dis, _steps[1] if _steps else None)
-        leak_discharge = self._last_eis_leakage
-
-        # cap_ah: when capacity_check is enabled, read from the dedicated C/20
-        # discharge step (last step) — this is sensitive to LLI and protocol.
-        # When disabled, fall back to the voltage-limited discharge capacity
-        # from the regular cycling step (less sensitive, but ~20× faster).
+        With capacity_check, read from the dedicated C/20 discharge step (last step),
+        which is sensitive to LLI and protocol. Without it, the voltage-limited
+        discharge capacity of the regular cycling step (less sensitive, ~20× faster).
+        """
         if self.capacity_check:
             try:
-                cap_ah = float(
-                    last_cycle.steps[-1]["Discharge capacity [A.h]"].entries[-1]
-                )
+                return float(last_cycle.steps[-1]["Discharge capacity [A.h]"].entries[-1])
             except Exception:
-                try:
-                    cap_ah = float(np.max(sol["Discharge capacity [A.h]"].entries))
-                except Exception:
-                    cap_ah = float("nan")
-        else:
-            try:
-                cap_ah = float(np.max(sol["Discharge capacity [A.h]"].entries))
-            except Exception:
-                cap_ah = float("nan")
+                pass
+        try:
+            return float(np.max(sol["Discharge capacity [A.h]"].entries))
+        except Exception:
+            return float("nan")
 
-        if self._initial_capacity_ah is None:
-            self._initial_capacity_ah = cap_ah
+    def _state_of_health(self, sol, lam_frac: float, protocol: np.ndarray) -> tuple[float, dict]:
+        """SOH from the irreversible-loss budget, and the budget's terms [A.h].
 
+        Raises OracleFailure(END_OF_LIFE) below eol_capacity_fraction.
+        """
         # EOL criterion: total irreversible lithium inventory loss from all active
         # mechanisms.  Each variable is a cumulative integrator that carries
         # forward via _prev_solution, so it reflects total loss since battery birth.
         # SEI on cracks and dead-Li plating are protocol-sensitive (higher C-rate
         # → more cracking → faster crack-SEI; higher C-rate → more plating → more
         # dead Li), so including them makes EOL respond to the chosen protocol.
-        def _try_get(key: str) -> float:
+        def try_get(key: str) -> float:
             try:
                 return float(sol[key].entries[-1])
             except Exception:
@@ -1447,9 +1590,9 @@ class PyBaMMOracle:
         # the active pool — it is not a capacity gain.  The true irreversible loss from
         # plating is the dead-Li component, which trends positive over time.
         cumulative_sei_loss = (
-            _try_get("Loss of capacity to negative SEI [A.h]")
-            + _try_get("Loss of capacity to negative SEI on cracks [A.h]")
-            + max(0.0, _try_get("Loss of capacity to negative lithium plating [A.h]"))
+            try_get("Loss of capacity to negative SEI [A.h]")
+            + try_get("Loss of capacity to negative SEI on cracks [A.h]")
+            + max(0.0, try_get("Loss of capacity to negative lithium plating [A.h]"))
         )
         if cumulative_sei_loss == 0.0:
             cumulative_sei_loss = float("nan")
@@ -1483,10 +1626,10 @@ class PyBaMMOracle:
         lam_cap_loss = lam_frac * nominal_cap
 
         # DoD / charge-induced-stress LAM term: the per-cycle increment and its
-        # cumulative loss FRACTION are computed earlier (before the EIS step, so
-        # it also reduces ε_s and grows R3+R5). Here we just map that dimensionless
-        # fraction onto the oracle's nominal_cap for the eol_loss budget, keeping
-        # it scale-consistent with delta_lli. Smith-style sqrt(throughput) law;
+        # cumulative loss FRACTION are computed earlier (_accumulate_dod_lam, before
+        # the EIS step, so it also reduces ε_s and grows R3+R5). Here we just map that
+        # dimensionless fraction onto the oracle's nominal_cap for the eol_loss budget,
+        # keeping it scale-consistent with delta_lli. Smith-style sqrt(throughput) law;
         # the running total only grows -> irreversible active-material loss.
         self._cumulative_dod_lam_ah = self._cumulative_dod_lam_frac * nominal_cap
 
@@ -1503,170 +1646,82 @@ class PyBaMMOracle:
                 protocol=np.asarray(protocol).copy(),
                 failure_kind=FailureKind.END_OF_LIFE,
             )
+        return soh, {
+            "lam_cap_loss_ah":         lam_cap_loss,
+            "cumulative_sei_loss_ah":  try_get("Loss of capacity to negative SEI [A.h]"),
+            "cumulative_plating_ah":   try_get("Loss of capacity to negative lithium plating [A.h]"),
+            "cumulative_lli_total_ah": cumulative_sei_loss,
+            "delta_lli_ah":            delta_lli,
+        }
 
-        self._history.append({
-            "call_idx":           len(self._history),
-            "chemistry":          self._chemistry,
-            "protocol":           np.asarray(protocol).copy(),
-            # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
-            # here, never raised. Successful full-fidelity steps carry None/"full".
-            "failure_kind":       self._last_failure_kind,
-            "fidelity":           self._last_fidelity,
-            "eis_mode_used":      getattr(self, "_last_eis_mode_used", "equilibrium"),
-            # lock-in drift leakage included in Z (non-stationary EIS only) [Ohm]
-            "eis_leakage_charge": None if leak_charge is None else np.asarray(leak_charge).copy(),
-            "eis_leakage_discharge": None if leak_discharge is None else np.asarray(leak_discharge).copy(),
-            "sei_thickness_nm":   sei_thick * 1e9 if self._sei_to_R > 0.0 else float("nan"),
-            "dead_li_nm":         dead_li_thick * 1e9,
-            "lam_pct":            lam_frac * 100.0,
-            "lam_cap_loss_ah":    lam_cap_loss,
-            "end_soh":            soh,
-            "T_cell_K":           T_cell_K,
-            "capacity_ah":              cap_ah,
-            "cumulative_sei_loss_ah":   _try_get("Loss of capacity to negative SEI [A.h]"),
-            "cumulative_plating_ah":    _try_get("Loss of capacity to negative lithium plating [A.h]"),
-            "cumulative_lli_total_ah":  cumulative_sei_loss,
-            "delta_lli_ah":             delta_lli,
-            "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
-            # Per-step throughput / duration / end voltage (see _step_stats) --
-            # what the tune engine's step-shape term compares to real GCPL steps.
-            "step_stats":         self._step_stats(last_cycle),
-            # EIS spectra at this call, jones2022 raw-data convention
-            # (freq/Hz, Re(Z)/Ohm, -Im(Z)/Ohm) so a Nyquist plot is just
-            # ax.plot(Z_charge_real, Z_charge_neg_imag).
-            "Z_charge_real":        Z_charge.real.copy(),
-            "Z_charge_neg_imag":    -Z_charge.imag.copy(),
-            "Z_discharge_real":     Z_discharge.real.copy(),
-            "Z_discharge_neg_imag": -Z_discharge.imag.copy(),
-        })
-        self._last_Z = Z_charge.copy()
-
-        # ── linKK and DRT use the post-charge spectrum (primary measurement) ────
-        linkk_rmse = _linkk_rmse(self.frequencies, Z_charge, c=self._linkk_c, max_M=self._linkk_max_M)
-
-        drt_peaks = np.array([], dtype=float)
+    def _drt_peaks(self, Z: np.ndarray) -> np.ndarray:
+        """Relaxation times [s] of the DRT peaks of ``Z`` (empty if the DRT fails)."""
         try:
             from battery_oracle._eis.drt import get_drt_impedance
             drt_out, _, _, _ = get_drt_impedance(
-                (self.frequencies,), (Z_charge,), (None,), trim=False
+                (self.frequencies,), (Z,), (None,), trim=False
             )
-            _tau   = drt_out[0][:, 0]
-            _gamma = drt_out[0][:, 1]
-            _idx, _ = _find_peaks(_gamma)
-            if len(_idx):
-                drt_peaks = _tau[_idx]
+            tau = drt_out[0][:, 0]
+            gamma = drt_out[0][:, 1]
+            idx, _ = _find_peaks(gamma)
+            if len(idx):
+                return tau[idx]
         except Exception:
             pass
+        return np.array([], dtype=float)
 
-        # ── ECM fit: charge and discharge spectra fitted independently ────────
-        # ecm_model_fn(frequencies, Z_real, Z_imag) returns a full circuit-derived
-        # vector (charge half ++ discharge half); take the first n_params (one
-        # half) from each call. n_params is the per-half width, derived from the
-        # circuit — never hardcoded.
-        _n_params = len(self._ecm_param_names)
+    def _fit_ecm_half(self, Z: np.ndarray, diag: dict) -> np.ndarray:
+        """ECM parameter means for one spectrum.
 
-        def _fit_half(Z: np.ndarray, _diag: dict) -> np.ndarray:
-            if self.ecm_model_fn is autoeis_ecm:
-                # Draw a fresh int seed from the oracle's noise RNG for AutoEIS's
-                # sampler (autoeis.perform_bayesian_inference's own `seed` kwarg),
-                # so both the EIS noise and the MCMC fit are reproducible from the
-                # same PyBaMMOracle(seed=...) under a single deterministic stream.
-                _autoeis_seed = int(self._rng.integers(0, 2**31 - 1))
-                full, raw_samples, raw_variables = autoeis_ecm(
-                    self.frequencies, Z.real, Z.imag,
-                    circuit=self._circuit, _diag=_diag, return_samples=True,
-                    cpe_w_seed=self._cpe_w_seed, cpe_n_seed=self._cpe_n_seed,
-                    cpe_w_default=self._cpe_w_default, cpe_n_default=self._cpe_n_default,
-                    rescale_target_r0=self._ecm_rescale_target_r0,
-                    num_warmup=self._autoeis_num_warmup, num_samples=self._autoeis_num_samples,
-                    seed=_autoeis_seed,
-                )
-                _diag["_raw_samples"] = raw_samples
-                _diag["_raw_variables"] = raw_variables
-            elif self.ecm_model_fn is randles_stub_ecm:
-                full = randles_stub_ecm(
-                    self.frequencies, Z.real, Z.imag,
-                    circuit=self._circuit, cpe_n_seed=self._cpe_n_seed,
-                    cpe_n_default=self._cpe_n_default,
-                )
-            else:
-                full = self.ecm_model_fn(self.frequencies, Z.real, Z.imag)
-            return full[:_n_params]
+        ecm_model_fn(frequencies, Z_real, Z_imag) returns a full circuit-derived vector
+        (charge half ++ discharge half); the first n_params (one half) are kept. n_params
+        is the per-half width, derived from the circuit, never hardcoded.
+        """
+        if self.ecm_model_fn is autoeis_ecm:
+            # Draw a fresh int seed from the oracle's noise RNG for AutoEIS's
+            # sampler (autoeis.perform_bayesian_inference's own `seed` kwarg),
+            # so both the EIS noise and the MCMC fit are reproducible from the
+            # same PyBaMMOracle(seed=...) under a single deterministic stream.
+            autoeis_seed = int(self._rng.integers(0, 2**31 - 1))
+            full, raw_samples, raw_variables = autoeis_ecm(
+                self.frequencies, Z.real, Z.imag,
+                circuit=self._circuit, _diag=diag, return_samples=True,
+                cpe_w_seed=self._cpe_w_seed, cpe_n_seed=self._cpe_n_seed,
+                cpe_w_default=self._cpe_w_default, cpe_n_default=self._cpe_n_default,
+                rescale_target_r0=self._ecm_rescale_target_r0,
+                num_warmup=self._autoeis_num_warmup, num_samples=self._autoeis_num_samples,
+                seed=autoeis_seed,
+            )
+            diag["_raw_samples"] = raw_samples
+            diag["_raw_variables"] = raw_variables
+        elif self.ecm_model_fn is randles_stub_ecm:
+            full = randles_stub_ecm(
+                self.frequencies, Z.real, Z.imag,
+                circuit=self._circuit, cpe_n_seed=self._cpe_n_seed,
+                cpe_n_default=self._cpe_n_default,
+            )
+        else:
+            full = self.ecm_model_fn(self.frequencies, Z.real, Z.imag)
+        return full[:len(self._ecm_param_names)]
 
-        def _std_half(_diag: dict) -> np.ndarray:
-            """Per-parameter AutoEIS posterior std, aligned to the mean vector.
+    def _ecm_std_half(self, diag: dict) -> np.ndarray:
+        """Per-parameter AutoEIS posterior std, aligned to the mean vector.
 
-            The mean half is built by iterating ``_raw_variables`` (see
-            ``autoeis_ecm``: ``half = [median(samples[k]) for k in _variables]``),
-            so the std MUST iterate the same order to line up with the means.
-            Returns all-NaN when AutoEIS fell back to the Randles stub (no samples),
-            which a downstream DMDc/audit consumer drops or imputes.
-            """
-            samples = _diag.get("_raw_samples")
-            variables = _diag.get("_raw_variables") or []
-            out = np.full(_n_params, np.nan)
-            if not samples:
-                return out
-            vals = [float(np.std(np.asarray(samples[k]))) for k in variables[:_n_params]]
-            out[:len(vals)] = vals
+        The mean half is built by iterating ``_raw_variables`` (see ``autoeis_ecm``:
+        ``half = [median(samples[k]) for k in _variables]``), so the std MUST iterate
+        the same order to line up with the means. Returns all-NaN when AutoEIS fell
+        back to the Randles stub (no samples), which a downstream DMDc/audit consumer
+        drops or imputes.
+        """
+        n_params = len(self._ecm_param_names)
+        samples = diag.get("_raw_samples")
+        variables = diag.get("_raw_variables") or []
+        out = np.full(n_params, np.nan)
+        if not samples:
             return out
-
-        _ecm_diag_chg: dict = {}
-        _ecm_diag_dis: dict = {}
-        params_charge    = _fit_half(Z_charge,    _ecm_diag_chg)
-        params_discharge = _fit_half(Z_discharge, _ecm_diag_dis)
-        std_charge    = _std_half(_ecm_diag_chg)
-        std_discharge = _std_half(_ecm_diag_dis)
-        # Layout matches self.state_vector_schema: means_charge | means_discharge |
-        # std_charge | std_discharge [| T_cell_K when lumped thermal]. Every block
-        # is registered in the schema; the length is derived, never hardcoded.
-        _blocks = [params_charge, params_discharge, std_charge, std_discharge]
-        if "T_cell_K" in self.state_vector_schema:
-            _blocks.append(np.array([T_cell_K], dtype=float))
-        state = np.concatenate(_blocks)
-
-        self._history[-1].update({
-            "linkk_rmse":          linkk_rmse,
-            "max_cv":              _ecm_diag_chg.get("max_cv",    float("nan")),
-            "converged":           _ecm_diag_chg.get("converged", True),
-            "ecm_params":          _ecm_diag_chg.get("ecm_params", None),
-            "drt_peaks":           drt_peaks,
-            "ecm_params_charge":   params_charge.copy(),
-            "ecm_params_discharge": params_discharge.copy(),
-            "ecm_std_charge":      std_charge.copy(),
-            "ecm_std_discharge":   std_discharge.copy(),
-            # Raw AutoEIS MCMC posterior samples behind ecm_params_{charge,discharge}
-            # above (dict: AutoEIS variable name -> (num_samples,) array), so callers
-            # comparing oracle vs. real posterior distributions (e.g.
-            # jones_oracle_study.py) don't need to refit — None if AutoEIS fell back
-            # to the Randles stub for that state.
-            "ecm_samples_charge":      _ecm_diag_chg.get("_raw_samples"),
-            "ecm_samples_discharge":   _ecm_diag_dis.get("_raw_samples"),
-            "ecm_variables_charge":    _ecm_diag_chg.get("_raw_variables", []),
-            "ecm_variables_discharge": _ecm_diag_dis.get("_raw_variables", []),
-        })
-
-        result = CycleResult(
-            state=state,
-            schema=self.state_vector_schema,
-            soh=soh,
-            soc_charge=soc_charge,
-            soc_discharge=soc_discharge,
-            capacity_ah=cap_ah,
-            fidelity=self._last_fidelity,
-            failure_kind=self._last_failure_kind,
-            protocol=np.asarray(protocol).copy(),
-            protocol_applied=protocol_applied,
-            eis_charge=(self.frequencies, Z_charge.copy()),
-            eis_discharge=(self.frequencies, Z_discharge.copy()),
-            ecm_charge=dict(zip(self._ecm_param_names, params_charge.tolist())),
-            ecm_discharge=dict(zip(self._ecm_param_names, params_discharge.tolist())),
-            ecm_std_charge=dict(zip(self._ecm_param_names, std_charge.tolist())),
-            ecm_std_discharge=dict(zip(self._ecm_param_names, std_discharge.tolist())),
-            raw=types.MappingProxyType(self._history[-1]),
-        )
-        self._last_result = result
-        return result
+        vals = [float(np.std(np.asarray(samples[k]))) for k in variables[:n_params]]
+        out[:len(vals)] = vals
+        return out
 
     # ── CSV export ───────────────────────────────────────────────────────────
 
