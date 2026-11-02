@@ -126,3 +126,45 @@ def test_corrected_integral_charge_balance_holds_for_a_differential_dfn():
     integral = next(c for n, c in checks.items() if "integral charge balance" in n)
     assert integral["value"] is not None and integral["value"] < 1e-5, integral
     assert "double-layer charge" in integral["note"]
+
+
+def _intervals(dts, resid_rel, scale=1.0):
+    """Residual charge per interval for a relative residual ``resid_rel`` (of the scale)."""
+    dt = np.asarray(dts, float)
+    return np.asarray(resid_rel, float) * scale * dt, np.full(dt.size, scale), dt
+
+
+def test_windowed_balance_reports_a_steady_violation_at_its_size():
+    q, s, dt = _intervals(np.full(200, 0.05), np.full(200, 3e-4))
+    assert validity._windowed_balance(q, s, dt, np.ones(dt.size, bool)) == pytest.approx(3e-4)
+
+
+def test_windowed_balance_does_not_amplify_a_fixed_error_in_a_tiny_step():
+    """A fixed absolute charge error in a millisecond interval is huge per interval but
+    a small share of a 1 s window; a steady violation is not diluted that way."""
+    dt = np.full(512, 1 / 128)               # binary-exact, 128 intervals per second
+    dt[150] = 1e-4
+    q = np.zeros(dt.size)
+    q[150] = 2e-8                              # fixed absolute error, independent of dt
+    s, ok = np.ones(dt.size), np.ones(dt.size, bool)
+    per_interval = np.max(np.abs(q) / (s * dt))
+    windowed = validity._windowed_balance(q, s, dt, ok)
+    assert per_interval == pytest.approx(2e-4)
+    assert windowed < 1e-7
+    assert windowed == pytest.approx(2e-8 / 1.0, rel=0.02)
+
+
+def test_windowed_balance_never_spans_an_unjudged_interval():
+    """A window restarts after an unjudged interval: a half-second run of +r, a gap, then a
+    second of -r gives r (spanning the gap would let the two runs cancel)."""
+    q, s, dt = _intervals(np.full(25, 1 / 16), np.r_[np.full(8, 1e-3), 0.0, np.full(16, -1e-3)])
+    ok = np.ones(dt.size, bool)
+    ok[8] = False                              # e.g. a current step
+    assert validity._windowed_balance(q, s, dt, ok) == pytest.approx(1e-3)
+    assert validity._windowed_balance(q, s, dt, np.ones(dt.size, bool)) < 0.1e-3   # spanning: they cancel
+
+
+def test_windowed_balance_judges_a_long_interval_on_its_own():
+    q, s, dt = _intervals([5.0, 0.01, 0.01], [2e-5, 1.0, 1.0])
+    # the 5 s interval is its own window; the 0.02 s tail never completes one
+    assert validity._windowed_balance(q, s, dt, np.ones(3, bool)) == pytest.approx(2e-5)

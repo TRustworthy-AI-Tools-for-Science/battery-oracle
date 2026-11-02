@@ -32,7 +32,7 @@ one-sided reconstruction measures how well the field is RESOLVED there. So the g
 compares two meshes (the deployed one and one refined by ``factor``) in three tiers:
 
 1. exact laws -- limits from the solver tolerance, no tuning: charge balance
-   <= 10 rtol; lithium drift <= 1 % of the lithium consumed by side reactions (the
+   <= 10 rtol (the integral one over windows of >= CHARGE_WINDOW_S); lithium drift <= 1 % of the lithium consumed by side reactions (the
    stage-B signal it would corrupt), or <= 10 rtol of the total when there is none.
    Above the limit a residual still passes if it is a tolerance error: solved again
    with 10x and 100x tighter tolerances, it shrinks >= MIN_DECADE_RATIO per decade and
@@ -96,6 +96,11 @@ def _entries(sol, name):
 #: two samples closer than this [s] are a join between solver segments (the segmented solve
 #: of exact cycler stops repeats the boundary time, ~1e-13 s apart): no time derivative across
 JOIN_DT_S = 1e-6
+#: the integral charge balance is judged over windows of at least this many seconds of
+#: consecutive judged sample intervals: per interval, a fixed absolute solver error in the
+#: stored double-layer charge is divided by the interval's length and grows without bound
+#: where the solver takes millisecond steps (CC->CV switches, CV tails)
+CHARGE_WINDOW_S = 1.0
 
 
 def _surface_form(sol) -> str:
@@ -103,6 +108,25 @@ def _surface_form(sol) -> str:
         return str(sol.all_models[0].options["surface form"])
     except Exception:                                   # noqa: BLE001
         return "false"
+
+
+def _windowed_balance(resid_q, scale, dt, ok, width: float = CHARGE_WINDOW_S) -> float:
+    """Worst |sum of the residual charge| / (max scale x duration) over windows of >= ``width``
+    s of consecutive intervals with ``ok`` (a window never spans an interval that is not
+    judged; an interval longer than ``width`` is its own window; an unfinished window at
+    the end of a run is not judged)."""
+    worst, acc, sc, dur = 0.0, 0.0, 0.0, 0.0
+    for q, s, d, good in zip(resid_q, scale, dt, ok):
+        if not good:
+            acc, sc, dur = 0.0, 0.0, 0.0
+            continue
+        acc += q
+        sc = max(sc, s)
+        dur += d
+        if dur >= width:
+            worst = max(worst, abs(acc) / (sc * dur))
+            acc, sc, dur = 0.0, 0.0, 0.0
+    return worst
 
 
 def _double_layer_charge(sol, pv, dom: str, dx) -> np.ndarray:
@@ -290,15 +314,14 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
             edges = lay["edges"]
             worst_int = 0.0
             differential = _surface_form(sol) == "differential"
-            # judged per sample interval, in charge form: the reactions' charge
-            # (trapezoid) plus the change of the charge stored in the double layer equals the
-            # applied charge. The rate form needed d(delta phi)/dt from the samples, which is
-            # inaccurate where the solver's step size jumps (a ~100x step ratio gave a
-            # residual that did not shrink with the tolerances, while the charge form did).
+            # in charge form: the reactions' charge (trapezoid) plus the change of the charge
+            # stored in the double layer equals the applied charge, judged over windows of
+            # >= CHARGE_WINDOW_S (see there). The rate form needed d(delta phi)/dt from the
+            # samples, which is inaccurate where the solver's step size jumps.
             dt = np.diff(t)
             ok = (dt >= JOIN_DT_S) & judged[:-1] & judged[1:]
             q_app = 0.5 * (i_app[1:] + i_app[:-1]) * dt
-            per_s = np.maximum(scale_i[1:], scale_i[:-1]) * np.where(ok, dt, 1.0)
+            scale_q = np.maximum(scale_i[1:], scale_i[:-1])
             for dom, sl, sign in (("negative", slice(0, nn), 1.0), ("positive", slice(nn + ns, None), -1.0)):
                 dx = np.diff(edges)[sl][:, None]
                 aj = _entries(sol, f"Sum of {dom} electrode volumetric interfacial current densities [A.m-3]")
@@ -306,12 +329,12 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
                 q = 0.5 * (total[1:] + total[:-1]) * dt
                 if differential:
                     q = q + np.diff(_double_layer_charge(sol, pv, dom, dx))
-                resid = np.abs(q - sign * q_app) / per_s
-                worst_int = max(worst_int, float(np.max(np.where(ok, resid, 0.0))))
+                worst_int = max(worst_int, _windowed_balance(q - sign * q_app, scale_q, dt, ok))
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", worst_int, "charge balance",
-                              "max over sample intervals of |charge of all reactions (main + side)"
+                              f"max over windows of >= {CHARGE_WINDOW_S:g} s of |charge of all reactions (main + side)"
                               + (" + change of the double-layer charge a C_dl delta phi" if differential else "")
-                              + " -/+ applied charge| / (max(|i_app|, i_1C) dt); solver-segment joins not judged"))
+                              + " -/+ applied charge| / (max(|i_app|, i_1C) window); solver-segment joins and "
+                              "post-step windows not judged"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", None, "charge balance",
                               f"{type(exc).__name__}: {str(exc)[:120]}"))
@@ -443,8 +466,8 @@ def judge(coarse: dict, fine: dict, *, factor: int = 2, rtol: float = 1e-6, cell
     vals = [v for v in (coarse.get("charge_integral"), fine.get("charge_integral")) if v is not None]
     out.append(_exact_law(tag, "integral charge balance (exact law)", max(vals) if vals else None, floor,
                           seq("charge_integral"),
-                          "max |sum of a j over each electrode (all reactions) -/+ i_app| / max(|i_app|, i_1C), "
-                          "both meshes; limit 10 rtol"))
+                          f"max over windows of >= {CHARGE_WINDOW_S:g} s of |charge of all reactions in each "
+                          "electrode -/+ applied charge| / (max(|i_app|, i_1C) window), both meshes; limit 10 rtol"))
     vals = [v for v in (coarse.get("lithium"), fine.get("lithium")) if v is not None]
     side = coarse.get("side_loss_rel") or 0.0
     li_lim = max(0.01 * abs(side), floor)
