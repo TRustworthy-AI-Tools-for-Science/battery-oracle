@@ -134,7 +134,7 @@ ecm: {fitter: autoeis, circuit: "R1-[R2,P3]-[R4,P5]"}   # requires [autoeis]
 
 ### Calibrated cell
 
-After running the [calibration](calibration.md), transplant the fitted scales:
+After calibrating in `battery-forecast`, transplant the fitted scales:
 
 ```yaml
 degradation:

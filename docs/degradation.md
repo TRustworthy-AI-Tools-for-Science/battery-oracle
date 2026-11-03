@@ -31,8 +31,8 @@ the package's design decisions:
    overpotential. Anything that raises $\eta$ at fixed current — including the
    calibration knob `kinetics_scale`, which *deliberately* lowers the
    exchange-current density — accelerates SEI growth as a side effect. This
-   confounding is why a separate `sei_rate_scale` exists (see
-   [Calibration](calibration.md)).
+   confounding is why a separate `sei_rate_scale` exists (calibrated in
+   `battery-forecast`).
 2. **Regime switching.** `sei_rate_scale` multiplies $D_{\mathrm{EC}}$ (on top of a
    universal ×0.25 electrolyte-quality correction; see
    [Divergences](divergences.md)). Suppressing $D_{\mathrm{EC}}$ only slows growth

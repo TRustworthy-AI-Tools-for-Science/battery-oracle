@@ -43,10 +43,6 @@ autoeis = [
 drt = [
     "tqdm",
 ]
-# Oracle calibration engine (battery_oracle.tune / battery-oracle-tune CLI).
-tune = [
-    "optuna>=3.6.1",
-]
 # Jupyter kernel for the notebooks/ directory. The `battery-oracle-venv` kernel
 # launches `.venv/bin/python3 -m ipykernel_launcher`, so ipykernel must be in the
 # venv itself or the kernel fails to start. ipywidgets keeps Optuna/tqdm progress
@@ -60,7 +56,7 @@ rich = [
     "rich>=13.0.0",
 ]
 # Documentation site (Sphinx + furo + notebook rendering). Heavy runtime extras
-# (autoeis/optuna/drt) are lazy-imported in source, so autodoc mocks them.
+# (autoeis/drt) are lazy-imported in source, so autodoc mocks them.
 docs = [
     "sphinx>=8.0",
     "furo>=2024.8.6",
@@ -69,10 +65,6 @@ docs = [
     "sphinxcontrib-bibtex>=2.6",
     "linkify-it-py>=2.0",
 ]
-
-[project.scripts]
-battery-oracle-tune = "battery_oracle.tune:main"
-battery-oracle-tune-plot = "battery_oracle.tune_plots:main"
 
 [project.urls]
 Homepage = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle"
@@ -84,21 +76,12 @@ Issues = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/iss
 # Installed by a bare `uv sync` (see [tool.uv] default-groups). The self-referential
 # `battery-oracle[...]` entries make the dev environment carry the extras the normal
 # workflow imports, so a plain `uv sync` yields a venv that can actually run the
-# tune engine and the notebooks.
-#
-# Why this matters: `uv sync` prunes anything it does not resolve. When `tune` was
-# not wired in here, syncing silently *removed* optuna, and `battery_oracle.tune`
-# then failed inside Optuna's RDB storage with a misleading Alembic error --
-# "Path doesn't exist: .../optuna/storages/_rdb/alembic ... use the 'init' command".
-# Optuna ships those migration scripts inside its own package, so an absent optuna
-# looks exactly like an absent migrations folder. Do not "fix" that by running
-# `alembic init`; it means the extra is not installed.
+# notebooks. `uv sync` prunes anything it does not resolve.
 #
 # `autoeis` and `drt` stay opt-in: both are heavy, and the oracle degrades cleanly
 # without them (Randles stub / DRT peaks omitted). `docs` is only for the Sphinx
 # build. Add those per-invocation with `uv sync --extra autoeis`, etc.
 dev = [
-    "battery-oracle[tune]",
     "battery-oracle[notebook]",
     "battery-oracle[rich]",
     "pytest>=8.0",
@@ -108,7 +91,7 @@ dev = [
 [tool.uv]
 # Groups installed by a bare `uv sync`. `uv sync` prunes whatever it does not
 # resolve, so anything missing here is actively *uninstalled* on the next sync.
-# `dev` pulls in the `tune`/`notebook`/`rich` extras (see [dependency-groups]).
+# `dev` pulls in the `notebook`/`rich` extras (see [dependency-groups]).
 default-groups = ["dev"]
 
 [tool.uv.sources]

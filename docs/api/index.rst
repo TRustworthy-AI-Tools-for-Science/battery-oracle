@@ -52,12 +52,3 @@ Experiment configuration
    battery_oracle.run_experiment
    battery_oracle.load_default_ecm_circuit
 
-Calibration
------------
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   battery_oracle.calibrate_oracle
-   battery_oracle.write_oracle_config
-   battery_oracle.compute_real_targets

@@ -15,7 +15,6 @@ active-learning loop.
 Optional extras:
   * ``[autoeis]`` — Bayesian ECM fitting (falls back to a fast Randles stub without it)
   * ``[drt]``     — distribution-of-relaxation-times peaks (hybrid-drt)
-  * ``[tune]``    — Optuna calibration engine (``battery_oracle.tune``)
 
 On a CPU-only machine with jax[cuda12] installed, set ``JAX_PLATFORMS=cpu`` before
 importing (jax otherwise fails probing the CUDA plugin).
@@ -46,13 +45,6 @@ from battery_oracle.failures import FailureKind, OracleFailure
 from battery_oracle.oracle import make_pybamm_candidates, PyBaMMOracle
 from battery_oracle.state import CycleResult, STATE_VECTOR_SCHEMA, state_vector_schema
 from battery_oracle.protocol import Protocol
-from battery_oracle.tune import (
-    calibrate_oracle,
-    compute_real_targets,
-    write_calibration_summary,
-    write_oracle_config,
-)
-from battery_oracle.tune_plots import plot_eis_comparison, plot_tune_oracle_summary
 
 try:
     __version__ = _pkg_version("battery-oracle")
@@ -73,12 +65,6 @@ __all__ = [
     "DEFAULT_CIRCUIT",
     "ECM_PARAM_NAMES",
     "ACTION_FEATURE_NAMES",
-    "calibrate_oracle",
-    "write_oracle_config",
-    "write_calibration_summary",
-    "compute_real_targets",
-    "plot_tune_oracle_summary",
-    "plot_eis_comparison",
     "load_experiment_config",
     "oracle_kwargs_from_config",
     "protocols_from_config",

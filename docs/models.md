@@ -87,7 +87,7 @@ $V$ contains only the OCPs and the (uniform) reaction overpotentials.
 | Electrolyte correction is first-order only (SPMe) | Terminal voltage; EIS diffusion tail | Above ≈1C on this parameterisation the correction degrades; the oracle clamps protocols to a validated envelope (see [Numerical stability](numerics.md)) |
 | Isothermal at `temperature_K` | All rate constants via their Arrhenius forms evaluated at the fixed ambient $T$ | Self-heating at high C-rate; a temperature *sweep* here means a family of isothermal simulations, not a thermal model |
 | Bruggeman effective media | Electrolyte transport | Anisotropic/heterogeneous microstructures |
-| Chen2020 parameterisation | Everything | Chemistry other than NMC811/graphite; the calibration scales ([Calibration](calibration.md)) absorb *some* cell-to-cell variation, not chemistry changes |
+| Chen2020 parameterisation | Everything | Chemistry other than NMC811/graphite; the calibration scales (calibrated in `battery-forecast`) absorb *some* cell-to-cell variation, not chemistry changes |
 
 ## Impedance and EIS Computation
 

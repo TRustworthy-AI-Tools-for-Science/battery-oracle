@@ -68,7 +68,7 @@ The parameter set is modified at construction (`_build_degradation_config`):
 | Exchange-current densities × `kinetics_scale` | **function wrapper**, not scalar overwrite | Chen2020's $j_0(c_e, c_s^{\mathrm{surf}}, T)$ are callables; wrapping preserves concentration/temperature dependence while rescaling magnitude. Needed because research coin cells show ~10× larger relative charge-transfer arcs than the automotive-grade Chen2020 pouch |
 | Plating parameter block borrowed from OKane2022 | copy-if-absent | Chen2020 lacks plating constants entirely; only genuinely missing keys are copied so caller-supplied values win |
 | `Initial plated lithium concentration` = 0 | override | OKane2022's formation-cycle plated Li strips during early low-C cycling and drives the plating-loss integrator negative on a fresh cell |
-| Plating rate / dead-Li decay constants × calibration scales | override | the two orthogonalised calibration levers (see [Calibration](calibration.md)) |
+| Plating rate / dead-Li decay constants × calibration scales | override | the two orthogonalised calibration levers (calibrated in `battery-forecast`) |
 
 > Note: scaling `SEI kinetic rate constant [m.s-1]`
 (the parameter the `ec reaction limited` submodel reads for kinetics) was

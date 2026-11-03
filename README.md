@@ -22,7 +22,7 @@ digital twin.
 
 ```bash
 pip install battery-oracle                    # core (PyBaMM + Randles-stub ECM)
-pip install "battery-oracle[autoeis,tune]"     # + Bayesian ECM fitting + Optuna calibration
+pip install "battery-oracle[autoeis]"          # + Bayesian ECM fitting
 ```
 
 For development (editable install, all extras), managed with
@@ -31,7 +31,6 @@ For development (editable install, all extras), managed with
 ```bash
 uv sync                          # core (PyBaMM + Randles-stub ECM)
 uv sync --extra autoeis          # + Bayesian ECM fitting (AutoEIS)
-uv sync --extra tune             # + Optuna calibration engine
 uv sync --extra drt              # + DRT peaks (hybrid-drt)
 ```
 
@@ -41,7 +40,6 @@ uv sync --extra drt              # + DRT peaks (hybrid-drt)
 |------------|---------------------------------------------------------------|----------------------------------------------|
 | `autoeis`  | Bayesian ECM fitting via AutoEIS                              | falls back to the fast analytic Randles stub |
 | `drt`      | distribution-of-relaxation-times peaks (`hybrid-drt`)         | DRT peaks omitted                            |
-| `tune`     | Optuna calibration engine (`battery_oracle.tune`)             | calibration unavailable                      |
 | `rich`     | prettier logging handler                                      | plain stdlib logging                         |
 
 ## Usage
@@ -104,33 +102,11 @@ Full docs (guides, API reference, and the SPM/SPMe/DFN + numerical-stability
 notebooks) are published at
 **<https://trustworthy-ai-tools-for-science.github.io/battery-oracle/>**.
 
-## Calibration (tune-oracle)
+## Calibration
 
-The `[tune]` extra provides an Optuna Bayesian-optimisation engine that fits the
-oracle's degradation hyperparameters (kinetics / SEI / dead-Li / plating scales)
-to a real cell's measured EIS/capacity behaviour. It is dataset-agnostic: it
-operates on a plain **cache dict** (measured ECM-per-cycle + capacity +
-protocols) and precomputed real-target metrics.
-
-```python
-from battery_oracle import calibrate_oracle, write_oracle_config, compute_real_targets
-
-targets = compute_real_targets(cache)
-out = calibrate_oracle(cache, targets, preset="accelerated", n_trials=35)
-write_oracle_config("config_oracle_mycell.yml", "mydataset", "accelerated",
-                    cell_id="C01", n_cycles=len(cache["cycles"]),
-                    best=out["best"], real_targets=targets, all_results=out["results"])
-```
-
-CLI (reads the cache/targets from JSON):
-
-```bash
-battery-oracle-tune --cache real_ecm.json --output-config config_oracle_mycell.yml \
-    --preset accelerated --n-trials 35
-```
-
-Building the cache from a specific dataset (e.g. jones2022) is the caller's job;
-see the `battery_forecast` jones2022 adapter for an example.
+Fitting the oracle's degradation scales to a measured cell (the Optuna search and
+its plots) lives in `battery-forecast` (`battery_forecast.oracle_tune`); see its
+`docs/oracle_calibration.md`.
 
 ## Physics scope
 

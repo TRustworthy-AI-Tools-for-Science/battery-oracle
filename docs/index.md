@@ -19,9 +19,8 @@ $$
 
 returning the same featurised observable a real cell would, with degradation
 (SEI growth, lithium plating, dead-lithium accumulation) integrated across calls.
-It is a drop-in battery source for active-learning loops, and ships an Optuna
-calibration engine (single-objective TPE and a multi-objective NSGA-II workflow)
-for fitting the degradation physics to a measured cell.
+It is a drop-in battery source for active-learning loops. Calibrating the
+degradation physics to a measured cell is done downstream, in `battery-forecast`.
 
 These docs assume familiarity with porous-electrode theory, DAE integration, and
 impedance analysis. Three pages carry the load-bearing caveats: the
@@ -50,7 +49,6 @@ protocol
 models
 divergences
 degradation
-calibration
 numerics
 ```
 
@@ -58,7 +56,6 @@ numerics
 :maxdepth: 1
 :caption: Notebooks
 
-notebooks/01_oracle_tuning_calibration
 notebooks/02_demonstrations
 ```
 
