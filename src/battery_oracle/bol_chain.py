@@ -16,7 +16,7 @@ cell, the only truly relaxed state. From that one solution:
 * each EIS spectrum is the model linearised at the simulated state where each
   frequency was measured (window = between consecutive measured time stamps on
   the cycling clock), plus the lock-in drift leakage from the simulated dV/dt
-  (:mod:`battery_oracle.eis_nonstationary`).
+  (:mod:`battery_oracle.eis`).
 
 Model (``CHAIN_OPTIONS``): DFN with the EIS voltage/current variables (PyBOP's
 ``EISSimulator.set_up_for_eis``); double layer (``surface form: differential``);
@@ -779,7 +779,7 @@ class ChainModel:
         if self._model is None:
             import pybamm
 
-            from battery_oracle.eis_nonstationary import eis_model
+            from battery_oracle.eis import eis_model
             self._model = eis_model(pybamm.lithium_ion.DFN, self.options)
             apply_voltage_limits(self._model)
             # electrolyte floor as a solver EVENT: a candidate whose electrolyte runs out
@@ -868,7 +868,7 @@ class ChainModel:
     def _solve(self, inputs: dict) -> dict:
         import pybamm
 
-        from battery_oracle.eis_nonstationary import linearised_impedance
+        from battery_oracle.eis import drift_leakage, impedance_scale, linearised_impedance
         from battery_oracle.patches import single_thread_solver
 
         t0 = time.time()
@@ -970,9 +970,7 @@ class ChainModel:
 
         spectra = []
         model = self.model()
-        v_scale = getattr(model.variables["Voltage [V]"], "scale", 1)
-        i_scale = getattr(model.variables["Current [A]"], "scale", 1)
-        z_scale = _f(pv.evaluate(v_scale / i_scale))
+        z_scale = impedance_scale(model, pv)
         amp = float(self.data.get("amplitude_a", 5e-3))
         if states:
             cap_t = np.array(sorted(states))
@@ -993,8 +991,7 @@ class ChainModel:
                 t_at, ys = ts[idx], state_at(t_lin)
             z = linearised_impedance(sim, t_at, ys, s["f"], z_scale,
                                      inputs={CUT_INPUT: 0.0})
-            dvdt = (np.interp(hi, ts, v_all) - np.interp(lo, ts, v_all)) / np.maximum(hi - lo, 1e-9)
-            z = z - 2.0 * dvdt / (2 * np.pi * np.asarray(s["f"], float) * amp)
+            z = z + drift_leakage(ts, v_all, lo, hi, s["f"], amp)
             spectra.append(z)
         diag["solve_s"] = round(time.time() - t0, 2)
         out = {"records": records, "spectra": spectra, "diag": diag, "offsets": off.tolist()}

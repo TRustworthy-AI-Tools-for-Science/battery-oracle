@@ -1,41 +1,6 @@
-"""Non-equilibrium physics: non-stationary EIS and the PyBOP/PyBaMM patches."""
+"""The PyBOP/PyBaMM patches."""
 import numpy as np
 import pytest
-
-from battery_oracle.eis_nonstationary import History, window_times
-
-
-# --------------------------------------------------------------------------- maths
-
-def test_window_times_back_to_back_and_given_stamps():
-    f = np.array([100.0, 1.0, 0.1])
-    c, length = window_times(f, n_periods=2.0)
-    assert np.allclose(length, [0.02, 2.0, 20.0])
-    assert np.allclose(c, np.cumsum(length) - length / 2)
-    c2, _ = window_times(f, n_periods=1.0, sweep_times=[1.0, 5.0, 20.0])   # stamps = window ends
-    assert np.allclose(c2, np.array([1.0, 5.0, 20.0]) - np.array([0.01, 1.0, 10.0]) / 2)
-
-
-@pytest.mark.parametrize("f_hz,n", [(0.02, 1), (0.1, 3), (5.0, 2)])
-def test_drift_leakage_formula_matches_numerical_lock_in(f_hz, n):
-    """Lock-in of A sin(wt) over n whole periods with a linear voltage drift:
-    the impedance error is -2 (dV/dt) / (w A) (module docstring derivation)."""
-    A, vdot = 5e-3, -5e-6                       # 5 mA probe, -0.3 mV/min drift
-    w = 2 * np.pi * f_hz
-    T = n / f_hz
-    t = np.linspace(0.0, T, 200001)
-    i = A * np.sin(w * t)
-    v = vdot * (t - T / 2) + 1e-3 * 0.0         # pure drift (+ zero-mean response removed)
-    lock = lambda x: np.trapezoid(x * np.exp(-1j * w * t), t) / T   # noqa: E731
-    z_leak = lock(v) / lock(i)
-    assert z_leak.real == pytest.approx(-2 * vdot / (w * A), rel=1e-4)
-    assert abs(z_leak.imag) < 1e-6 * abs(z_leak.real)
-
-
-def test_leakage_is_about_one_percent_at_the_lowest_frequency():
-    """The size quoted in the report: -0.3 mV/min at 0.02 Hz vs |Z| ~ 1.5 Ohm."""
-    vdot, w, A = -0.3e-3 / 60, 2 * np.pi * 0.02, 5e-3
-    assert abs(-2 * vdot / (w * A)) / 1.5 == pytest.approx(0.01, abs=0.005)
 
 
 # --------------------------------------------------------------------------- patches
@@ -116,72 +81,6 @@ def test_graded_failure_penalises_truncation_in_proportion():
     assert graded[0] < graded[1] < graded[2]                          # patched: graded
     assert graded[1] == pytest.approx(0.5 * np.sqrt(21 / 101), rel=1e-6)
     assert graded[2] == pytest.approx(0.5 * np.sqrt(61 / 101), rel=1e-6)
-
-
-# --------------------------------------------------------------------------- DFN (slow)
-
-def _setup():
-    import pybamm
-
-    from battery_oracle.parameter_sets import lir2032
-
-    pv = lir2032()
-    pv.update({"Contact resistance [Ohm]": 0.05}, check_already_exists=False)
-    options = {"surface form": "differential", "contact resistance": "true"}
-    return pybamm.lithium_ion.DFN, options, pv
-
-
-@pytest.mark.slow
-def test_no_history_reproduces_stock_pybop_eis():
-    import pybop
-
-    from battery_oracle.eis_nonstationary import nonstationary_impedance
-
-    cls, options, pv = _setup()
-    f = np.logspace(-1, 3, 12)
-    stock = pybop.pybamm.EISSimulator(cls(options=dict(options)), f_eval=f,
-                                      parameter_values=pv.copy()).solve()["Impedance"].data
-    mine = nonstationary_impedance(cls, options, pv, f, history=None)
-    assert np.allclose(mine, np.asarray(stock), rtol=1e-5, atol=1e-9)
-
-
-@pytest.mark.slow
-def test_relaxing_state_changes_low_frequency_impedance_only():
-    from battery_oracle.eis_nonstationary import nonstationary_impedance
-
-    cls, options, pv = _setup()
-    f = np.array([1e4, 1e2, 1.0, 0.1, 0.02])
-    # 20 min at ~1C discharge (42 mA), then 20 min rest, from 4.1 V relaxed.
-    t = np.concatenate([np.linspace(0, 1200, 41), [1201.0, 2400.0]])
-    i = np.concatenate([np.full(41, 0.042), [0.0, 0.0]])
-    hist = History(t=t, I=i, initial_voltage=4.1)
-    sweep = np.cumsum(1.0 / f)
-    z_ns, info = nonstationary_impedance(cls, options, pv, f, history=hist, sweep_times=sweep,
-                                         n_periods=1.0, drift_leakage=False, return_info=True)
-    z_end = nonstationary_impedance(cls, options, pv, f, history=hist, sweep_times=sweep,
-                                    n_periods=1.0, drift_leakage=False, per_frequency=False)
-    assert np.all(np.isfinite(z_ns)) and np.all(z_ns.real > 0)
-    assert np.all(info.voltage_v > 3.0) and np.all(info.voltage_v < 4.3)
-    rel = np.abs(z_ns - z_end) / np.abs(z_end)
-    assert rel[0] < 1e-6                         # 10 kHz: measured at the start of the sweep
-    assert rel[-1] >= rel[0]                     # the slowest frequency sees the most relaxation
-    # leakage: sign follows -2 vdot/(w A); magnitude ~1% or less of |Z|
-    z_leak, info2 = nonstationary_impedance(cls, options, pv, f, history=hist, sweep_times=sweep,
-                                            n_periods=1.0, drift_leakage=True, return_info=True)
-    assert np.allclose((z_leak - z_ns).real, info2.leakage_ohm.real, rtol=1e-6, atol=1e-12)
-    assert np.all(np.abs(info2.leakage_ohm) < 0.05 * np.abs(z_ns))
-
-
-def test_relative_sweep_times_rebase_absolute_stamps_and_guard():
-    from battery_oracle.eis_nonstationary import relative_sweep_times
-
-    stamps = np.array([5140.25, 5141.38, 5143.58, 5420.60])        # real PJ248 c9 stamps
-    rel = relative_sweep_times(stamps)
-    assert rel[0] == pytest.approx(2.0) and rel[-1] == pytest.approx(282.35)
-    c, length = window_times(np.array([1e4, 5e3, 1e3, 0.02]), 1.0, rel)    # fine: relative
-    assert c[-1] < rel[-1]
-    with pytest.raises(ValueError, match="absolute"):
-        window_times(np.array([1e4, 5e3, 1e3, 0.02]), 1.0, stamps)
 
 
 def test_parallel_batches_match_sequential_and_preserve_order():

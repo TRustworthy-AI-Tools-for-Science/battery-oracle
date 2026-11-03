@@ -49,6 +49,14 @@ from battery_oracle._eis.noise import (
 from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
 from battery_oracle.degradation import _build_degradation_config
 from battery_oracle.ecm import _AUTOEIS_AVAILABLE, autoeis_ecm, randles_stub_ecm
+from battery_oracle.eis import (
+    drift_leakage,
+    eis_model,
+    equilibrium_impedance,
+    impedance_scale,
+    linearised_impedance,
+    sweep_windows,
+)
 from battery_oracle.failures import FailureKind, OracleFailure, _SilentTruncation
 from battery_oracle.oracle_config import OracleConfig
 from battery_oracle.parameter_sets import check_chemistry, resolve_parameter_values
@@ -396,19 +404,10 @@ class PyBaMMOracle:
 
     def _init_eis_sweep(self, cfg: OracleConfig) -> None:
         """Sweep timing of the frequency grid (non-stationary EIS windows)."""
-        # Sweep timing (jones2022: 57 points, 20 kHz -> 0.02 Hz in ~297 s, high to
-        # low): each frequency's window = periods / f + a fixed instrument overhead
-        # (1.15 s/point reproduces the measured sweep length). Offsets from the sweep
-        # start, in self.frequencies order.
-        _f = np.asarray(self.frequencies, float)
-        _order = np.argsort(-_f)
-        _len = float(cfg.eis_sweep_periods) / _f[_order] + float(cfg.eis_sweep_overhead_s)
-        _end = np.cumsum(_len)
-        self._eis_win_lo = np.empty_like(_f)
-        self._eis_win_hi = np.empty_like(_f)
-        self._eis_win_lo[_order] = _end - _len
-        self._eis_win_hi[_order] = _end
-        self._eis_sweep_s = float(_end[-1]) + 1.0
+        # Offsets from the sweep start, in self.frequencies order.
+        self._eis_win_lo, self._eis_win_hi = sweep_windows(
+            self.frequencies, cfg.eis_sweep_periods, cfg.eis_sweep_overhead_s)
+        self._eis_sweep_s = float(self._eis_win_hi.max()) + 1.0
 
     def _init_parameter_values(self, cfg: OracleConfig, parameter_values) -> None:
         """Parameter values and model options: chemistry, preset, BOL fit, contact
@@ -947,17 +946,13 @@ class PyBaMMOracle:
         under current at a voltage cut-off, has no consistent zero-current initial
         state; the double layer relaxes in milliseconds, so nothing is lost.) Frequency ``k`` is linearised at
         the simulated state at the centre of its window (``self._eis_win_lo/hi``
-        after the rest; :func:`battery_oracle.eis_nonstationary.linearised_impedance`)
+        after the rest; :func:`battery_oracle.eis.linearised_impedance`)
         and the lock-in leakage of the simulated voltage drift is added. Same physics
         as stage A (:mod:`battery_oracle.bol_chain`). The cycling model itself keeps
         its algebraic surface form: the double layer only matters at EIS frequencies,
         and in the experiment's instantaneous current steps it makes the DAE fail.
         """
         import pybamm
-        from pybop.pybamm.eis_simulator import EISSimulator
-
-        from battery_oracle.eis_nonstationary import linearised_impedance
-
         pv = eis_pv.copy()
         pv["Ambient temperature [K]"] = self._pv["Ambient temperature [K]"]
         pv["Current function [A]"] = 0.0
@@ -968,9 +963,7 @@ class PyBaMMOracle:
         def _measure(start_state, t0: float):
             """Double-layer EIS model from ``start_state`` at rest time ``t0``, to t_end."""
             opts = {**self._deg_opts, "surface form": "differential"}
-            model = _MODEL_CLS(options=opts)
-            model.set_initial_conditions_from(start_state, inplace=True)
-            model = EISSimulator.set_up_for_eis(None, model)
+            model = eis_model(_MODEL_CLS, opts, initial_state=start_state)
             # dense output in the first second after t0: the stiffest part of the rest
             rel = np.unique(np.concatenate([[0.0, t_end - t0], np.logspace(-4, 0, 9),
                                             np.linspace(0.0, max(self._rest_s - t0, 1.0), 61),
@@ -1014,13 +1007,10 @@ class PyBaMMOracle:
         v = np.asarray(sol["Voltage [V]"].entries, float)
         idx = np.clip(np.searchsorted(ts, lin), 0, ts.size - 1)
         self._eis_lin_ok = bool(np.allclose(ts[idx], lin, atol=1e-6))
-        v_scale = getattr(model.variables["Voltage [V]"], "scale", 1)
-        i_scale = getattr(model.variables["Current [A]"], "scale", 1)
-        z_scale = float(np.asarray(pv.evaluate(v_scale / i_scale)).ravel()[0])
-        z = linearised_impedance(sim, ts[idx], np.asarray(sol.y)[:, idx], self.frequencies, z_scale)
-        dvdt = (np.interp(hi, ts, v) - np.interp(lo, ts, v)) / np.maximum(hi - lo, 1e-9)
+        z = linearised_impedance(sim, ts[idx], np.asarray(sol.y)[:, idx], self.frequencies,
+                                 impedance_scale(model, pv))
         amp_a = self._eis_amplitude_mA / 1000.0 * self._cap_scale
-        leak = -2.0 * dvdt / (2 * np.pi * np.asarray(self.frequencies, float) * amp_a)
+        leak = drift_leakage(ts, v, lo, hi, self.frequencies, amp_a)
         self._last_eis_leakage = leak            # real [Ohm]; recorded in the history row
         return z + leak
 
@@ -1458,11 +1448,7 @@ class PyBaMMOracle:
             if d_r > 0.0:
                 Z = (Z.real + d_r) + 1j * Z.imag
             return self._add_eis_noise(Z)
-        sim = _pb.EISSimulation(
-            _MODEL_CLS(options={"surface form": "differential"}),
-            parameter_values=eis_pv,
-        )
-        Z = np.array(sim.solve(self.frequencies, initial_soc=soc)["Impedance [Ohm]"])
+        Z = equilibrium_impedance(_MODEL_CLS, eis_pv, self.frequencies, soc)
         # Arrhenius temperature dependence (#11): the EIS model is solved
         # isothermally, so temperature enters analytically. Scale the
         # charge-transfer arc by exp(E_a/R (1/T - 1/T_ref)) and the

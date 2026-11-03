@@ -36,7 +36,7 @@ def test_cycling_states_map_onto_the_eis_model(opts, pv_fn):
     SEI growth, partially reversible plating)."""
     import pybamm
 
-    from battery_oracle.eis_nonstationary import eis_model, linearised_impedance
+    from battery_oracle.eis import eis_model, impedance_scale, linearised_impedance
 
     pv = pv_fn()
     f = np.logspace(3, -1, 9)
@@ -53,8 +53,7 @@ def test_cycling_states_map_onto_the_eis_model(opts, pv_fn):
     m = eis_model(pybamm.lithium_ion.DFN, opts)
     sim = pybamm.Simulation(m, parameter_values=pv0)
     sim.build()
-    z_scale = float(np.asarray(pv0.evaluate(getattr(m.variables["Voltage [V]"], "scale", 1)
-                                             / getattr(m.variables["Current [A]"], "scale", 1))).ravel()[0])
+    z_scale = impedance_scale(m, pv0)
     z_map = linearised_impedance(sim, np.zeros(f.size), np.tile(np.vstack([y, v[None, :], [[0.0]]]), (1, f.size)),
                                  f, z_scale)
 

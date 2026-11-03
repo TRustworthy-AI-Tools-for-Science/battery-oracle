@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from battery_oracle.eis_nonstationary import windows_from_stamps
+from battery_oracle.eis import windows_from_stamps
 
 
 def _pv():
