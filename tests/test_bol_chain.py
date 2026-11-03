@@ -22,13 +22,13 @@ def test_windows_from_stamps_follow_measured_times():
 
 
 def test_initial_stoichiometries_hold_voltage_and_lithium():
-    from battery_oracle.bol_chain import _ocp_evaluators, electrode_capacities_ah, initial_stoichiometries
+    from battery_oracle.bol_chain import ocp_evaluators, electrode_capacities_ah, initial_stoichiometries
 
     pv = _pv()
     q_n, q_p = electrode_capacities_ah(pv)
     for v0, f_li in [(3.96, 0.85), (3.70, 0.95), (4.10, 0.80)]:
         x, y = initial_stoichiometries(pv, v0, f_li, 296.15)
-        un, up = _ocp_evaluators(pv, 296.15)
+        un, up = ocp_evaluators(pv, 296.15)
         assert abs(up(y) - un(x) - v0) < 1e-6
         assert abs(x * q_n + y * q_p - f_li * q_p) < 1e-9
         assert 0 < x < 1 and 0 < y < 1
@@ -159,11 +159,11 @@ def test_lico2_ocp_is_monotone_and_ocp_data_range_reports_the_data():
     (0, 1) for an analytic OCP and the x range of an interpolated one (synthetic table)."""
     import pybamm
 
-    from battery_oracle.bol_chain import _ocp_evaluators
+    from battery_oracle.bol_chain import ocp_evaluators
     from battery_oracle.parameter_sets import ocp_data_range
 
     pv = _pv()
-    _, up = _ocp_evaluators(pv, 298.15)
+    _, up = ocp_evaluators(pv, 298.15)
     ys = np.linspace(0.01, 0.99, 197)
     u = np.array([up(y) for y in ys])
     assert np.all(np.diff(u) < 0), ys[1:][np.diff(u) >= 0]
@@ -215,10 +215,10 @@ def test_literature_bounds_and_derived_microstructure():
 def test_ocv_balance_recovers_a_known_balance():
     """Rest voltages generated from a known balance with the set's own OCPs are mapped
     back to that balance (two-step stage A)."""
-    from battery_oracle.bol_chain import _ocp_evaluators, ocv_balance
+    from battery_oracle.bol_chain import ocp_evaluators, ocv_balance
 
     pv = _pv()
-    un, up = _ocp_evaluators(pv, 298.15)
+    un, up = ocp_evaluators(pv, 298.15)
     x0, y0, qn, qp = 0.70, 0.55, 0.050, 0.100
     qs = np.array([0.0, 0.01, 0.02, 0.03, 0.035, 0.015, 0.0, 0.025, 0.005])
     t = np.arange(qs.size) * 2000.0
@@ -253,10 +253,10 @@ def test_ocv_balance_constrained_stays_in_literature():
     when the rest voltages alone prefer a graphite smaller than the cell (PJ248 with
     Ai2020); the unconstrained fit is reported beside it."""
     from battery_oracle.bol_chain import (GRAPHITE_USABLE, LI_FRACTION, LITERATURE_BOUNDS, NP_PRACTICAL_BOUNDS,
-                                          Q_P_RATIO, _ocp_evaluators, ocv_balance)
+                                          Q_P_RATIO, ocp_evaluators, ocv_balance)
 
     pv = _pv()
-    un, up = _ocp_evaluators(pv, 298.15)
+    un, up = ocp_evaluators(pv, 298.15)
     q_meas = 0.042
     x0, y0, qn, qp = 0.95, 0.50, 0.040, 0.110          # unphysical truth: practical N:P 0.89, Q_p ratio 2.6
     qs = np.array([0.0, 0.01, 0.02, 0.03, 0.035, 0.015, 0.0])

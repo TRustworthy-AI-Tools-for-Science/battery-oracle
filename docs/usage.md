@@ -45,7 +45,7 @@ not means).
 
 ## The history record
 
-Each call appends a dict to `oracle._history` — the primary interface for analysis.
+Each call appends a dict to `oracle.history` — the primary interface for analysis.
 Key fields:
 
 | Key | Content |

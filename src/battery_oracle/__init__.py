@@ -25,7 +25,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
-from battery_oracle._circuit import (
+from battery_oracle.circuit import (
     ACTION_FEATURE_NAMES,
     DEFAULT_CIRCUIT,
     ECM_PARAM_NAMES,

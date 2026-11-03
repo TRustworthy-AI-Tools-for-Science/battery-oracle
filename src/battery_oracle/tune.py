@@ -58,7 +58,7 @@ from typing import Any
 
 import numpy as np
 
-from battery_oracle._circuit import _param_labels_from_circuit, circuit_roles
+from battery_oracle.circuit import param_labels_from_circuit, circuit_roles
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
 from battery_oracle.ecm import randles_stub_ecm
 from battery_oracle.failures import OracleFailure
@@ -83,7 +83,7 @@ def _ecm_indices(circuit: str) -> tuple[int, list[int]]:
     Derived from the circuit string (no hard-coded 9-element assumption): the ohmic
     R is the resistor not inside any parallel ``[R, CPE]`` arc; the arc Rs are the
     resistors inside the brackets. Returns ``(ohmic_index, [arc_r_indices])`` into
-    the ECM parameter vector whose labels are ``_param_labels_from_circuit(circuit)``.
+    the ECM parameter vector whose labels are ``param_labels_from_circuit(circuit)``.
     """
     labels, ohmic, pairs, _ = circuit_roles(circuit)
     return labels.index(ohmic), [labels.index(r) for r, _ in pairs]
@@ -92,7 +92,7 @@ def _ecm_indices(circuit: str) -> tuple[int, list[int]]:
 def _reconstruct_ecm_spectrum(circuit: str, params, frequencies: np.ndarray) -> np.ndarray:
     """Complex impedance Z(f) of *circuit* at *params*, evaluated on *frequencies*.
 
-    ``params`` is an ECM parameter vector in :func:`_param_labels_from_circuit`
+    ``params`` is an ECM parameter vector in :func:`param_labels_from_circuit`
     order — the layout the cache's ``ecm_charge``/``ecm_discharge`` and the oracle's
     ``ecm_params_*`` both use. Used to turn a stored ECM back into a Nyquist curve
     for the oracle-vs-real EIS plot. Maps the vector to AutoEIS's own label order
@@ -101,7 +101,7 @@ def _reconstruct_ecm_spectrum(circuit: str, params, frequencies: np.ndarray) -> 
     """
     import autoeis as ae
 
-    values = dict(zip(_param_labels_from_circuit(circuit),
+    values = dict(zip(param_labels_from_circuit(circuit),
                       np.asarray(params, dtype=float)))
     ordered = np.array([values[lbl] for lbl in ae.parser.get_parameter_labels(circuit)],
                        dtype=float)
@@ -477,7 +477,7 @@ def run_oracle_candidate(
             break
         n_completed += 1
 
-        h = oracle._history[-1]
+        h = oracle.history[-1]
         soh = h.get("end_soh")
         if soh is not None:
             soh_history.append(float(soh))
@@ -535,11 +535,11 @@ def run_oracle_candidate(
         "oracle_soh_history":   soh_history,
         # Fallbacks / compensations: emergency-solver retries, the protocol clamps
         # applied (current/duration bounds), the failure.
-        "degraded_cycles":      sum(h.get("failure_kind") is not None for h in oracle._history),
+        "degraded_cycles":      sum(h.get("failure_kind") is not None for h in oracle.history),
         "clamp_signatures":     sorted(oracle._warned_clamp_signatures),
         "failure":              failure_info,
-        "oracle_step_summary":  summarise_steps(oracle_step_rows(oracle._history)),
-        "_oracle_step_rows":    oracle_step_rows(oracle._history),
+        "oracle_step_summary":  summarise_steps(oracle_step_rows(oracle.history)),
+        "_oracle_step_rows":    oracle_step_rows(oracle.history),
         # Simulated spectra per completed cycle (for comparison with the real ones).
         "_oracle_spectra": {"frequencies": np.asarray(oracle.frequencies, float).tolist(),
                             "cycles": [{"charge": (np.asarray(h["Z_charge_real"])
@@ -549,7 +549,7 @@ def run_oracle_candidate(
                                         "eis_mode_used": h.get("eis_mode_used"),
                                         "leak_charge": h.get("eis_leakage_charge"),
                                         "leak_discharge": h.get("eis_leakage_discharge")}
-                                       for h in oracle._history if "Z_charge_real" in h]},
+                                       for h in oracle.history if "Z_charge_real" in h]},
     }
 
 
@@ -620,9 +620,9 @@ def collect_eis_comparison(
     panels = []
     for lbl in sel_labels:
         pos = sel_pos[lbl]
-        if pos >= len(oracle._history):
+        if pos >= len(oracle.history):
             continue
-        h = oracle._history[pos]
+        h = oracle.history[pos]
         oz_re = np.asarray(h["Z_charge_real"], dtype=float)
         oz_nim = np.asarray(h["Z_charge_neg_imag"], dtype=float)
         try:
@@ -712,7 +712,7 @@ def run_crate_sensitivity_probe(
                 log.warning("  [crate-probe @ %.0f mA] EOL/solver failure after %d cycle(s): %s",
                             c_rate_ma, len(soh) - 1, exc)
                 break
-            soh.append(float(oracle._history[-1]["end_soh"]))
+            soh.append(float(oracle.history[-1]["end_soh"]))
         if len(soh) < 2:
             return None
         return (soh[0] - soh[-1]) / (len(soh) - 1)

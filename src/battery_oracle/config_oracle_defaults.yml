@@ -110,7 +110,7 @@ ecm:
   # no circuit is passed. A fallback only: in practice pass the experiment's circuit
   # (ecm.circuit, or the study's own, e.g. battery_forecast's datasets.yaml
   # default_circuit) so the oracle's state vectors match the real experiment's
-  # featurization. Matches battery_oracle._circuit.DEFAULT_CIRCUIT.
+  # featurization. Matches battery_oracle.circuit.DEFAULT_CIRCUIT.
   # AutoEIS labels: Rx=resistor, Pxw=CPE admittance, Pxn=CPE exponent, so this
   # 7-parameter circuit -> [R1,R2,P3w,P3n,R4,P5w,P5n].
   circuit: "R1-[R2,P3]-[R4,P5]"

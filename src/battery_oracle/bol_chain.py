@@ -363,7 +363,7 @@ def lithium_fraction(pv) -> float:
     return (x * q_n + y * q_p) / q_p
 
 
-def _ocp_evaluators(pv, temperature_k: float):
+def ocp_evaluators(pv, temperature_k: float):
     """``U_n(x)``, ``U_p(y)`` [V] exactly as the model evaluates them (incl. the
     entropic correction at ``temperature_k``)."""
     import pybamm
@@ -386,7 +386,7 @@ def initial_stoichiometries(pv, voltage: float, li_fraction: float,
 
     q_n, q_p = electrode_capacities_ah(pv)
     q_li = li_fraction * q_p
-    un, up = _ocp_evaluators(pv, temperature_k)
+    un, up = ocp_evaluators(pv, temperature_k)
     eps = 1e-6
     x_lo = max(eps, (q_li - (1 - eps) * q_p) / q_n)
     x_hi = min(1 - eps, (q_li - eps * q_p) / q_n)
@@ -551,7 +551,7 @@ def _ocv_balance_fit(data: dict, pv, temperature_k: float, n_starts: int, seed: 
 
     pts = history_rest_points(data)
     q, v = pts[:, 0], pts[:, 1]
-    un, up = _ocp_evaluators(pv, temperature_k)
+    un, up = ocp_evaluators(pv, temperature_k)
     sto = np.linspace(1e-4, 1 - 1e-4, 2001)
     un_t, up_t = np.array([un(x) for x in sto]), np.array([up(x) for x in sto])
     (xl, xh), (yl, yh) = ocp_data_range(pv, "negative"), ocp_data_range(pv, "positive")
@@ -854,7 +854,7 @@ class ChainModel:
             self._cache.move_to_end(key)
             return self._cache[key]
         try:
-            res = self._solve(inputs)
+            res = self.solve_full(inputs)
         except Exception as exc:                # noqa: BLE001 - becomes a failed candidate
             import traceback
             log.debug("chain solve failed: %s", traceback.format_exc())
@@ -865,7 +865,7 @@ class ChainModel:
             self._cache.popitem(last=False)
         return res
 
-    def _solve(self, inputs: dict) -> dict:
+    def solve_full(self, inputs: dict) -> dict:
         import pybamm
 
         from battery_oracle.eis import drift_leakage, impedance_scale, linearised_impedance
@@ -1374,7 +1374,7 @@ def evaluate_chain(data: dict, pv_base, inputs: dict, chain: ChainModel | None =
         chain.keep_solution, chain.x_factor = True, x_factor
         chain.rtol, chain.atol = rtol * tol_scale, atol * tol_scale
         try:
-            r = chain._solve({**chain.fixed, **inputs})
+            r = chain.solve_full({**chain.fixed, **inputs})
         except Exception as exc:                # noqa: BLE001
             r = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         finally:
@@ -1452,7 +1452,7 @@ def ocv_limits_in_data(pv, li_fraction: float, temperature_k: float, *, margin: 
     """
     q_n, q_p = electrode_capacities_ah(pv)
     q_li = li_fraction * q_p
-    un, up = _ocp_evaluators(pv, temperature_k)
+    un, up = ocp_evaluators(pv, temperature_k)
     (x_lo, x_hi), (y_lo, y_hi) = ocp_data_range(pv, "negative"), ocp_data_range(pv, "positive")
     x_lo, x_hi, y_lo, y_hi = x_lo + margin, x_hi - margin, y_lo + margin, y_hi - margin
 

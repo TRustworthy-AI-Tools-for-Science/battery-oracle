@@ -34,7 +34,7 @@ plus a per-cycle ambient temperature slot. Used only when
 ``PyBaMMOracle(use_temperature_protocol=True)``; the 6-D default is unchanged."""
 
 
-def _param_labels_from_circuit(circuit: str) -> list[str]:
+def param_labels_from_circuit(circuit: str) -> list[str]:
     """AutoEIS parameter labels for a circuit string (no autoeis import needed).
 
     Walks elements left-to-right: ``R{i}`` -> ``['R{i}']``, ``C{i}`` -> ``['C{i}']``,
@@ -50,7 +50,7 @@ def _param_labels_from_circuit(circuit: str) -> list[str]:
     return labels
 
 
-ECM_PARAM_NAMES = _param_labels_from_circuit(DEFAULT_CIRCUIT)
+ECM_PARAM_NAMES = param_labels_from_circuit(DEFAULT_CIRCUIT)
 """Canonical ECM parameter names derived from ``DEFAULT_CIRCUIT``."""
 
 
@@ -64,7 +64,7 @@ class CircuitRoles(NamedTuple):
 
 def circuit_roles(circuit: str) -> CircuitRoles:
     """Labels, ohmic resistor, arcs and series CPEs of ``circuit``."""
-    labels = _param_labels_from_circuit(circuit)
+    labels = param_labels_from_circuit(circuit)
     pairs = randles_pairs_from_circuit(circuit)
     arc_rs = {r for r, _ in pairs}
     arc_ps = {p for _, p in pairs}

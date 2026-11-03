@@ -89,7 +89,8 @@ def _check(name, value, key, note=""):
     return {"name": name, "status": status, "value": float(value), "limit": [lo, hi], "note": note}
 
 
-def _entries(sol, name):
+def entries(sol, name):
+    """Values of solution variable ``name`` as a float array."""
     return np.asarray(sol[name].entries, dtype=float)
 
 
@@ -136,8 +137,8 @@ def _double_layer_charge(sol, pv, dom: str, dx) -> np.ndarray:
     import pybamm
 
     D = dom.capitalize()
-    dphi = _entries(sol, f"{D} electrode surface potential difference [V]")
-    a_s = _entries(sol, f"{D} electrode surface area to volume ratio [m-1]")
+    dphi = entries(sol, f"{D} electrode surface potential difference [V]")
+    a_s = entries(sol, f"{D} electrode surface area to volume ratio [m-1]")
     cdl = pv[f"{D} electrode double-layer capacity [F.m-2]"]
     try:
         cdl = float(cdl)
@@ -148,9 +149,9 @@ def _double_layer_charge(sol, pv, dom: str, dx) -> np.ndarray:
     return (a_s * cdl * dphi * dx).sum(axis=0)
 
 
-def _layout(sol, pv):
+def layout(sol, pv):
     """Node and edge positions of the electrolyte mesh [m] and the two interfaces."""
-    n = [_entries(sol, f"x_{d} [m]").shape[0] for d in ("n", "s", "p")]
+    n = [entries(sol, f"x_{d} [m]").shape[0] for d in ("n", "s", "p")]
     L = [float(pv[f"{d} thickness [m]"]) for d in ("Negative electrode", "Separator", "Positive electrode")]
     starts = np.cumsum([0.0] + L[:-1])
     edges = np.unique(np.concatenate([s + np.linspace(0.0, l, k + 1) for s, l, k in zip(starts, L, n)]))
@@ -241,13 +242,13 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
     tag = f"validity[{cell}] " if cell else "validity "
     out: list[dict] = []
     try:
-        lay = _layout(sol, pv)
+        lay = layout(sol, pv)
     except Exception as exc:                            # noqa: BLE001
         return [{"name": tag + "electrolyte mesh layout", "status": "fail", "value": None,
                  "limit": None, "note": f"{type(exc).__name__}: {str(exc)[:160]}"}]
     area = (float(pv["Electrode height [m]"]) * float(pv["Electrode width [m]"])
             * float(pv["Number of electrodes connected in parallel to make a cell"]))
-    i_app = _entries(sol, "Current [A]").ravel() / area
+    i_app = entries(sol, "Current [A]").ravel() / area
     i_1c = float(pv["Nominal cell capacity [A.h]"]) / area
     scale_i = np.maximum(np.abs(i_app), i_1c)
     c0 = float(pv["Initial concentration in electrolyte [mol.m-3]"])
@@ -260,7 +261,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
                       ("c_e", "Electrolyte concentration [mol.m-3]"),
                       ("phi_e", "Electrolyte potential [V]")):
         try:
-            arr = _entries(sol, name)
+            arr = entries(sol, name)
             pos = _positions(arr, lay)
             fields[key] = (arr, pos) if pos is not None else None
         except Exception:                               # noqa: BLE001
@@ -297,7 +298,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         worst = 0.0
         try:
             for dom, sl in (("Negative", slice(0, nn)), ("Positive", slice(nn + ns, None))):
-                i_s = _entries(sol, f"{dom} electrode current density [A.m-2]")
+                i_s = entries(sol, f"{dom} electrode current density [A.m-2]")
                 if i_s.shape[0] == ie_nodes[sl].shape[0] + 1:     # stored on the domain's edges
                     i_s = 0.5 * (i_s[:-1] + i_s[1:])
                 res = np.abs(ie_nodes[sl] + i_s - i_app[None, :]) / scale_i[None, :]
@@ -324,7 +325,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
             scale_q = np.maximum(scale_i[1:], scale_i[:-1])
             for dom, sl, sign in (("negative", slice(0, nn), 1.0), ("positive", slice(nn + ns, None), -1.0)):
                 dx = np.diff(edges)[sl][:, None]
-                aj = _entries(sol, f"Sum of {dom} electrode volumetric interfacial current densities [A.m-3]")
+                aj = entries(sol, f"Sum of {dom} electrode volumetric interfacial current densities [A.m-3]")
                 total = (aj * dx).sum(axis=0)
                 q = 0.5 * (total[1:] + total[:-1]) * dt
                 if differential:
@@ -364,11 +365,11 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
     # 4. lithium conservation
     try:
         names = list(sol.all_models[0].variables.keys())
-        held = _entries(sol, "Total lithium in particles [mol]") + _entries(sol, "Total lithium in electrolyte [mol]")
-        lost = _entries(sol, "Total lithium lost to side reactions [mol]")
+        held = entries(sol, "Total lithium in particles [mol]") + entries(sol, "Total lithium in electrolyte [mol]")
+        lost = entries(sol, "Total lithium lost to side reactions [mol]")
         for n in names:
             if n.startswith("Loss of lithium due to loss of active material") and n.endswith("[mol]"):
-                lost = lost + _entries(sol, n)
+                lost = lost + entries(sol, n)
         total = held + lost
         drift = float(np.max(np.abs(total - total[0])) / abs(total[0]))
         out.append(_check(tag + "lithium conserved", drift, "lithium drift",
@@ -403,8 +404,8 @@ def measure(sol, pv) -> dict:
             m[key] = c["value"]
             m[key + "_note"] = c["note"]
     try:
-        tot = (_entries(sol, "Total lithium in particles [mol]") + _entries(sol, "Total lithium in electrolyte [mol]"))
-        side = _entries(sol, "Total lithium lost to side reactions [mol]")
+        tot = (entries(sol, "Total lithium in particles [mol]") + entries(sol, "Total lithium in electrolyte [mol]"))
+        side = entries(sol, "Total lithium lost to side reactions [mol]")
         m["side_loss_rel"] = float((side[-1] - side[0]) / (tot[0] + side[0]))
     except Exception:                                   # noqa: BLE001
         m["side_loss_rel"] = None

@@ -20,7 +20,7 @@ class FakeChain:
     def solve(self, inputs):
         return {"diag": {}, "records": [[3.9]], "spectra": [], "offsets": [0.0]}
 
-    def _solve(self, inputs):
+    def solve_full(self, inputs):
         self.tols.append(self.rtol)
         return {"diag": {}, "records": [[3.9]], "spectra": [], "offsets": [0.0], "solution": self.rtol,
                 "parameter_values": None}

@@ -17,12 +17,12 @@ from battery_oracle import (
     randles_stub_ecm,
     state_vector_schema,
 )
-from battery_oracle._circuit import _param_labels_from_circuit
+from battery_oracle.circuit import param_labels_from_circuit
 from battery_oracle.oracle_config import OracleConfig
 
 
 def test_constants_consistent():
-    assert ECM_PARAM_NAMES == _param_labels_from_circuit(DEFAULT_CIRCUIT)
+    assert ECM_PARAM_NAMES == param_labels_from_circuit(DEFAULT_CIRCUIT)
     assert len(ACTION_FEATURE_NAMES) == 6
     assert DEFAULT_CIRCUIT.startswith("R1")
 
@@ -37,7 +37,7 @@ def test_make_candidates():
 def test_construct_and_circuit_params():
     o = PyBaMMOracle()
     assert o._circuit == DEFAULT_CIRCUIT
-    assert o._ecm_param_names == _param_labels_from_circuit(DEFAULT_CIRCUIT)
+    assert o._ecm_param_names == param_labels_from_circuit(DEFAULT_CIRCUIT)
     assert len(o._action_names) == 6
 
 
@@ -136,7 +136,7 @@ def test_randles_stub_shape():
     Z = 0.05 + 0.02 / (1 + 1j * freq / 10.0)
     out = randles_stub_ecm(freq, Z.real, Z.imag)
     # one DEFAULT_CIRCUIT half per state (charge, discharge)
-    assert out.shape == (2 * len(_param_labels_from_circuit(DEFAULT_CIRCUIT)),)
+    assert out.shape == (2 * len(param_labels_from_circuit(DEFAULT_CIRCUIT)),)
     assert np.all(np.isfinite(out))
 
 
@@ -338,7 +338,7 @@ def test_dfn_solver_failure_fails_loudly():
 
 def test_state_vector_schema_is_derived():
     # 4 blocks of the default circuit's parameter count, all derived (no literals).
-    n = len(_param_labels_from_circuit(DEFAULT_CIRCUIT))
+    n = len(param_labels_from_circuit(DEFAULT_CIRCUIT))
     sch = state_vector_schema(n)
     assert list(sch) == ["means_charge", "means_discharge", "std_charge", "std_discharge"]
     assert sch["means_charge"] == (0, n)

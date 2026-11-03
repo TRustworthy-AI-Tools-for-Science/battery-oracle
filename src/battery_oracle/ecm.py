@@ -7,8 +7,8 @@ import threading
 
 import numpy as np
 
-from battery_oracle._circuit import DEFAULT_CIRCUIT as _PROJECT_CIRCUIT
-from battery_oracle._circuit import circuit_roles
+from battery_oracle.circuit import DEFAULT_CIRCUIT as _PROJECT_CIRCUIT
+from battery_oracle.circuit import circuit_roles
 
 log = logging.getLogger(__name__)
 

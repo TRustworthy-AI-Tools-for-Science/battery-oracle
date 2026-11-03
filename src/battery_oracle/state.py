@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from battery_oracle._circuit import DEFAULT_CIRCUIT as _PROJECT_CIRCUIT
-from battery_oracle._circuit import _param_labels_from_circuit
+from battery_oracle.circuit import DEFAULT_CIRCUIT as _PROJECT_CIRCUIT
+from battery_oracle.circuit import param_labels_from_circuit
 from battery_oracle.failures import FailureKind
 from battery_oracle.protocol import Protocol
 
@@ -26,7 +26,7 @@ def state_vector_schema(
 
     The layout is *derived*, never hardcoded (see the project's
     no-hardcoded-vector-lengths rule): per-half width is ``n_params`` (=
-    ``len(_param_labels_from_circuit(circuit))``), and which blocks exist — and
+    ``len(param_labels_from_circuit(circuit))``), and which blocks exist — and
     therefore the total length — is a function of the active feature flags:
 
         [means_charge | means_discharge]                      always
@@ -51,7 +51,7 @@ def state_vector_schema(
 
 # Default-circuit instance, for documentation / downstream that only needs the
 # shipped layout. Per-oracle layout lives on ``self.state_vector_schema``.
-STATE_VECTOR_SCHEMA = state_vector_schema(len(_param_labels_from_circuit(_PROJECT_CIRCUIT)))
+STATE_VECTOR_SCHEMA = state_vector_schema(len(param_labels_from_circuit(_PROJECT_CIRCUIT)))
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +65,7 @@ class CycleResult:
     ``PyBaMMOracle.__call__`` (the hard array-in/array-out compatibility
     contract consumed by the downstream AL/DMDc loop) returns only
     :attr:`state`; ``run_cycle`` returns the full ``CycleResult`` so a novice
-    caller doesn't have to reach into the private ``oracle._history`` list
-    (see :attr:`PyBaMMOracle.history`) to get the SOH, SOC, EIS spectra, or
+    caller doesn't have to search :attr:`PyBaMMOracle.history` to get the SOH, SOC, EIS spectra, or
     fitted ECM parameters behind a given state vector.
 
     Parameters

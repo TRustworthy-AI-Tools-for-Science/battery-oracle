@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import yaml
 
-from battery_oracle._circuit import DEFAULT_CIRCUIT
+from battery_oracle.circuit import DEFAULT_CIRCUIT
 from battery_oracle.oracle_config import OracleConfig, settings_from_yaml
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES
 
@@ -46,7 +46,7 @@ _ORACLE_CONFIG_NAME = "config_oracle_defaults.yml"
 # 6-D protocol field order in the experiment-YAML's field-name spelling. The
 # ORDER is not redefined here -- it is derived by iterating
 # battery_oracle.protocol.PROTOCOL_FIELD_NAMES (itself locked to
-# _circuit.ACTION_FEATURE_NAMES by an assertion in protocol.py), so there is
+# circuit.ACTION_FEATURE_NAMES by an assertion in protocol.py), so there is
 # exactly one place the 6-D slot order is decided; this dict only supplies the
 # YAML's own field-name spelling for each canonical slot.
 _YAML_FIELD_NAME_BY_SLOT = {

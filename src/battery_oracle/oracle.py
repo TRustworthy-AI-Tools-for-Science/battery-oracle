@@ -23,17 +23,17 @@ import pandas as pd
 import pybamm as _pb
 from scipy.signal import find_peaks as _find_peaks
 
-from battery_oracle._circuit import (
+from battery_oracle.circuit import (
     ACTION_FEATURE_NAMES as _ACTION_NAMES,
 )
-from battery_oracle._circuit import (
+from battery_oracle.circuit import (
     ACTION_FEATURE_NAMES_TEMPERATURE as _ACTION_NAMES_TEMPERATURE,
 )
-from battery_oracle._circuit import (
+from battery_oracle.circuit import (
     DEFAULT_CIRCUIT as _PROJECT_CIRCUIT,
 )
-from battery_oracle._circuit import (
-    _param_labels_from_circuit as _param_labels_from_circuit,
+from battery_oracle.circuit import (
+    param_labels_from_circuit as param_labels_from_circuit,
 )
 from battery_oracle._eis.kk import linkk_rmse as _linkk_rmse
 from battery_oracle._eis.noise import (
@@ -254,11 +254,11 @@ class PyBaMMOracle:
     def _init_interface(self, cfg: OracleConfig, ecm_model_fn) -> None:
         """ECM circuit and fitter, action names and the returned-state layout."""
         # ECM circuit fitted to every spectrum + the protocol/action feature
-        # names. Default to the package canonical circuit (battery_oracle._circuit
+        # names. Default to the package canonical circuit (battery_oracle.circuit
         # DEFAULT_CIRCUIT); a study pipeline passes its own so featurized records
         # line up. ecm_param_names are derived from the circuit (AutoEIS labels).
         self._circuit = cfg.circuit or _PROJECT_CIRCUIT
-        self._ecm_param_names = _param_labels_from_circuit(self._circuit)
+        self._ecm_param_names = param_labels_from_circuit(self._circuit)
         # 6-D actions by default; 7-D (adds T_ambient_K) only when the opt-in
         # temperature protocol is enabled. An explicit action_names= wins.
         self._use_temperature_protocol = bool(cfg.use_temperature_protocol)
@@ -1658,7 +1658,7 @@ class PyBaMMOracle:
         Parameters
         ----------
         history :
-            Oracle call history (``oracle._history`` or a per-policy copy).
+            Oracle call history (``oracle.history`` or a per-policy copy).
         out_path :
             Destination CSV path.  Parent directories are created if absent.
         cell_id :
@@ -1680,7 +1680,7 @@ class PyBaMMOracle:
             The path that was written.
         """
         circuit = circuit or _PROJECT_CIRCUIT
-        ecm_param_names = _param_labels_from_circuit(circuit)
+        ecm_param_names = param_labels_from_circuit(circuit)
         action_names = list(action_names) if action_names else list(_ACTION_NAMES)
 
         # Sequence-level symmetric-arc flip correction, matching the tsdatagen
@@ -1689,7 +1689,7 @@ class PyBaMMOracle:
         # recompute corrected means here from the retained MCMC samples. Falls
         # back to the raw ecm_params when samples were not retained (e.g. exp2
         # strips them for memory).
-        from battery_oracle._circuit import fix_parameter_flips_dicts
+        from battery_oracle.circuit import fix_parameter_flips_dicts
         corrected: dict[tuple[int, str], np.ndarray] = {}
         for state_label, samples_key, vars_key in (
             ("charge",    "ecm_samples_charge",    "ecm_variables_charge"),

@@ -4,11 +4,11 @@ Mirrors the discipline already used for the oracle's *output* (see
 ``state.state_vector_schema``) on its *input*: :class:`PyBaMMOracle.__call__`
 and :meth:`PyBaMMOracle.run_cycle` also accept a bare 6-D (or 7-D) ``np.ndarray``
 (the array interface battery-forecast uses), whose slot order is
-``_circuit.ACTION_FEATURE_NAMES``. ``Protocol`` gives that vector a name and a
+``circuit.ACTION_FEATURE_NAMES``. ``Protocol`` gives that vector a name and a
 unit for each slot.
 
 Deliberately import-light (``dataclasses``, ``numpy``, and
-``battery_oracle._circuit`` only) so it has no PyBaMM/AutoEIS dependency and
+``battery_oracle.circuit`` only) so it has no PyBaMM/AutoEIS dependency and
 cannot participate in an import cycle with ``battery_oracle.oracle``.
 """
 from __future__ import annotations
@@ -18,12 +18,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from battery_oracle._circuit import ACTION_FEATURE_NAMES
+from battery_oracle.circuit import ACTION_FEATURE_NAMES
 
 # ---------------------------------------------------------------------------
 # Single canonical slot-order mapping: dataclass field name <-> the existing
 # ACTION_FEATURE_NAMES entry it corresponds to. ACTION_FEATURE_NAMES (defined
-# in _circuit.py) remains the one source of truth for slot ORDER; this tuple
+# in circuit.py) remains the one source of truth for slot ORDER; this tuple
 # just attaches unit-explicit dataclass field names to it, and the assertions
 # below make any future reordering of ACTION_FEATURE_NAMES fail loudly here
 # instead of silently desyncing Protocol from the rest of the package (see
@@ -39,7 +39,7 @@ _PROTOCOL_SLOTS: tuple[tuple[str, str], ...] = (
 )
 assert len(_PROTOCOL_SLOTS) == len(ACTION_FEATURE_NAMES), (
     "Protocol._PROTOCOL_SLOTS must have exactly one entry per "
-    "_circuit.ACTION_FEATURE_NAMES slot."
+    "circuit.ACTION_FEATURE_NAMES slot."
 )
 assert tuple(action_name for _, action_name in _PROTOCOL_SLOTS) == tuple(ACTION_FEATURE_NAMES), (
     "Protocol._PROTOCOL_SLOTS order must match _circuit.ACTION_FEATURE_NAMES exactly "
@@ -49,7 +49,7 @@ assert tuple(action_name for _, action_name in _PROTOCOL_SLOTS) == tuple(ACTION_
 
 PROTOCOL_FIELD_NAMES: tuple[str, ...] = tuple(field_name for field_name, _ in _PROTOCOL_SLOTS)
 """``Protocol`` dataclass field names (excluding ``T_ambient_K``) in canonical
-slot order -- derived from :data:`battery_oracle._circuit.ACTION_FEATURE_NAMES`,
+slot order -- derived from :data:`battery_oracle.circuit.ACTION_FEATURE_NAMES`,
 never redefined independently. Other modules that need the protocol field
 order (e.g. ``experiment._PROTOCOL_FIELDS``) should derive from this tuple
 rather than hardcoding their own copy of the order."""

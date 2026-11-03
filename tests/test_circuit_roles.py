@@ -1,7 +1,7 @@
 """Circuit-string parsing: element roles used by the ECM seeds and the tuner."""
 import pytest
 
-from battery_oracle._circuit import circuit_roles
+from battery_oracle.circuit import circuit_roles
 
 
 @pytest.mark.parametrize("circuit,ohmic,pairs,series", [

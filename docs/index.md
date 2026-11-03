@@ -37,7 +37,7 @@ oracle = PyBaMMOracle(degradation_preset="accelerated")
 oracle.reset()
 for protocol in make_pybamm_candidates():   # 6-D protocol grid
     oracle(protocol)                         # cycling → EIS → ECM
-    print(oracle._history[-1]["end_soh"])
+    print(oracle.history[-1]["end_soh"])
 ```
 
 ```{toctree}

@@ -21,7 +21,7 @@ from battery_oracle import (
     make_pybamm_candidates,
     randles_stub_ecm,
 )
-from battery_oracle._circuit import ACTION_FEATURE_NAMES
+from battery_oracle.circuit import ACTION_FEATURE_NAMES
 from battery_oracle._eis.noise import (
     add_flicker_noise,
     add_white_noise,
