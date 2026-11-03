@@ -30,12 +30,13 @@ impedance analysis. Three pages carry the load-bearing caveats: the
 reproductions.
 
 ```{code-block} python
-from battery_oracle import PyBaMMOracle, make_pybamm_candidates
+import numpy as np
+from battery_oracle import PyBaMMOracle
 
 oracle = PyBaMMOracle(degradation_preset="accelerated")
 oracle.reset()
-for protocol in make_pybamm_candidates():   # 6-D protocol grid
-    oracle(protocol)                         # cycling → EIS → ECM
+for c_mA in (68.0, 100.0, 140.0):          # 6-D protocol: I1, I2 [mA], t1, t2 [h], I_d [mA], t_d [h]
+    oracle(np.array([c_mA, c_mA / 2, 1.0, 0.5, 100.0, 1.0]))   # cycling → EIS → ECM
     print(oracle.history[-1]["end_soh"])
 ```
 

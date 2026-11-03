@@ -18,10 +18,10 @@ from battery_oracle import (
     OracleFailure,
     Protocol,
     PyBaMMOracle,
-    make_pybamm_candidates,
     randles_stub_ecm,
 )
 from battery_oracle.circuit import ACTION_FEATURE_NAMES
+from conftest import PROTOCOL
 from battery_oracle._eis.noise import (
     add_flicker_noise,
     add_white_noise,
@@ -77,7 +77,7 @@ def test_call_returns_bare_ndarray_and_protocol_array_equivalence():
     with a Protocol produces the same state as calling with the equivalent
     ndarray, given the same seed (two fresh oracles so neither call's
     degradation/RNG state leaks into the other)."""
-    protocol_arr = make_pybamm_candidates(n_candidates=1)[0]
+    protocol_arr = PROTOCOL.copy()
 
     o1 = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False, seed=0)
     o1.reset()
@@ -105,7 +105,7 @@ def test_call_returns_bare_ndarray_and_protocol_array_equivalence():
 def test_run_cycle_returns_cycle_result():
     oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False, seed=0)
     oracle.reset()
-    protocol = make_pybamm_candidates(n_candidates=1)[0]
+    protocol = PROTOCOL.copy()
     try:
         result = oracle.run_cycle(protocol)
     except OracleFailure as exc:

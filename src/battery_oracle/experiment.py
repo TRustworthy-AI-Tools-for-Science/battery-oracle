@@ -348,7 +348,7 @@ def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> lis
         except OracleFailure as exc:
             # Record a terminal audit row so the failure mode is preserved in the
             # returned history (a successful step appends its own row; a failing
-            # step raises before appending). save_to_csv .get(...)-guards the ECM
+            # step raises before appending). battery-forecast's save_oracle_csv .get(...)-guards the ECM
             # fields, so this row exports as an ECM-zero row carrying failure_kind.
             fk = exc.failure_kind
             oracle.history.append({

@@ -1,7 +1,6 @@
 """Battery oracle: PyBaMM DFN simulations + EIS + ECM fitting.
 
 PyBaMMOracle            — stateful battery oracle (DFN → EIS → ECM); see ``run_cycle``
-make_pybamm_candidates  — build a 6-D protocol candidate grid for the CLI
 oracle_parameter_values — the parameter values an oracle simulates
 
 Its parts: settings ``oracle_config``, failures ``failures``, output layout and
@@ -17,9 +16,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pybamm as _pb
 from scipy.signal import find_peaks as _find_peaks
 
@@ -46,7 +43,6 @@ from battery_oracle._eis.noise import (
 from battery_oracle._eis.noise import (
     add_white_noise as _add_white_noise,
 )
-from battery_oracle._plotting import SLIPSTREAM_COLORS, slipstream
 from battery_oracle.degradation import _build_degradation_config
 from battery_oracle.ecm import _AUTOEIS_AVAILABLE, autoeis_ecm, randles_stub_ecm
 from battery_oracle.eis import (
@@ -630,7 +626,7 @@ class PyBaMMOracle:
         degradation bookkeeping) not promoted to named ``CycleResult``
         fields. Cleared by :meth:`reset`. Prefer :attr:`last_result` /
         :meth:`run_cycle`'s return value for the common case — this is for
-        diagnostics across the whole run (``save_to_csv``, ``plot_diagnostics``).
+        diagnostics across the whole run (battery-forecast exports and plots it).
         """
         return self._history
 
@@ -640,6 +636,31 @@ class PyBaMMOracle:
         call (or ``__call__``, which delegates to it); ``None`` before the
         first call or immediately after :meth:`reset`."""
         return self._last_result
+
+    @property
+    def circuit(self) -> str:
+        """ECM circuit the state vector's ECM blocks are fitted against."""
+        return self._circuit
+
+    @property
+    def action_names(self) -> list[str]:
+        """Names of the protocol (action) slots, in order."""
+        return list(self._action_names)
+
+    @property
+    def last_solution(self):
+        """PyBaMM solution of the most recent cycle (``None`` before the first)."""
+        return self._prev_solution
+
+    @property
+    def degradation_options(self) -> dict:
+        """PyBaMM model options of the cycling model (SEI, plating, thermal, ...)."""
+        return dict(self._deg_opts)
+
+    @property
+    def dod_lam_scale(self) -> float:
+        """Scale of the oracle's depth-of-discharge LAM term (0 = off)."""
+        return self._dod_lam_scale
 
     def _build_native_state(self) -> None:
         """(Re)create the cycling model and the primary/emergency IDAKLUSolvers.
@@ -1632,427 +1653,6 @@ class PyBaMMOracle:
         vals = [float(np.std(np.asarray(samples[k]))) for k in variables[:n_params]]
         out[:len(vals)] = vals
         return out
-
-    # ── CSV export ───────────────────────────────────────────────────────────
-
-    @staticmethod
-    def save_to_csv(
-        history: list[dict],
-        out_path: str | Path,
-        cell_id: str = "oracle_sim",
-        circuit: str | None = None,
-        action_names: list[str] | None = None,
-    ) -> Path:
-        """Save oracle history to CSV matching the jones2022 featurized record format.
-
-        Columns: cell_id, cycle, circuit,
-        {param}_{state}_{moment} (= n_params × 4 moments × 2 states, all derived
-        from the circuit — e.g. 7 params → 56 columns for the default circuit),
-        {action} (= len(action_names)), then trailing diagnostics failure_kind,
-        fidelity. No column count is hardcoded.
-
-        Variance, kurtosis, and skew are filled with 0.0 to preserve the
-        BattMAP-aligned featurized layout — the ECM posterior std is surfaced in
-        the returned state vector / history (``ecm_std_*``), not in these columns.
-
-        Parameters
-        ----------
-        history :
-            Oracle call history (``oracle.history`` or a per-policy copy).
-        out_path :
-            Destination CSV path.  Parent directories are created if absent.
-        cell_id :
-            Value written to the ``cell_id`` column.
-        circuit :
-            ECM circuit the history's ``ecm_params_*`` were fitted against.
-            Defaults to the package canonical circuit (``_PROJECT_CIRCUIT``) —
-            pass the oracle's own ``oracle._circuit`` if it was constructed
-            with a non-default ``circuit=`` kwarg, otherwise the exported
-            column names/count will not match the actual ECM parameters.
-        action_names :
-            Protocol/action column names. Defaults to the package canonical
-            names (``_ACTION_NAMES``) — pass ``oracle._action_names`` if the
-            oracle was constructed with custom ``action_names=``.
-
-        Returns
-        -------
-        Path
-            The path that was written.
-        """
-        circuit = circuit or _PROJECT_CIRCUIT
-        ecm_param_names = param_labels_from_circuit(circuit)
-        action_names = list(action_names) if action_names else list(_ACTION_NAMES)
-
-        # Sequence-level symmetric-arc flip correction, matching the tsdatagen
-        # featurization. The per-call ecm_params means cannot be corrected at
-        # call time (the swap is only resolvable across the whole cycle list), so
-        # recompute corrected means here from the retained MCMC samples. Falls
-        # back to the raw ecm_params when samples were not retained (e.g. exp2
-        # strips them for memory).
-        from battery_oracle.circuit import fix_parameter_flips_dicts
-        corrected: dict[tuple[int, str], np.ndarray] = {}
-        for state_label, samples_key, vars_key in (
-            ("charge",    "ecm_samples_charge",    "ecm_variables_charge"),
-            ("discharge", "ecm_samples_discharge", "ecm_variables_discharge"),
-        ):
-            dicts, idxs, var_lists = [], [], []
-            for j, h in enumerate(history):
-                s = h.get(samples_key)
-                if s:
-                    dicts.append({k: np.asarray(v).copy() for k, v in s.items()})
-                    idxs.append(j)
-                    var_lists.append(h.get(vars_key) or list(s.keys()))
-            if len(dicts) >= 2:
-                fix_parameter_flips_dicts(dicts, circuit)
-                for d, j, variables in zip(dicts, idxs, var_lists):
-                    corrected[(j, state_label)] = np.array(
-                        [float(np.median(d[v])) for v in variables]
-                    )
-
-        rows = []
-        for hj, h in enumerate(history):
-            row: dict = {
-                "cell_id": cell_id,
-                "cycle":   h["call_idx"],
-                "circuit": circuit,
-            }
-            for state_label, key in (
-                ("charge",    "ecm_params_charge"),
-                ("discharge", "ecm_params_discharge"),
-            ):
-                params = corrected.get((hj, state_label))
-                if params is None:
-                    params = h.get(key, np.zeros(len(ecm_param_names)))
-                for i, pname in enumerate(ecm_param_names):
-                    v = float(params[i]) if i < len(params) else 0.0
-                    row[f"{pname}_{state_label}_mean"]     = v
-                    row[f"{pname}_{state_label}_var"]      = 0.0
-                    row[f"{pname}_{state_label}_kurtosis"] = 0.0
-                    row[f"{pname}_{state_label}_skew"]     = 0.0
-            proto = h.get("protocol", np.zeros(len(action_names)))
-            for i, col in enumerate(action_names):
-                row[col] = float(proto[i]) if i < len(proto) else 0.0
-            # Trailing diagnostic columns (outside the jones2022 featurized block):
-            # per-step fidelity + machine-readable failure classification + cell
-            # temperature. An audit hook reads these to correlate failures with
-            # calibration checks.
-            fk = h.get("failure_kind")
-            row["failure_kind"] = fk.value if isinstance(fk, FailureKind) else (fk or "")
-            row["fidelity"] = h.get("fidelity", "full")
-            row["T_cell_K"] = h.get("T_cell_K", float("nan"))
-            rows.append(row)
-
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(rows).to_csv(out_path, index=False)
-        return out_path
-
-    # ── Diagnostic plots ─────────────────────────────────────────────────────
-
-    def plot_diagnostics(
-        self,
-        output_dir: str | Path,
-        label: str = "",
-        real_soh: np.ndarray | None = None,
-    ) -> None:
-        """Save diagnostic figures for the current oracle run.
-
-        * ``last_cycle.png``   — terminal voltage + current, one trace per cycle
-        * ``capacity_sei.png`` — stacked area of cumulative capacity loss by mechanism
-        * ``soh.png``          — state of health vs oracle call (oracle only, unless
-          ``real_soh`` is given)
-
-        When ``label`` is non-empty, filenames are prefixed with ``{label}_``.
-
-
-        Parameters
-        ----------
-        output_dir : str or Path
-            Directory in which to save the figures (created if absent).
-        label : str
-            Prefix for all figure filenames.
-        real_soh : np.ndarray, optional
-            Real-battery SOH per call, same length/order as ``self._history``
-            (one value per oracle call so far). When given, overlaid on
-            ``soh.png`` alongside the oracle's own SOH trajectory. Callers
-            comparing against real cell data (e.g. jones_oracle_study.py) can
-            pass this; other oracle consumers have no real-cell SOH and should
-            leave it as ``None``.
-        """
-        plt.rcParams.update({
-            "font.family":       "serif",
-            "font.size":         10,
-            "axes.titlesize":    11,
-            "axes.labelsize":    10,
-            "xtick.labelsize":   9,
-            "ytick.labelsize":   9,
-            "legend.fontsize":   9,
-            "lines.linewidth":   1.5,
-            "axes.linewidth":    0.8,
-            "axes.grid":         False,
-            "figure.dpi":        300,
-            "axes.spines.top":   True,
-            "axes.spines.right": True,
-        })
-
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        prefix = f"{label}_" if label else ""
-        colors = SLIPSTREAM_COLORS
-
-        # ── Raw diagnostics CSV ───────────────────────────────────────────────
-        if self._history:
-            try:
-                rows = []
-                for h in self._history:
-                    row = {
-                        k: v for k, v in h.items()
-                        if k not in (
-                            "protocol", "Z_charge_real", "Z_charge_neg_imag",
-                            "Z_discharge_real", "Z_discharge_neg_imag",
-                            "ecm_samples_charge", "ecm_samples_discharge",
-                            "ecm_variables_charge", "ecm_variables_discharge",
-                            # array-valued state blocks (keep the diagnostics CSV scalar)
-                            "ecm_params_charge", "ecm_params_discharge",
-                            "ecm_std_charge", "ecm_std_discharge",
-                            "drt_peaks",
-                        )
-                    }
-                    proto = np.asarray(h.get("protocol", []))
-                    for i, col in enumerate(self._action_names):
-                        row[col] = float(proto[i]) if i < len(proto) else float("nan")
-                    rows.append(row)
-                pd.DataFrame(rows).to_csv(
-                    out / f"{prefix}diagnostics.csv", index=False, float_format="%.6g"
-                )
-            except Exception as exc:
-                log.warning("[plot_diagnostics] diagnostics CSV failed: %s", exc)
-
-        # ── Plot 1: voltage and current — one trace per cycle, colored by cycle ─
-        if self._prev_solution is not None:
-            try:
-                sol    = self._prev_solution
-                cycles = sol.cycles if sol.cycles else [sol]
-                n_cyc  = len(cycles)
-                cmap   = slipstream
-
-                fig1, ax1 = plt.subplots(1, 1, figsize=(3.5, 3.5))
-                fig2, ax2 = plt.subplots(1, 1, figsize=(3.5, 3.5))
-
-                for i, cyc in enumerate(cycles):
-                    t = cyc["Time [s]"].entries
-                    V = cyc["Terminal voltage [V]"].entries
-                    I = cyc["Current [A]"].entries
-                    t_rel = (t - t[0]) / 3600.0          # hours, reset per cycle
-                    color = cmap(i / max(n_cyc - 1, 1))
-                    alpha = max(0.4, 1.0 - 0.06 * (n_cyc - 1 - i))
-                    # No vertical waterfall offset -- V/I are plotted at their true
-                    # physical values (a single Li-ion cell reads ~3.0-4.3 V; a
-                    # previous "+ i * v_step" stacking trick pushed the y-axis up to
-                    # ~27 V for a ~120-cycle run, which is not a real terminal
-                    # voltage and had no axis note explaining the offset). Cycle
-                    # ordering/recency is conveyed by color + alpha fade instead.
-                    ax1.plot(t_rel, V, color=color, alpha=alpha)
-                    ax2.plot(t_rel, I, color=color, alpha=alpha)
-
-                ax1.set_box_aspect(1)
-                ax1.set_ylabel("Terminal voltage (V)")
-                ax1.set_xlabel("Time (h)")
-
-                ax2.set_box_aspect(1)
-                ax2.set_ylabel("Current (A)")
-                ax2.set_xlabel("Time (h)")
-
-                if n_cyc > 1:
-                    sm = plt.cm.ScalarMappable(
-                        cmap=cmap,
-                        norm=plt.Normalize(vmin=0, vmax=n_cyc - 1),
-                    )
-                    fig1.colorbar(sm, cax=ax1.inset_axes([1.04, 0, 0.05, 1.0]), label="Cycle")
-                    fig2.colorbar(sm, cax=ax2.inset_axes([1.04, 0, 0.05, 1.0]), label="Cycle")
-
-                fig1.tight_layout()
-                fig1.savefig(out / f"{prefix}last_cycle_V.png",
-                            dpi=300, bbox_inches="tight", transparent=True)
-                plt.close(fig1)
-
-                fig2.tight_layout()
-                fig2.savefig(out / f"{prefix}last_cycle_I.png",
-                            dpi=300, bbox_inches="tight", transparent=True)
-                plt.close(fig2)
-            except Exception as exc:
-                log.warning("[plot_diagnostics] last_cycle plot failed: %s", exc)
-
-        # ── Plot 2: cumulative capacity loss by degradation mechanism ────────
-        if self._history:
-            try:
-                calls = [h["call_idx"] for h in self._history]
-
-                def _arr(key: str) -> np.ndarray:
-                    a = np.array(
-                        [h.get(key, float("nan")) for h in self._history],
-                        dtype=float,
-                    )
-                    np.nan_to_num(a, nan=0.0, copy=False)
-                    return a
-
-                sei_ah      = _arr("cumulative_sei_loss_ah")
-                plating_ah  = _arr("cumulative_plating_ah")
-                dod_lam_ah  = _arr("cumulative_dod_lam_ah")
-
-                # Only show mechanisms that are active in this oracle's degradation
-                # config. DoD LAM is an oracle-level additive term (not a PyBaMM model option),
-                # gated on its own scale; it feeds eol_loss/SOH directly (see __call__).
-                _deg = self._deg_opts
-                _all = [
-                    (sei_ah,       "SEI",           True),
-                    (plating_ah,   "Li plating",    "lithium plating" in _deg),
-                    (dod_lam_ah,   "DoD LAM",       self._dod_lam_scale != 0.0),
-                ]
-                active_arrs   = [a for a, _, flag in _all if flag]
-                active_labels = [l for _, l, flag in _all if flag]
-                n_active = len(active_arrs)
-                stack_colors = [slipstream(v) for v in np.linspace(0.1, 0.9, max(n_active, 1))]
-
-                fig, ax = plt.subplots(1, 1, figsize=(3.5, 3.5))
-                ax.stackplot(
-                    calls,
-                    *active_arrs,
-                    labels=active_labels,
-                    colors=stack_colors,
-                    alpha=0.85,
-                )
-                ax.set_box_aspect(1)
-                ax.set_ylabel("Cumulative capacity loss (A·h)")
-                ax.set_xlabel("Oracle call")
-                ax.legend(frameon=False, loc="upper left")
-
-                fig.tight_layout()
-                fig.savefig(out / f"{prefix}capacity_sei.png",
-                            dpi=300, bbox_inches="tight", transparent=True)
-                plt.close(fig)
-            except Exception as exc:
-                log.warning("[plot_diagnostics] capacity_sei plot failed: %s", exc)
-
-            try:
-                soh_history = np.array(
-                    [h.get("end_soh", float("nan")) for h in self._history],
-                    dtype=float,
-                )
-                fig, ax = plt.subplots(1, 1, figsize=(3.5, 3.5))
-                ax.plot(calls, soh_history, color=colors[0], marker="o", ms=4,
-                        fillstyle="none", label="Oracle" if real_soh is not None else None)
-                nan_mask = ~np.isfinite(soh_history)
-                if nan_mask.any():
-                    ax.scatter(np.array(calls)[nan_mask], np.zeros(nan_mask.sum()),
-                               marker="x", color=SLIPSTREAM_COLORS[5], zorder=5, s=40)
-                if real_soh is not None:
-                    real_soh_arr = np.asarray(real_soh, dtype=float)
-                    ax.plot(
-                        calls[:len(real_soh_arr)], real_soh_arr, color=SLIPSTREAM_COLORS[5],
-                        marker="s", ms=4, fillstyle="none", linestyle="--", label="Real",
-                    )
-                ax.axhline(self.eol_capacity_fraction, color="grey", lw=0.8,
-                           linestyle="--", label="EOL threshold")
-                ax.set_box_aspect(1)
-                ax.set_ylabel("State of Health")
-                ax.set_xlabel("Oracle call")
-                ax.legend(frameon=False)
-
-                fig.tight_layout()
-                fig.savefig(out / f"{prefix}soh.png", dpi=300, bbox_inches="tight", transparent=True)
-                plt.close(fig)
-            except Exception as exc:
-                log.warning("[plot_diagnostics] soh plot failed: %s", exc)
-
-        # ── Plot 4: EIS Nyquist spectra over time, jones2022 raw-data style ───
-        # (Re(Z), -Im(Z)) per oracle call, colored by call index — same
-        # waterfall/colorbar convention as the last_cycle V/I plots above.
-        if self._history and "Z_charge_real" in self._history[0]:
-            try:
-                n_calls = len(self._history)
-                cmap = slipstream
-                fig, ax = plt.subplots(1, 1, figsize=(3.5, 3.5))
-                for h in self._history:
-                    color = cmap(h["call_idx"] / max(n_calls - 1, 1))
-                    ax.plot(
-                        h["Z_charge_real"], h["Z_charge_neg_imag"],
-                        color=color, marker="o", ms=3, fillstyle="none", lw=1.0,
-                    )
-                ax.set_xlabel("Re(Z) (Ω)")
-                ax.set_ylabel("−Im(Z) (Ω)")
-                ax.set_aspect("equal", adjustable="datalim")
-
-                if n_calls > 1:
-                    sm = plt.cm.ScalarMappable(
-                        cmap=cmap, norm=plt.Normalize(vmin=0, vmax=n_calls - 1),
-                    )
-                    fig.colorbar(sm, cax=ax.inset_axes([1.04, 0, 0.05, 1.0]), label="Oracle call")
-
-                fig.tight_layout()
-                fig.savefig(out / f"{prefix}eis_nyquist.png",
-                            dpi=300, bbox_inches="tight", transparent=True)
-                plt.close(fig)
-            except Exception as exc:
-                log.warning("[plot_diagnostics] eis_nyquist plot failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Candidate grid
-# ---------------------------------------------------------------------------
-
-def make_pybamm_candidates(
-    c_rate_min_mA: float = 68.0,
-    c_rate_max_mA: float = 140.0,
-    n_candidates: int = 15,
-    d_rate_mA: float = 100.0,
-    d_dur_h: float = 1.0,
-    dur_h: float = 1.0,
-    temperature_protocol: bool = False,
-    T_ambient_range: tuple[float, float] | list[float] = (278.15, 318.15),
-) -> list[np.ndarray]:
-    """Build a protocol candidate grid varying the first charge current.
-
-    Protocol layout matches :class:`PyBaMMOracle`::
-
-        [C_rate_1_mA, C_rate_2_mA, dur_1_h, dur_2_h, D_rate_mA, dur_d_h]
-        [..., T_ambient_K]   # 7th slot only when temperature_protocol=True (#10)
-
-    The second charge stage is set to half the first (two-step taper); the
-    discharge stage uses ``d_rate_mA`` and ``d_dur_h``.
-
-    Parameters
-    ----------
-    c_rate_min_mA, c_rate_max_mA : float
-        Range of first-stage charge current to sweep (mA).
-    n_candidates : int
-        Number of points in the grid.
-    d_rate_mA : float
-        Fixed discharge current (mA).
-    d_dur_h : float
-        Fixed discharge duration (h).
-    dur_h : float
-        Fixed first-stage charge duration (h); second stage gets ``dur_h / 2``.
-    temperature_protocol : bool
-        When ``True``, emit 7-D vectors that also sweep the ambient temperature
-        across ``T_ambient_range`` (for ``PyBaMMOracle(use_temperature_protocol=
-        True, thermal="lumped")``). Default ``False`` keeps the 6-D layout.
-    T_ambient_range : (float, float)
-        Ambient-temperature sweep bounds (K), used only when
-        ``temperature_protocol=True``.
-    """
-    c_rates = np.linspace(c_rate_min_mA, c_rate_max_mA, n_candidates)
-    if not temperature_protocol:
-        return [
-            np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h], dtype=np.float64)
-            for c in c_rates
-        ]
-    t_lo, t_hi = float(T_ambient_range[0]), float(T_ambient_range[1])
-    temps = np.linspace(t_lo, t_hi, n_candidates)
-    return [
-        np.array([c, c * 0.5, dur_h, dur_h * 0.5, d_rate_mA, d_dur_h, t], dtype=np.float64)
-        for c, t in zip(c_rates, temps)
-    ]
 
 
 def oracle_parameter_values(**oracle_kwargs):

@@ -11,12 +11,13 @@ therefore accumulates across calls as though it were an experimental
 campaign.
 
 ```python
-from battery_oracle import PyBaMMOracle, make_pybamm_candidates
+import numpy as np
+from battery_oracle import PyBaMMOracle
 
 oracle = PyBaMMOracle(degradation_preset="accelerated")
 oracle.reset()                                # fresh cell (and native solver rebuild)
-for protocol in make_pybamm_candidates():     # 6-D protocol grid
-    state = oracle(protocol)                  # -> shape (2·P,) ECM state vector
+for c_mA in (68.0, 100.0, 140.0):             # 6-D protocol: I1, I2 [mA], t1, t2 [h], I_d [mA], t_d [h]
+    state = oracle(np.array([c_mA, c_mA / 2, 1.0, 0.5, 100.0, 1.0]))   # -> (2·P,) ECM state vector
 ```
 
 Failure contract: {class}`~battery_oracle.OracleFailure` is raised when SOH crosses
@@ -79,8 +80,9 @@ Any callable `(frequencies, Z_real, Z_imag) -> (2P,) array` is accepted.
 
 ## Persistence
 
-`PyBaMMOracle.save_to_csv(history, path, cell_id=...)` writes the
-jones2022-featurised record format. Before writing it applies the sequence-level
+battery-forecast's `save_oracle_csv(history, path, cell_id=..., circuit=...)` writes
+the jones2022-featurised record format from `oracle.history`. Before writing it
+applies the sequence-level
 symmetric-arc flip correction. AutoEIS cannot distinguish the two Randles arcs
 of a symmetric circuit, so their labels can swap between cycles. The correction
 anchors cycle 0 by CPE-exponent ordering and then picks, per cycle, the arc

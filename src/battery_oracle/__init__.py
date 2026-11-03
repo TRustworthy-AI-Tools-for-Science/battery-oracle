@@ -6,11 +6,12 @@ EIS spectrum, and fits an equivalent-circuit model — returning the same kind o
 featurised state a real cell would. Drop-in usable as the "battery source" in an
 active-learning loop.
 
-    from battery_oracle import PyBaMMOracle, make_pybamm_candidates
+    import numpy as np
+    from battery_oracle import PyBaMMOracle
 
     oracle = PyBaMMOracle(degradation_preset="accelerated")  # ready to call immediately
-    for protocol in make_pybamm_candidates():
-        oracle(protocol)
+    for c_mA in (68.0, 100.0, 140.0):   # [C_rate_1, C_rate_2 mA, dur_1, dur_2 h, D_rate mA, dur_d h]
+        oracle(np.array([c_mA, c_mA / 2, 1.0, 0.5, 100.0, 1.0]))
 
 Optional extras:
   * ``[autoeis]`` — Bayesian ECM fitting (falls back to a fast Randles stub without it)
@@ -42,7 +43,7 @@ from battery_oracle.experiment import (
 )
 from battery_oracle.ecm import autoeis_ecm, randles_stub_ecm
 from battery_oracle.failures import FailureKind, OracleFailure
-from battery_oracle.oracle import make_pybamm_candidates, PyBaMMOracle
+from battery_oracle.oracle import PyBaMMOracle
 from battery_oracle.state import CycleResult, STATE_VECTOR_SCHEMA, state_vector_schema
 from battery_oracle.protocol import Protocol
 
@@ -59,7 +60,6 @@ __all__ = [
     "FailureKind",
     "STATE_VECTOR_SCHEMA",
     "state_vector_schema",
-    "make_pybamm_candidates",
     "randles_stub_ecm",
     "autoeis_ecm",
     "DEFAULT_CIRCUIT",

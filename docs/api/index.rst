@@ -11,7 +11,6 @@ Oracle
 
    battery_oracle.PyBaMMOracle
    battery_oracle.OracleFailure
-   battery_oracle.make_pybamm_candidates
 
 Circuit constants
 -----------------

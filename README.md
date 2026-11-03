@@ -66,10 +66,8 @@ also accepting a raw `np.ndarray`/sequence) is unchanged and still supported —
 it's what a downstream active-learning/DMDc loop consumes:
 
 ```python
-from battery_oracle import make_pybamm_candidates
-
-for u in make_pybamm_candidates():   # 6-D protocol grid, as plain arrays
-    state = oracle(u)                # -> np.ndarray, unchanged contract
+u = protocol.to_array()             # 6-D protocol as a plain array
+state = oracle(u)                    # -> np.ndarray, unchanged contract
 ```
 
 The ECM circuit is configurable (`PyBaMMOracle(circuit="R1-[R2,P3]-[R4,P5]", ...)`);

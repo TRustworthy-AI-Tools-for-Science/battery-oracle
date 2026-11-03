@@ -13,25 +13,18 @@ from battery_oracle import (
     FailureKind,
     OracleFailure,
     PyBaMMOracle,
-    make_pybamm_candidates,
     randles_stub_ecm,
     state_vector_schema,
 )
 from battery_oracle.circuit import param_labels_from_circuit
 from battery_oracle.oracle_config import OracleConfig
+from conftest import PROTOCOL
 
 
 def test_constants_consistent():
     assert ECM_PARAM_NAMES == param_labels_from_circuit(DEFAULT_CIRCUIT)
     assert len(ACTION_FEATURE_NAMES) == 6
     assert DEFAULT_CIRCUIT.startswith("R1")
-
-
-def test_make_candidates():
-    cands = make_pybamm_candidates(n_candidates=5)
-    assert len(cands) == 5
-    for c in cands:
-        assert np.asarray(c).shape == (6,)
 
 
 def test_construct_and_circuit_params():
@@ -109,27 +102,6 @@ def test_solver_and_ecm_kwargs_wire_to_instance_attrs():
     assert o._lam_ceiling == pytest.approx(0.9)
 
 
-def test_save_to_csv_respects_custom_circuit():
-    """save_to_csv must label columns from the passed circuit, not the module default."""
-    history = [{
-        "call_idx": 0,
-        "ecm_params_charge": np.array([0.1, 1.0, 0.9]),
-        "ecm_params_discharge": np.array([0.1, 1.0, 0.9]),
-        "protocol": np.zeros(6),
-    }]
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        out = PyBaMMOracle.save_to_csv(
-            history, f"{d}/rec.csv", circuit="R1-[R2,P3]",
-        )
-        import pandas as pd
-        df = pd.read_csv(out)
-        assert df["circuit"].iloc[0] == "R1-[R2,P3]"
-        assert "R1_charge_mean" in df.columns
-        assert "P3w_charge_mean" in df.columns
-        assert "R3_charge_mean" not in df.columns  # would appear under the default 9-param circuit
-
-
 def test_randles_stub_shape():
     freq = np.logspace(-2, 4, 30)
     # Simple synthetic spectrum: ohmic + one decaying arc
@@ -171,37 +143,6 @@ def test_oracle_failure_carries_failure_kind():
     assert exc.failure_kind is FailureKind.SOLVER_TRUNCATION
     with pytest.raises(TypeError):
         OracleFailure("no kind")
-
-
-def test_save_to_csv_failure_and_fidelity_columns():
-    """A terminal audit row (no ECM params) exports with failure_kind + fidelity."""
-    import tempfile
-
-    import pandas as pd
-    history = [
-        {  # a normal successful row
-            "call_idx": 0,
-            "ecm_params_charge": np.array([0.1, 1.0, 0.9]),
-            "ecm_params_discharge": np.array([0.1, 1.0, 0.9]),
-            "protocol": np.zeros(6),
-            "failure_kind": None,
-            "fidelity": "full",
-        },
-        {  # a failed audit row appended by run_experiment
-            "call_idx": 1,
-            "failed": True,
-            "failure_kind": FailureKind.END_OF_LIFE,
-            "fidelity": "failed",
-            "protocol": np.zeros(6),
-        },
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        out = PyBaMMOracle.save_to_csv(history, f"{d}/rec.csv", circuit="R1-[R2,P3]")
-        df = pd.read_csv(out)
-    assert "failure_kind" in df.columns and "fidelity" in df.columns
-    assert df["failure_kind"].iloc[0] == "" or pd.isna(df["failure_kind"].iloc[0])
-    assert df["failure_kind"].iloc[1] == "end_of_life"
-    assert df["fidelity"].iloc[1] == "failed"
 
 
 # ── Phase 4: multi-chemistry (#14) ─────────────────────────────────────────
@@ -270,16 +211,6 @@ def test_temperature_protocol_action_names_and_validation():
     assert o._action_names[-1] == "T_ambient_K"
 
 
-def test_make_candidates_temperature_protocol_shape():
-    base = make_pybamm_candidates(n_candidates=3)
-    temp = make_pybamm_candidates(n_candidates=3, temperature_protocol=True,
-                                  T_ambient_range=(280.0, 310.0))
-    # One extra slot vs the default vector; asserted against each other, not a literal.
-    assert temp[0].shape[0] == base[0].shape[0] + 1
-    assert temp[0][-1] == pytest.approx(280.0)
-    assert temp[-1][-1] == pytest.approx(310.0)
-
-
 # ── Phase 1: DFN solver settings + fallback (#2, #4) ───────────────────────
 
 def test_dfn_solver_kwargs_wire_to_instance_attrs():
@@ -308,7 +239,7 @@ def test_one_cycle_runs_dfn():
     oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
-        state = oracle(make_pybamm_candidates(n_candidates=1)[0])
+        state = oracle(PROTOCOL)
     except OracleFailure as exc:
         pytest.skip(f"DFN oracle reported EOL/solver failure on the first cycle: {exc}")
     assert len(state) == oracle.state_vector_len
@@ -330,7 +261,7 @@ def test_dfn_solver_failure_fails_loudly():
     o._solver = _Boom()
     o._solver_emerg = _Boom()
     with pytest.raises(OracleFailure):
-        o(make_pybamm_candidates(n_candidates=1)[0])
+        o(PROTOCOL)
     assert not hasattr(o, "_degraded_to_spme")
 
 
@@ -364,7 +295,7 @@ def test_returned_state_matches_schema_and_std_is_nan_for_stub():
     oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
     oracle.reset()
     try:
-        state = oracle(make_pybamm_candidates(n_candidates=1)[0])
+        state = oracle(PROTOCOL)
     except OracleFailure as exc:
         pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
     assert state.shape == (oracle.state_vector_len,)
@@ -387,7 +318,7 @@ def test_lumped_thermal_populates_t_cell():
                      ecm_model_fn=randles_stub_ecm, capacity_check=False)
     o.reset()
     try:
-        state = o(make_pybamm_candidates(n_candidates=1)[0])
+        state = o(PROTOCOL)
     except OracleFailure as exc:
         pytest.skip(f"lumped-thermal cycle failed: {exc}")
     assert len(state) == o.state_vector_len
@@ -407,7 +338,7 @@ def test_one_cycle_runs():
         capacity_check=False,
     )
     oracle.reset()
-    protocol = make_pybamm_candidates(n_candidates=1)[0]
+    protocol = PROTOCOL.copy()
     try:
         oracle(protocol)
     except OracleFailure as exc:
@@ -417,23 +348,6 @@ def test_one_cycle_runs():
     assert "end_soh" in h
     assert h["ecm_params_charge"] is not None
     assert len(h["ecm_params_charge"]) == len(oracle._ecm_param_names)
-
-
-@pytest.mark.slow
-def test_save_to_csv(tmp_path):
-    """save_to_csv is a @staticmethod (called as PyBaMMOracle.save_to_csv(...))."""
-    import pandas as pd
-    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
-    oracle.reset()
-    try:
-        oracle(make_pybamm_candidates(n_candidates=1)[0])
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-    out = PyBaMMOracle.save_to_csv(oracle.history, tmp_path / "rec.csv", cell_id="C01")
-    df = pd.read_csv(out)
-    assert len(df) == 1
-    assert df["circuit"].iloc[0] == DEFAULT_CIRCUIT
-    assert "R1_charge_mean" in df.columns
 
 
 def test_radial_mesh_kwarg_builds_the_fit_mesh():
