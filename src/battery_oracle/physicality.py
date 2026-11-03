@@ -300,6 +300,22 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
     return out
 
 
+def fitted_oracle_kwargs(fit_report: dict, oracle_kwargs: dict, ambient_k: float | None = None) -> dict:
+    """The deployed oracle of a chain fit report: ``oracle_kwargs`` plus the fitted values,
+    thermal submodel and particle/x mesh -- what the replays and exp2 build from it."""
+    kw = {**oracle_kwargs, "parameter_overrides": fit_report["parameter_overrides"],
+          "parameter_scales": fit_report["parameter_scales"],
+          "contact_resistance_ohm": fit_report["contact_resistance_ohm"]}
+    if fit_report.get("thermal"):
+        kw.update(thermal=fit_report["thermal"], h_total_W_per_m2K=fit_report["h_total_W_per_m2K"])
+        if ambient_k is not None:
+            kw["T_ambient_K"] = ambient_k
+    if fit_report.get("radial_mesh"):
+        # the demanding cycle and its two-mesh gate judge the deployed mesh, not PyBaMM's default
+        kw["radial_mesh"] = fit_report["radial_mesh"]
+    return kw
+
+
 def check_chain(fit_report: dict, cell_reports: list[dict], pv_template, oracle_kwargs: dict,
                 *, ambient_k: float | None = None) -> dict:
     """Stage-A physicality report for a chain fit (:mod:`battery_oracle.bol_chain`).
@@ -412,13 +428,7 @@ def check_chain(fit_report: dict, cell_reports: list[dict], pv_template, oracle_
             checks.append(_check(f"SOC window {key} inside OCP data", "warn" if clamped else "pass",
                                  round(esoh[key], 4), nom,
                                  "clamped to the electrode OCP data edge" if clamped else "protocol value"))
-    fitted_kwargs = {**oracle_kwargs, "parameter_overrides": ov,
-                     "parameter_scales": fit_report["parameter_scales"],
-                     "contact_resistance_ohm": fit_report["contact_resistance_ohm"]}
-    if fit_report.get("thermal"):
-        fitted_kwargs.update(thermal=fit_report["thermal"], h_total_W_per_m2K=fit_report["h_total_W_per_m2K"])
-        if ambient_k is not None:
-            fitted_kwargs["T_ambient_K"] = ambient_k
+    fitted_kwargs = fitted_oracle_kwargs(fit_report, oracle_kwargs, ambient_k)
     pv_fitted = apply_parameter_overrides(pv_template.copy(), ov)
     apply_parameter_scales(pv_fitted, fit_report["parameter_scales"])
     pv_fitted.update({"Contact resistance [Ohm]": fit_report["contact_resistance_ohm"]}, check_already_exists=False)

@@ -75,3 +75,17 @@ def test_demanding_dfn_cycle_on_the_template():
     assert checks[0]["status"] != "fail", checks[0]
     assert any(c["name"].startswith("lithium conserved") and c["status"] != "skip"
                for c in checks), checks
+
+
+def test_fitted_oracle_kwargs_carry_the_fit_mesh_and_thermal():
+    from battery_oracle.physicality import fitted_oracle_kwargs
+
+    rep = {"parameter_overrides": {"a": 1.0}, "parameter_scales": {"b": 2.0}, "contact_resistance_ohm": 0.1,
+           "thermal": "lumped", "h_total_W_per_m2K": 7.0,
+           "radial_mesh": {"points": 10, "kind": "surface", "stretch": 2.0, "x_factor": 3}}
+    kw = fitted_oracle_kwargs(rep, {"chemistry": "X", "radial_mesh": {"x_factor": 1}}, ambient_k=300.0)
+    assert kw["radial_mesh"] == rep["radial_mesh"]          # the fit's mesh overrides the base
+    assert kw["T_ambient_K"] == 300.0 and kw["thermal"] == "lumped" and kw["chemistry"] == "X"
+    bare = fitted_oracle_kwargs({k: rep[k] for k in ("parameter_overrides", "parameter_scales",
+                                                      "contact_resistance_ohm")}, {"chemistry": "X"})
+    assert "radial_mesh" not in bare and "thermal" not in bare
