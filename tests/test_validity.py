@@ -71,6 +71,38 @@ def test_exact_law_residual_passes_only_if_it_converges_with_the_tolerance():
     assert status(0.5 * limit, None) == "pass"                     # within the limit: no ladder needed
 
 
+
+def test_exact_law_ignores_a_failed_tighter_solve():
+    """A tighter solve that failed (no measures) is no evidence: the ladder ends there. With
+    the x0.1 solve inside the limit the residual is a tolerance error; with it outside, or
+    with only the deployed solve left, the law fails."""
+    rtol = 1e-6
+
+    def status(base, ladder):
+        recs = validity.judge(_m(charge=base), _m(charge=base), rtol=rtol,
+                              ladder=[{} if v is None else _m(charge=v) for v in ladder])
+        return [c["status"] for c in recs if c["name"].endswith("charge balance (exact law)")][0]
+
+    assert status(5e-4, [1e-6, None]) == "pass"
+    assert status(5e-4, [3e-5, None]) == "fail"          # converging, but not yet within the limit
+    assert status(5e-4, [None, 1e-7]) == "fail"          # nothing valid beyond the deployed solve
+
+
+def test_voltage_difference_skips_current_steps_of_both_solutions():
+    """Two otherwise identical histories whose cycler stop is 0.3 s apart differ by the full
+    voltage step there; outside the steps they agree to the offset."""
+    t = np.linspace(0.0, 100.0, 2001)
+
+    def history(t_stop, offset):
+        i = np.where(t < t_stop, 1.0, 0.0)
+        return t, np.where(t < t_stop, 4.2, 3.9) + offset, i
+
+    dv = validity.voltage_difference(*history(50.0, 0.0), *history(50.3, 1e-4), i_1c=1.0)
+    assert dv.max() == pytest.approx(1e-4, rel=1e-6)
+    raw = np.abs(history(50.0, 0.0)[1] - history(50.3, 1e-4)[1])
+    assert raw.max() > 0.29                               # the fixed-time difference sees the step
+
+
 def test_tolerance_limit_extrapolates_a_geometric_sequence():
     """Aitken extrapolation recovers the limit of s_k = L + c q^k exactly."""
     for L, c, q in ((0.0, 1e-3, 0.3), (2e-4, 5e-4, 0.5), (-1e-5, 2e-4, 0.1)):

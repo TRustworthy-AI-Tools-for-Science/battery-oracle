@@ -236,6 +236,19 @@ def _step_mask(t, i_app, i_1c) -> tuple[np.ndarray, np.ndarray]:
     return t[after], judged
 
 
+def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> np.ndarray:
+    """|V_a - V_b| at ``t_a`` over the common time range, outside the current steps of either
+    solution (``_step_mask``; around a cycler stop two meshes switch a fraction of a second
+    apart, and a fixed-time difference there measures that timing, not the mesh)."""
+    t_a, v_a, t_b = np.asarray(t_a, float), np.asarray(v_a, float), np.asarray(t_b, float)
+    _, judged = _step_mask(t_a, i_a, i_1c)
+    steps_b, _ = _step_mask(t_b, i_b, i_1c)
+    for s in steps_b:
+        judged &= ~((t_a >= s - STEP_WINDOW_S) & (t_a <= s + STEP_WINDOW_S))
+    judged &= t_a <= t_b[-1]
+    return np.abs(v_a - np.interp(t_a, t_b, np.asarray(v_b, float)))[judged]
+
+
 def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
     """Validity checks of one solved history; ``pv`` the parameter values it was
     solved with."""
@@ -435,15 +448,25 @@ def _exact_law(tag, name, value, limit, ladder, what):
         return _rec(tag + name, "skip", None, limit, "not evaluable")
     if value <= limit:
         return _rec(tag + name, "pass", value, limit, what)
-    if not ladder or len(ladder) != 3 or any(v is None for v in ladder):
+    # a tighter solve that failed (None) ends the ladder: its residual says nothing about the law
+    valid = list(ladder or [])
+    if None in valid:
+        valid = valid[:valid.index(None)]
+    if len(valid) < 2:
         return _rec(tag + name, "fail", value, limit, what + "; above the limit and no tighter-tolerance solves to "
                     "show it is a tolerance error")
-    ratios = [a / b if b > 0 else np.inf for a, b in zip(ladder, ladder[1:])]
-    est = _tolerance_limit(ladder)
+    ratios = [a / b if b > 0 else np.inf for a, b in zip(valid, valid[1:])]
+    # three points: extrapolate to zero tolerance; two (the tightest solve failed): the
+    # tighter solve itself must satisfy the law
+    est = _tolerance_limit(valid) if len(valid) == 3 else valid[-1]
     ok = min(ratios) >= MIN_DECADE_RATIO and est <= limit
+    steps = " -> ".join(f"{v:.2e}" for v in valid)
+    labels = " / ".join(("x1", "x0.1", "x0.01")[:len(valid)])
+    failed = "" if len(valid) == len(ladder) else f"; the x{10.0 ** -len(valid):g} solve failed"
     return _rec(tag + name, "pass" if ok else "fail", value, limit,
-                what + f"; tolerances x1 / x0.1 / x0.01: {ladder[0]:.2e} -> {ladder[1]:.2e} -> {ladder[2]:.2e} "
-                f"(x{ratios[0]:.2f}, x{ratios[1]:.2f} per decade), zero-tolerance limit {est:.2e} "
+                what + f"; tolerances {labels}: {steps} (per decade x"
+                + ", x".join(f"{r:.2f}" for r in ratios) + f"){failed}, "
+                + ("zero-tolerance limit" if len(valid) == 3 else "tightest") + f" {est:.2e} "
                 + ("(a solver-tolerance error)" if ok else "(does not converge to the law: a real violation)"))
 
 

@@ -272,18 +272,27 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
                                         "dfn_solver_atol": oracle._dfn_solver_atol * f})
                 tight._real_cell_capacity_mah = nominal
                 tight._cap_scale = 1.0
-                tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
-                ladder.append(validity.measure(tight._prev_solution, tight._pv))
+                try:
+                    tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+                    tsol = tight.last_solution
+                    complete = (tight.history[-1].get("fidelity") == "full"
+                                and float(tsol.t[-1]) >= float(sol.t[-1]) - 1.0)
+                except OracleFailure:
+                    complete = False
+                # a failed or truncated tighter solve is no evidence either way
+                ladder.append(validity.measure(tsol, tight._pv) if complete else {})
         out += validity.judge(m_dep, validity.measure(fsol, fine._pv), factor=2, cell=tag, mesh=names,
                               rtol=oracle._dfn_solver_rtol, ladder=ladder)
-        t = np.asarray(sol.t, float)
-        v_a = np.asarray(sol["Voltage [V]"].entries, float)
-        v_b = np.interp(t, np.asarray(fsol.t, float), np.asarray(fsol["Voltage [V]"].entries, float))
-        p99 = float(np.percentile(np.abs(v_a - v_b), 99))
+        def _tvi(s):
+            return (s.t, s["Voltage [V]"].entries, s["Current [A]"].entries)
+
+        dv = validity.voltage_difference(*_tvi(sol), *_tvi(fsol), i_1c=nominal / 1000.0)
+        p99 = float(np.percentile(dv, 99))
         out.append(_check(f"validity[{tag}] {names[0]} mesh resolves the voltage",
                           "pass" if p99 < validity.VOLTAGE_NOISE_V else "fail", 1e3 * p99,
-                          1e3 * validity.VOLTAGE_NOISE_V, f"p99 |dV| mV {names[0]} vs {names[1]}; limit the "
-                          "instrument noise (a fail means the oracle must run the refined mesh)"))
+                          1e3 * validity.VOLTAGE_NOISE_V, f"p99 |dV| mV {names[0]} vs {names[1]} outside "
+                          f"{validity.STEP_WINDOW_S:g} s of current steps; limit the instrument noise "
+                          "(a fail means the oracle must run the refined mesh)"))
     except Exception as exc:                    # noqa: BLE001 - unevaluable validity fails
         out.append(_check("validity[oracle demanding cycle] two-mesh gate evaluated", "fail", None, None,
                           f"{type(exc).__name__}: {str(exc)[:160]}"))
