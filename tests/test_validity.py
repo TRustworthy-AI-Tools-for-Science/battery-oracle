@@ -97,7 +97,8 @@ def test_voltage_difference_skips_current_steps_of_both_solutions():
         i = np.where(t < t_stop, 1.0, 0.0)
         return t, np.where(t < t_stop, 4.2, 3.9) + offset, i
 
-    dv = validity.voltage_difference(*history(50.0, 0.0), *history(50.3, 1e-4), i_1c=1.0)
+    t_kept, dv = validity.voltage_difference(*history(50.0, 0.0), *history(50.3, 1e-4), i_1c=1.0)
+    assert t_kept.size == dv.size and not ((t_kept > 49.9) & (t_kept < 52.3)).any()
     assert dv.max() == pytest.approx(1e-4, rel=1e-6)
     raw = np.abs(history(50.0, 0.0)[1] - history(50.3, 1e-4)[1])
     assert raw.max() > 0.29                               # the fixed-time difference sees the step

@@ -236,8 +236,8 @@ def _step_mask(t, i_app, i_1c) -> tuple[np.ndarray, np.ndarray]:
     return t[after], judged
 
 
-def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> np.ndarray:
-    """|V_a - V_b| at ``t_a`` over the common time range, outside the current steps of either
+def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> tuple[np.ndarray, np.ndarray]:
+    """(times, |V_a - V_b|) at the samples of ``t_a`` in the common time range, outside the current steps of either
     solution (``_step_mask``; around a cycler stop two meshes switch a fraction of a second
     apart, and a fixed-time difference there measures that timing, not the mesh)."""
     t_a, v_a, t_b = np.asarray(t_a, float), np.asarray(v_a, float), np.asarray(t_b, float)
@@ -246,7 +246,35 @@ def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> np.ndarray:
     for s in steps_b:
         judged &= ~((t_a >= s - STEP_WINDOW_S) & (t_a <= s + STEP_WINDOW_S))
     judged &= t_a <= t_b[-1]
-    return np.abs(v_a - np.interp(t_a, t_b, np.asarray(v_b, float)))[judged]
+    return t_a[judged], np.abs(v_a - np.interp(t_a, t_b, np.asarray(v_b, float)))[judged]
+
+
+def _charge_balance(sol, ie_nodes, lay, i_app, scale_i) -> dict:
+    """|i_e + i_s - i_app| / max(|i_app|, i_1C) at every node and time, per domain
+    (separator: i_e = i_app)."""
+    nn, ns, _ = lay["n"]
+    out = {}
+    for dom, sl in (("Negative", slice(0, nn)), ("Positive", slice(nn + ns, None))):
+        i_s = entries(sol, f"{dom} electrode current density [A.m-2]")
+        if i_s.shape[0] == ie_nodes[sl].shape[0] + 1:     # stored on the domain's edges
+            i_s = 0.5 * (i_s[:-1] + i_s[1:])
+        out[dom.lower()] = np.abs(ie_nodes[sl] + i_s - i_app[None, :]) / scale_i[None, :]
+    out["separator"] = np.abs(ie_nodes[nn:nn + ns] - i_app[None, :]) / scale_i[None, :]
+    return out
+
+
+def charge_balance_residual(sol, pv) -> dict:
+    """The pointwise charge balance of a solution over time: for each domain, the largest
+    |i_e + i_s - i_app| / max(|i_app|, i_1C) over its nodes at each time (the "charge
+    balance" exact law is its maximum)."""
+    lay = layout(sol, pv)
+    area = (float(pv["Electrode height [m]"]) * float(pv["Electrode width [m]"])
+            * float(pv["Number of electrodes connected in parallel to make a cell"]))
+    i_app = entries(sol, "Current [A]").ravel() / area
+    scale_i = np.maximum(np.abs(i_app), float(pv["Nominal cell capacity [A.h]"]) / area)
+    arr = entries(sol, "Electrolyte current density [A.m-2]")
+    ie_nodes = _to_nodes(arr, _positions(arr, lay), lay)
+    return {dom: r.max(axis=0) for dom, r in _charge_balance(sol, ie_nodes, lay, i_app, scale_i).items()}
 
 
 def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
@@ -308,16 +336,8 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         arr, pos = f
         ie_nodes = _to_nodes(arr, pos, lay)
         nn, ns, _ = lay["n"]
-        worst = 0.0
         try:
-            for dom, sl in (("Negative", slice(0, nn)), ("Positive", slice(nn + ns, None))):
-                i_s = entries(sol, f"{dom} electrode current density [A.m-2]")
-                if i_s.shape[0] == ie_nodes[sl].shape[0] + 1:     # stored on the domain's edges
-                    i_s = 0.5 * (i_s[:-1] + i_s[1:])
-                res = np.abs(ie_nodes[sl] + i_s - i_app[None, :]) / scale_i[None, :]
-                worst = max(worst, float(res.max()))
-            res = np.abs(ie_nodes[nn:nn + ns] - i_app[None, :]) / scale_i[None, :]   # separator: i_e = i_app
-            worst = max(worst, float(res.max()))
+            worst = float(max(r.max() for r in _charge_balance(sol, ie_nodes, lay, i_app, scale_i).values()))
             out.append(_check(tag + "charge balance i_e + i_s = i_app", worst, "charge balance"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "charge balance i_e + i_s = i_app", None, "charge balance",

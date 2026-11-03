@@ -178,6 +178,22 @@ def check_esoh(pv_fitted) -> list[dict]:
                    "voltage limits map to valid stoichiometries on the fitted cell")]
 
 
+def run_demanding_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: float = 2.0,
+                        d_crate: float = 3.8, **overrides):
+    """The fitted oracle (``oracle_kwargs`` plus ``overrides``, Randles-stub ECM) after one
+    demanding cycle at the stated C-rates of its own nominal capacity (real-cell scaling 1):
+    two 0.25 h charge stages, then a discharge of up to 4 h. Raises what the oracle raises."""
+    from battery_oracle.ecm import randles_stub_ecm
+    from battery_oracle.oracle import PyBaMMOracle
+
+    oracle = PyBaMMOracle(**{**oracle_kwargs, "ecm_model_fn": randles_stub_ecm, **overrides})
+    nominal = oracle._nominal_mAh
+    oracle._real_cell_capacity_mah = nominal
+    oracle._cap_scale = 1.0
+    oracle(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+    return oracle
+
+
 def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: float = 2.0,
                     d_crate: float = 3.8) -> list[dict]:
     """One demanding cycle on the fitted cell (default: the jones2022 protocol envelope,
@@ -187,18 +203,13 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
     bounds, temperature). Currents are given at the stated C-rates of its own
     nominal capacity, so the real-cell scaling is 1.
     """
-    from battery_oracle.ecm import randles_stub_ecm
     from battery_oracle.failures import OracleFailure
-    from battery_oracle.oracle import PyBaMMOracle
 
-    kw = {**oracle_kwargs, "ecm_model_fn": randles_stub_ecm}
+    kw = dict(oracle_kwargs)
+    rates = {"c1_crate": c1_crate, "c2_crate": c2_crate, "d_crate": d_crate}
     try:
-        oracle = PyBaMMOracle(**kw)
+        oracle = run_demanding_cycle(kw, **rates)
         nominal = oracle._nominal_mAh
-        oracle._real_cell_capacity_mah = nominal
-        oracle._cap_scale = 1.0
-        oracle(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25,
-                         d_crate * nominal, 4.0]))
     except OracleFailure as exc:
         return [_check("demanding DFN cycle completes", "fail", None, None, str(exc)[:200])]
     except Exception as exc:
@@ -256,11 +267,8 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         mesh = dict(kw.get("radial_mesh") or {})
         xf = int(mesh.get("x_factor") or 1)
         fine_kw = {**kw, "radial_mesh": {**mesh, "x_factor": 2 * xf}}
-        fine = PyBaMMOracle(**fine_kw)
-        fine._real_cell_capacity_mah = nominal
-        fine._cap_scale = 1.0
-        fine(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
-        fsol = fine._prev_solution
+        fine = run_demanding_cycle(fine_kw, **rates)
+        fsol = fine.last_solution
         names = (f"x{xf}", f"x{2 * xf}")
         m_dep = validity.measure(sol, oracle._pv)
         ladder = None
@@ -268,12 +276,9 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
             # an exact-law residual above 10 rtol: is it a tolerance error? (10x and 100x tighter solves)
             ladder = []
             for f in validity.TOLERANCE_LADDER:
-                tight = PyBaMMOracle(**{**kw, "dfn_solver_rtol": oracle._dfn_solver_rtol * f,
-                                        "dfn_solver_atol": oracle._dfn_solver_atol * f})
-                tight._real_cell_capacity_mah = nominal
-                tight._cap_scale = 1.0
                 try:
-                    tight(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
+                    tight = run_demanding_cycle(kw, **rates, dfn_solver_rtol=oracle._dfn_solver_rtol * f,
+                                                dfn_solver_atol=oracle._dfn_solver_atol * f)
                     tsol = tight.last_solution
                     complete = (tight.history[-1].get("fidelity") == "full"
                                 and float(tsol.t[-1]) >= float(sol.t[-1]) - 1.0)
@@ -286,7 +291,7 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         def _tvi(s):
             return (s.t, s["Voltage [V]"].entries, s["Current [A]"].entries)
 
-        dv = validity.voltage_difference(*_tvi(sol), *_tvi(fsol), i_1c=nominal / 1000.0)
+        _, dv = validity.voltage_difference(*_tvi(sol), *_tvi(fsol), i_1c=nominal / 1000.0)
         p99 = float(np.percentile(dv, 99))
         out.append(_check(f"validity[{tag}] {names[0]} mesh resolves the voltage",
                           "pass" if p99 < validity.VOLTAGE_NOISE_V else "fail", 1e3 * p99,
