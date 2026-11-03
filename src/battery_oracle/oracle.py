@@ -51,7 +51,7 @@ from battery_oracle.degradation import _build_degradation_config
 from battery_oracle.ecm import _AUTOEIS_AVAILABLE, autoeis_ecm, randles_stub_ecm
 from battery_oracle.failures import FailureKind, OracleFailure, _SilentTruncation
 from battery_oracle.oracle_config import OracleConfig
-from battery_oracle.parameter_sets import CUSTOM_PARAMETER_SETS, resolve_parameter_values
+from battery_oracle.parameter_sets import check_chemistry, resolve_parameter_values
 from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales
 from battery_oracle.protocol import PROTOCOL_FIELD_NAMES, Protocol
 from battery_oracle.state import CycleResult, state_vector_schema
@@ -71,20 +71,19 @@ _R_GAS = 8.314462618
 # presets and protocol bounds are chemistry-specific: a non-Chen2020 chemistry needs its
 # own oracle config (voltage window, capacity, preset); LFP (Prada2013) has a ~2.0-3.6 V
 # window, incompatible with the default 4.3 V / 3.0 V bounds.
-_SUPPORTED_CHEMISTRIES = {
-    "Chen2020":  "Chen2020",   # LG M50, NMC811/graphite, 5 Ah (default)
-    "Xu2019":    "Xu2019",     # NMC532 half-cell
-    "Prada2013": "Prada2013",  # A123 LFP, 2.3 Ah
-    **{name: name for name in CUSTOM_PARAMETER_SETS},
-    "LGM50":     "Chen2020",
-    "NMC532":    "Xu2019",
-    "LFP":       "Prada2013",
-}
 
 
 # ---------------------------------------------------------------------------
 # PyBaMMOracle
 # ---------------------------------------------------------------------------
+
+def _final_value(sol, name: str, *, absent: float) -> float:
+    """Last value of solution variable ``name``; ``absent`` when the solved model has no
+    such variable (its mechanism is not modelled). Any other failure propagates."""
+    if name not in sol.all_models[-1].variables:
+        return absent
+    return float(sol[name].entries[-1])
+
 
 class PyBaMMOracle:
     """Battery oracle using PyBaMM DFN simulations + EIS + ECM fitting.
@@ -141,12 +140,11 @@ class PyBaMMOracle:
     parameter_values : pybamm.ParameterValues, optional
         PyBaMM parameter set (default: Chen2020).
     chemistry : str
-        Cell chemistry — ``"Chen2020"`` (LG M50, NMC811/graphite, default),
-        ``"Xu2019"`` (NMC532), or ``"Prada2013"`` (A123 LFP); friendly aliases
-        ``"LGM50"``/``"NMC532"``/``"LFP"`` also accepted. Ignored if an
-        explicit ``parameter_values`` is passed. A non-default chemistry needs
-        its own calibration (degradation preset, voltage window) — see
-        :meth:`from_config` with a matching ``config_oracle_*.yml``.
+        Parameter-set name from ``parameter_sets.SUPPORTED_PARAMETER_SETS``:
+        ``"Chen2020"`` (LG M50, NMC811/graphite, default) or a LiR2032 coin-cell
+        set. Ignored if an explicit ``parameter_values`` is passed. A non-default
+        chemistry needs its own calibration (degradation preset, voltage window) —
+        see :meth:`from_config` with a matching ``config_oracle_*.yml``.
     degradation_preset : str
         Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
         or ``"severe"``.  See :func:`_build_degradation_config`. The
@@ -418,14 +416,8 @@ class PyBaMMOracle:
         # Chemistry (#14): validate early (before any heavy PyBaMM work). An
         # explicit parameter_values wins; otherwise resolve the chemistry name.
         self._chemistry = str(cfg.chemistry)
-        if self._chemistry not in _SUPPORTED_CHEMISTRIES:
-            raise ValueError(
-                f"Unknown chemistry {cfg.chemistry!r}; choose one of "
-                f"{sorted(_SUPPORTED_CHEMISTRIES)}."
-            )
-        self._pv = parameter_values or resolve_parameter_values(
-            _SUPPORTED_CHEMISTRIES[self._chemistry]
-        )
+        check_chemistry(self._chemistry)
+        self._pv = parameter_values or resolve_parameter_values(self._chemistry)
         self._temperature_K = float(cfg.temperature_K)
         if self._temperature_K != 298.15:
             self._pv["Ambient temperature [K]"] = self._temperature_K
@@ -543,36 +535,20 @@ class PyBaMMOracle:
         # where r_f = delta / sigma_SEI is resistance per unit interfacial area (Ohm.m2)
         # [Christensen & Newman, J. Electrochem. Soc. 151(11):A1977, 2004, eq. (5)]
         #
-        # Chen2020 uses "SEI resistivity [Ohm.m]" (= 200 kΩ·m) rather than the
-        # "SEI conductivity [S.m-1]" key, which does not exist in that parameter
-        # set.  The previous attempt to read the conductivity always raised KeyError
-        # and silently fell back to _sei_to_R = 0, disabling the EIS correction
-        # entirely.  We now try the resistivity key first.
-        try:
-            resistivity_sei = float(self._pv["SEI resistivity [Ohm.m]"])
-            sigma_sei = 1.0 / resistivity_sei
-        except (KeyError, Exception):
-            try:
-                sigma_sei = float(self._pv["SEI conductivity [S.m-1]"])
-            except Exception:
-                sigma_sei = 0.0
-        try:
-            eps_s = float(self._pv["Negative electrode active material volume fraction"])
-            r_p   = float(self._pv["Negative particle radius [m]"])
-            L_neg = float(self._pv["Negative electrode thickness [m]"])
-            W     = float(self._pv["Electrode width [m]"])
-            H     = float(self._pv["Electrode height [m]"])
-            a_s   = 3.0 * eps_s / r_p          # m⁻¹  [Doyle, Fuller & Newman 1993]
-            V_el  = L_neg * W * H               # m³
+        # PyBaMM's sets carry "SEI resistivity [Ohm.m]" (Chen2020: 200 kΩ·m); a set
+        # without it is an error, not a disabled EIS correction.
+        sigma_sei = 1.0 / float(self._pv["SEI resistivity [Ohm.m]"])
+        eps_s = float(self._pv["Negative electrode active material volume fraction"])
+        r_p   = float(self._pv["Negative particle radius [m]"])
+        L_neg = float(self._pv["Negative electrode thickness [m]"])
+        W     = float(self._pv["Electrode width [m]"])
+        H     = float(self._pv["Electrode height [m]"])
+        a_s   = 3.0 * eps_s / r_p          # m⁻¹  [Doyle, Fuller & Newman 1993]
+        V_el  = L_neg * W * H               # m³
 
-            self._eps_s_nominal = eps_s         # saved for LAM a-priori injection
-            self._sei_to_R      = 1.0 / (sigma_sei * a_s * V_el) if sigma_sei > 0 else 0.0
-            self._dead_li_to_R  = 5e-2 / (a_s * V_el)  # ρ_dead≈0.05 Ω·m [OKane2022]
-
-        except Exception:
-            self._eps_s_nominal    = None
-            self._sei_to_R         = 0.0
-            self._dead_li_to_R     = 0.0
+        self._eps_s_nominal = eps_s         # saved for LAM a-priori injection
+        self._sei_to_R      = 1.0 / (sigma_sei * a_s * V_el)
+        self._dead_li_to_R  = 5e-2 / (a_s * V_el)  # ρ_dead≈0.05 Ω·m [OKane2022]
 
     @classmethod
     def from_config(cls, source: "str | Path | dict | None" = None) -> "PyBaMMOracle":
@@ -685,17 +661,9 @@ class PyBaMMOracle:
         """
         self._cycling_model = _MODEL_CLS(options=self._deg_opts)
         # DFN is a stiff coupled DAE: tight IDAKLU tolerances, and a low dt_max on the
-        # Casadi solvers (dt_max is a no-op on IDAKLU itself).
+        # Casadi emergency solver (dt_max is a no-op on IDAKLU itself).
         _rtol, _atol = self._dfn_solver_rtol, self._dfn_solver_atol
-        try:
-            self._solver = self._pb.IDAKLUSolver(rtol=_rtol, atol=_atol)
-        except Exception:
-            self._solver = self._pb.CasadiSolver(
-                mode="safe",
-                dt_max=self._dfn_solver_dt_max_s,
-                rtol=_rtol,
-                atol=_atol,
-            )
+        self._solver = self._pb.IDAKLUSolver(rtol=_rtol, atol=_atol)
 
         # Emergency solver: deliberately a *different solver family*, not just
         # looser IDAKLU tolerances.  The CC->CV switch (charge step -> "Hold at
@@ -1072,19 +1040,18 @@ class PyBaMMOracle:
         """
         nominal_ah = 20.0 * self._c20_A
         out: list[dict] = []
-        steps = list(getattr(last_cycle, "steps", []) or [])
+        steps = last_cycle.steps
         for i, kind in enumerate(self._STEP_KINDS):
             row = {"kind": kind, "current_A": 0.0, "crate": 0.0, "duration_s": 0.0,
                    "throughput_ah": 0.0, "frac": 0.0, "v_end": float("nan"),
                    "hit_cutoff": False}
-            try:
-                step = steps[i]
-                t = np.asarray(step["Time [s]"].entries, dtype=float)
-                I = np.asarray(step["Current [A]"].entries, dtype=float)
-                V = np.asarray(step["Voltage [V]"].entries, dtype=float)
-            except Exception:
+            step = steps[i]
+            if isinstance(step, _pb.EmptySolution):     # skipped: cutoff met at t=0
                 out.append(row)
                 continue
+            t = np.asarray(step["Time [s]"].entries, dtype=float)
+            I = np.asarray(step["Current [A]"].entries, dtype=float)
+            V = np.asarray(step["Voltage [V]"].entries, dtype=float)
             if t.size:
                 q = float(abs(np.trapezoid(I, t)) / 3600.0) if t.size > 1 else 0.0
                 i_mean = float(np.mean(np.abs(I)))
@@ -1107,7 +1074,7 @@ class PyBaMMOracle:
         identical to success unless the step count is checked explicitly.
         """
         if not sol.cycles:
-            return False
+            return True
         n = self.n_cycles
         expected = experiment.cycle_lengths[-1]
         added = sol.cycles[-n:] if n <= len(sol.cycles) else sol.cycles
@@ -1389,18 +1356,8 @@ class PyBaMMOracle:
             float(self._pv["Initial concentration in negative electrode [mol.m-3]"])
             / float(self._pv["Maximum concentration in negative electrode [mol.m-3]"])
         )
-        try:
-            x_neg_chg = float(
-                last_cycle.steps[4]["Average negative particle stoichiometry"].entries[-1]
-            )
-        except Exception:
-            x_neg_chg = float(sol["Average negative particle stoichiometry"].entries[-1])
-        try:
-            x_neg_dis = float(
-                last_cycle.steps[1]["Average negative particle stoichiometry"].entries[-1]
-            )
-        except Exception:
-            x_neg_dis = x_neg_chg
+        x_neg_chg = float(last_cycle.steps[4]["Average negative particle stoichiometry"].entries[-1])
+        x_neg_dis = float(last_cycle.steps[1]["Average negative particle stoichiometry"].entries[-1])
         return (float(np.clip(x_neg_chg / x100, self._soc_clip_min, self._soc_clip_max)),
                 float(np.clip(x_neg_dis / x100, self._soc_clip_min, self._soc_clip_max)))
 
@@ -1413,16 +1370,8 @@ class PyBaMMOracle:
         if self._thermal != "lumped":
             return self._temperature_K, self._temperature_K
         T_VAR = "Volume-averaged cell temperature [K]"
-
-        def read(step_idx: int) -> float:
-            try:
-                return float(last_cycle.steps[step_idx][T_VAR].entries[-1])
-            except Exception:
-                try:
-                    return float(sol[T_VAR].entries[-1])
-                except Exception:
-                    return self._T_ambient_K
-        return read(4), read(1)
+        return (float(last_cycle.steps[4][T_VAR].entries[-1]),
+                float(last_cycle.steps[1][T_VAR].entries[-1]))
 
     def _accumulate_dod_lam(self, protocol: np.ndarray) -> None:
         """DoD / charge-induced-stress LAM increment (see __init__).
@@ -1459,26 +1408,18 @@ class PyBaMMOracle:
         # (evaluated at the pv ambient = T_ambient_K) would double-count it.
         if self._thermal == "lumped":
             eis_pv["Ambient temperature [K]"] = self._T_ref_K
-        lam_frac = 0.0
-        if self._eps_s_nominal is not None:
-            try:
-                lam_pct = float(sol["Loss of active material in negative electrode [%]"].entries[-1])
-                lam_frac = float(np.clip(lam_pct / 100.0, 0.0, self._lam_ceiling))
-            except Exception:
-                lam_frac = 0.0
-            try:
-                # Total active-material loss seen by the spectrum = physical
-                # cracking (lam_frac, ~0 while particle mechanics is disabled)
-                # plus the DoD/charge-induced-stress LAM. lam_frac alone still
-                # feeds lam_cap_loss; the DoD part is added to eol_loss
-                # separately, so combining them here does not double-count.
-                eff_lam = float(np.clip(lam_frac + self._cumulative_dod_lam_frac, 0.0, self._lam_ceiling))
-                if eff_lam > 1e-4:
-                    eis_pv["Negative electrode active material volume fraction"] = (
-                        self._eps_s_nominal * (1.0 - eff_lam)
-                    )
-            except Exception:
-                pass
+        lam_pct = _final_value(sol, "Loss of active material in negative electrode [%]", absent=0.0)
+        lam_frac = float(np.clip(lam_pct / 100.0, 0.0, self._lam_ceiling))
+        # Total active-material loss seen by the spectrum = physical
+        # cracking (lam_frac, ~0 while particle mechanics is disabled)
+        # plus the DoD/charge-induced-stress LAM. lam_frac alone still
+        # feeds lam_cap_loss; the DoD part is added to eol_loss
+        # separately, so combining them here does not double-count.
+        eff_lam = float(np.clip(lam_frac + self._cumulative_dod_lam_frac, 0.0, self._lam_ceiling))
+        if eff_lam > 1e-4:
+            eis_pv["Negative electrode active material volume fraction"] = (
+                self._eps_s_nominal * (1.0 - eff_lam)
+            )
         return eis_pv, lam_frac
 
     def _ohmic_films(self, sol) -> tuple[float, float, float]:
@@ -1487,18 +1428,9 @@ class PyBaMMOracle:
         The SEI film is purely ohmic [Christensen & Newman, J. Electrochem. Soc.
         151:A1977, 2004].
         """
-        sei_thick = 0.0
-        dead_li_thick = 0.0
-        if self._sei_to_R > 0.0:
-            try:
-                sei_thick = float(sol["X-averaged negative SEI thickness [m]"].entries[-1])
-            except Exception:
-                pass
-        if self._dead_li_to_R > 0.0:
-            try:
-                dead_li_thick = float(sol["X-averaged negative dead lithium thickness [m]"].entries[-1])
-            except Exception:
-                pass
+        # absent without the mechanism (no plating -> no dead lithium)
+        sei_thick = _final_value(sol, "X-averaged negative SEI thickness [m]", absent=0.0)
+        dead_li_thick = _final_value(sol, "X-averaged negative dead lithium thickness [m]", absent=0.0)
         delta_R_ohmic = sei_thick * self._sei_to_R
         delta_R_ohmic += dead_li_thick * self._dead_li_to_R
         return sei_thick, dead_li_thick, delta_R_ohmic
@@ -1557,14 +1489,11 @@ class PyBaMMOracle:
         discharge capacity of the regular cycling step (less sensitive, ~20× faster).
         """
         if self.capacity_check:
-            try:
-                return float(last_cycle.steps[-1]["Discharge capacity [A.h]"].entries[-1])
-            except Exception:
-                pass
-        try:
-            return float(np.max(sol["Discharge capacity [A.h]"].entries))
-        except Exception:
-            return float("nan")
+            step = last_cycle.steps[-1]
+            if isinstance(step, _pb.EmptySolution):     # skipped: already at the cutoff
+                return 0.0
+            return float(step["Discharge capacity [A.h]"].entries[-1])
+        return float(np.max(sol["Discharge capacity [A.h]"].entries))
 
     def _state_of_health(self, sol, lam_frac: float, protocol: np.ndarray) -> tuple[float, dict]:
         """SOH from the irreversible-loss budget, and the budget's terms [A.h].
@@ -1577,11 +1506,8 @@ class PyBaMMOracle:
         # SEI on cracks and dead-Li plating are protocol-sensitive (higher C-rate
         # → more cracking → faster crack-SEI; higher C-rate → more plating → more
         # dead Li), so including them makes EOL respond to the chosen protocol.
-        def try_get(key: str) -> float:
-            try:
-                return float(sol[key].entries[-1])
-            except Exception:
-                return 0.0
+        def try_get(key: str) -> float:     # 0 for a mechanism this model does not include
+            return _final_value(sol, key, absent=0.0)
 
         # "Loss of capacity to ... plating [A.h]" integrates the NET plating current
         # (plating minus stripping).  In the "partially reversible" model this can be
@@ -1601,10 +1527,7 @@ class PyBaMMOracle:
         # first-call measured capacity.  The first-call discharge may be truncated if
         # the initial SOC causes early voltage-event termination, making cap_ah ~1 Ah
         # and inflating all subsequent SOH values by ~4×.
-        try:
-            nominal_cap = float(self._pv["Nominal cell capacity [A.h]"])
-        except Exception:
-            nominal_cap = 5.0  # Chen2020 fallback
+        nominal_cap = float(self._pv["Nominal cell capacity [A.h]"])
 
         # Zero-reference the LLI at call 1 to exclude formation-cycle loss.  PyBAMM
         # may accumulate non-zero LLI from the initial simulation even before any
@@ -1666,8 +1589,9 @@ class PyBaMMOracle:
             idx, _ = _find_peaks(gamma)
             if len(idx):
                 return tau[idx]
-        except Exception:
-            pass
+        except Exception as exc:                  # noqa: BLE001 - a diagnostic, not the state
+            log.warning("[PyBaMMOracle] DRT failed (%s: %s); no DRT peaks this cycle",
+                        type(exc).__name__, str(exc)[:200])
         return np.array([], dtype=float)
 
     def _fit_ecm_half(self, Z: np.ndarray, diag: dict) -> np.ndarray:

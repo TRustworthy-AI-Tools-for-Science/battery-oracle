@@ -13,7 +13,7 @@
 cycling:
   n_cycles: 1
   parameter_set: Chen2020          # pybamm.ParameterValues("Chen2020"), 5 Ah NMC/graphite pouch cell
-  chemistry: Chen2020              # #14: must agree with parameter_set (validated). Chen2020 | Xu2019 | Prada2013.
+  chemistry: Chen2020              # #14: must agree with parameter_set (validated). Chen2020 | LiR2032 sets (parameter_sets.SUPPORTED_PARAMETER_SETS).
                                    # Non-Chen2020 needs its own calibration YAML (bounds/preset) -- see config_oracle_{dataset}.yml.
   temperature_K: 298.15            # 25 degC; sets "Ambient temperature [K]" when != 298.15 (isothermal)
   initial_soc: 0.80                # first-call starting SOC (keeps initial OCV inside the voltage window)

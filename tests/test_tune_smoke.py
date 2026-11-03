@@ -234,15 +234,15 @@ def test_write_oracle_config(tmp_path):
     }
     out = tmp_path / "config_oracle_test.yml"
     write_oracle_config(out, "mydata", "accelerated", "C01", 2, best, real, [best],
-                        chemistry="Prada2013")
+                        chemistry="LiR2032")
     assert out.exists()
     text = out.read_text()
     assert "protocol_scaling:" in text
     assert "kinetics_scale: 0.3" in text
     assert "_calibration:" in text
     # #14: chemistry is emitted for both parameter_set and chemistry.
-    assert "parameter_set: Prada2013" in text
-    assert "chemistry: Prada2013" in text
+    assert "parameter_set: LiR2032" in text
+    assert "chemistry: LiR2032" in text
 
 
 def test_write_calibration_summary(tmp_path):

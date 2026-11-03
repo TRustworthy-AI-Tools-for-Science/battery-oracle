@@ -134,12 +134,9 @@ def _build_degradation_config(
     # film by ~4× relative to Chen2020's LP30 baseline (Reniers et al., 2019;
     # Pinson & Bazant, 2013).  Applied identically to all presets because electrolyte
     # quality is a cell property, not a degradation severity setting.
-    try:
-        pv["EC diffusivity [m2.s-1]"] = (
-            float(pv["EC diffusivity [m2.s-1]"]) * ec_diffusivity_base_factor * sei_rate_scale
-        )
-    except Exception:
-        pass
+    pv["EC diffusivity [m2.s-1]"] = (
+        float(pv["EC diffusivity [m2.s-1]"]) * ec_diffusivity_base_factor * sei_rate_scale
+    )
 
     # sei_rate_scale scales EC diffusivity only. Scaling "SEI kinetic rate constant
     # [m.s-1]" too (the parameter "ec reaction limited" reads for its kinetics) is not
@@ -154,11 +151,7 @@ def _build_degradation_config(
             "Negative electrode exchange-current density [A.m-2]",
             "Positive electrode exchange-current density [A.m-2]",
         ):
-            try:
-                orig_fn = pv[key]
-                pv[key] = (lambda fn, s: lambda *a, **kw: fn(*a, **kw) * s)(orig_fn, kinetics_scale)
-            except Exception:
-                pass
+            pv[key] = (lambda fn, s: lambda *a, **kw: fn(*a, **kw) * s)(pv[key], kinetics_scale)
 
     if preset == "nominal":
         # PyBaMM 26.6.2.0 regression: particle mechanics ('swelling and cracking')
@@ -232,23 +225,12 @@ def _build_degradation_config(
         "Dead lithium decay rate [s-1]",
         "Lithium metal partial molar volume [m3.mol-1]",     # plated / dead Li thickness
     ]
-    try:
-        pv_ref = _pb.ParameterValues("OKane2022")
-        for k in _PLATING_BORROW_KEYS:
-            try:
-                _ = pv[k]   # already present — leave it
-            except (KeyError, Exception):
-                try:
-                    pv[k] = pv_ref[k]
-                except Exception:
-                    pass
-    except Exception:
-        pass   # OKane2022 unavailable — plating parameters stay as-is
+    pv_ref = _pb.ParameterValues("OKane2022")
+    for k in _PLATING_BORROW_KEYS:
+        if k not in pv:
+            pv[k] = pv_ref[k]
 
     for key, val in _override.items():
-        try:
-            pv[key] = val
-        except Exception:
-            pass   # key absent — skip silently
+        pv[key] = val
 
     return opts, pv

@@ -42,7 +42,6 @@ _ORACLE_CONFIG_NAME = "config_oracle_defaults.yml"
 # package's canonical circuit constant so every default path (direct construction,
 # oracle-config, experiment-config) resolves to the same string; the ECM layout is
 # still derived from the string, so nothing downstream hard-codes an element count.
-_FALLBACK_ECM_CIRCUIT = DEFAULT_CIRCUIT
 
 # 6-D protocol field order in the experiment-YAML's field-name spelling. The
 # ORDER is not redefined here -- it is derived by iterating
@@ -154,23 +153,14 @@ def oracle_kwargs_from_oracle_config(oracle_cfg: dict, preset: str | None = None
 
 
 def load_default_ecm_circuit() -> str:
-    """Return the default ECM circuit string from ``config_oracle_defaults.yml``.
-
-    Reads ``ecm.circuit`` from the packaged oracle config so the ECM structure is
-    defined in YAML, not hard-coded. Falls back to the canonical 9-parameter circuit
-    only if the field is absent. PyYAML only — no PyBaMM import.
+    """Return the default ECM circuit: ``ecm.circuit`` of the packaged
+    ``config_oracle_defaults.yml``, or :data:`DEFAULT_CIRCUIT` when that field is
+    absent. PyYAML only — no PyBaMM import.
     """
-    try:
-        with resources.files("battery_oracle").joinpath(
-            _ORACLE_CONFIG_NAME
-        ).open("r") as fh:
-            cfg = yaml.safe_load(fh) or {}
-        circuit = (cfg.get("ecm") or {}).get("circuit")
-        if isinstance(circuit, str) and circuit.strip():
-            return circuit.strip()
-    except Exception:
-        pass
-    return _FALLBACK_ECM_CIRCUIT
+    circuit = (load_oracle_config().get("ecm") or {}).get("circuit")
+    if isinstance(circuit, str) and circuit.strip():
+        return circuit.strip()
+    return DEFAULT_CIRCUIT
 
 
 def _validate_config(cfg: dict) -> None:
@@ -276,26 +266,15 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     pset = kwargs.pop("parameter_set", None)
 
     from battery_oracle.ecm import autoeis_ecm, randles_stub_ecm
-    from battery_oracle.oracle import _SUPPORTED_CHEMISTRIES, PyBaMMOracle
-    # #14: cross-layer chemistry validation — the config's declared chemistry must
-    # resolve to the same PyBaMM parameter set, so an LFP-calibrated YAML can't be
-    # silently paired with an NMC cell (mismatched degradation scales/bounds).
-    chem = kwargs.get("chemistry", "Chen2020")
-    if chem not in _SUPPORTED_CHEMISTRIES:
-        raise ValueError(
-            f"Unknown chemistry {chem!r}; choose one of {sorted(_SUPPORTED_CHEMISTRIES)}."
-        )
+    from battery_oracle.oracle import PyBaMMOracle
+    from battery_oracle.parameter_sets import check_chemistry, resolve_parameter_values
+    # #14: cross-layer chemistry validation — the config's declared chemistry must be
+    # its parameter set, so a YAML calibrated on one cell can't be silently paired
+    # with another (mismatched degradation scales/bounds).
+    check_chemistry(kwargs.get("chemistry", "Chen2020"), pset)
     if pset:
-        resolved = _SUPPORTED_CHEMISTRIES.get(chem, chem)
-        if resolved != pset:
-            raise ValueError(
-                f"Config chemistry {chem!r} (-> {resolved}) does not match "
-                f"parameter_set {pset!r}. Point the experiment at a calibration YAML "
-                f"whose chemistry matches its parameter_set."
-            )
         # local import — keeps the mapping layer PyBaMM-free; custom sets such as
         # "LiR2032" resolve through battery_oracle.parameter_sets.
-        from battery_oracle.parameter_sets import resolve_parameter_values
         kwargs["parameter_values"] = resolve_parameter_values(pset)
 
     fitter = kwargs.pop("ecm_fitter", _DEFAULT_ECM_FITTER)
@@ -321,20 +300,10 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     pset = kwargs.pop("parameter_set", None)
 
     from battery_oracle.ecm import randles_stub_ecm
-    from battery_oracle.oracle import _SUPPORTED_CHEMISTRIES, PyBaMMOracle
-    chem = kwargs.get("chemistry", "Chen2020")
-    if chem not in _SUPPORTED_CHEMISTRIES:
-        raise ValueError(
-            f"Unknown chemistry {chem!r}; choose one of {sorted(_SUPPORTED_CHEMISTRIES)}."
-        )
+    from battery_oracle.oracle import PyBaMMOracle
+    from battery_oracle.parameter_sets import check_chemistry, resolve_parameter_values
+    check_chemistry(kwargs.get("chemistry", "Chen2020"), pset)
     if pset:
-        resolved = _SUPPORTED_CHEMISTRIES.get(chem, chem)
-        if resolved != pset:
-            raise ValueError(
-                f"Config chemistry {chem!r} (-> {resolved}) does not match "
-                f"parameter_set {pset!r}."
-            )
-        from battery_oracle.parameter_sets import resolve_parameter_values
         kwargs["parameter_values"] = resolve_parameter_values(pset)
 
     # This layer carries an ecm.circuit-derived `circuit`; the fitter is not part

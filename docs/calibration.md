@@ -150,8 +150,9 @@ sidecars via {func}`~battery_oracle.plot_tune_oracle_summary` (or the
 A calibration for another dataset is its own `config_oracle_*.yml`, built from that
 dataset's cache and selected as an experiment config's `oracle_config` (or passed to
 {func}`~battery_oracle.build_oracle_from_oracle_config`). The config's `chemistry` is
-validated against its `parameter_set` at build time, so an LFP-calibrated YAML cannot
-be silently paired with an NMC cell.
+validated against its `parameter_set` at build time, so a YAML calibrated on one cell
+cannot be silently paired with another. The supported sets are
+`battery_oracle.parameter_sets.SUPPORTED_PARAMETER_SETS`.
 
 ### Dataset → cache adapter (procedure)
 
@@ -169,7 +170,7 @@ SOH-loss rate to the dataset's, leaving `kinetics_scale` near its chemistry defa
    protocol and record its measured `real_soh` (and/or `real_capacity_mah`).
 3. Write the cache JSON, then:
    ```bash
-   battery-oracle-tune --cache matr.json --chemistry Prada2013 --preset nominal \
+   battery-oracle-tune --cache matr.json --chemistry <parameter set> --preset nominal \
        --output-config config_oracle_matr.yml
    ```
 

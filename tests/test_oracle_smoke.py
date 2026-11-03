@@ -18,6 +18,7 @@ from battery_oracle import (
     state_vector_schema,
 )
 from battery_oracle._circuit import _param_labels_from_circuit
+from battery_oracle.oracle_config import OracleConfig
 
 
 def test_constants_consistent():
@@ -205,13 +206,19 @@ def test_save_to_csv_failure_and_fidelity_columns():
 
 # ── Phase 4: multi-chemistry (#14) ─────────────────────────────────────────
 
+def _other_chemistry() -> str:
+    from battery_oracle.parameter_sets import SUPPORTED_PARAMETER_SETS
+    return next(n for n in SUPPORTED_PARAMETER_SETS if n != OracleConfig().chemistry)
+
+
 def test_chemistry_kwarg_resolves_and_validates():
-    assert PyBaMMOracle()._chemistry == "Chen2020"  # default
-    lfp = PyBaMMOracle(chemistry="Prada2013")
-    assert lfp._chemistry == "Prada2013"
-    assert float(lfp._pv["Nominal cell capacity [A.h]"]) == pytest.approx(2.3)
-    # Friendly alias resolves to the same parameter set.
-    assert float(PyBaMMOracle(chemistry="LFP")._pv["Nominal cell capacity [A.h]"]) == pytest.approx(2.3)
+    from battery_oracle.parameter_sets import resolve_parameter_values
+    assert PyBaMMOracle()._chemistry == OracleConfig().chemistry  # default
+    name = _other_chemistry()
+    o = PyBaMMOracle(chemistry=name)
+    assert o._chemistry == name
+    nominal = float(resolve_parameter_values(name)["Nominal cell capacity [A.h]"])
+    assert float(o._pv["Nominal cell capacity [A.h]"]) == pytest.approx(nominal)
     with pytest.raises(ValueError):
         PyBaMMOracle(chemistry="bogus")
 
@@ -219,10 +226,12 @@ def test_chemistry_kwarg_resolves_and_validates():
 def test_explicit_parameter_values_wins_over_chemistry():
     import pybamm
     pv = pybamm.ParameterValues("Chen2020")
-    o = PyBaMMOracle(chemistry="Prada2013", parameter_values=pv)
+    pv["Nominal cell capacity [A.h]"] = 1.25
+    name = _other_chemistry()
+    o = PyBaMMOracle(chemistry=name, parameter_values=pv)
     # chemistry recorded for provenance, but the explicit pv is used.
-    assert o._chemistry == "Prada2013"
-    assert float(o._pv["Nominal cell capacity [A.h]"]) == pytest.approx(5.0)
+    assert o._chemistry == name
+    assert float(o._pv["Nominal cell capacity [A.h]"]) == pytest.approx(1.25)
 
 
 # ── Phase 2: thermal / Arrhenius / temperature protocol (#9, #11, #10) ──────

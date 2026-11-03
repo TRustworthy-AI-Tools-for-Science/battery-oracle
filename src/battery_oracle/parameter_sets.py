@@ -181,6 +181,23 @@ CUSTOM_PARAMETER_SETS = {
 }
 
 
+#: Parameter-set names the oracle accepts (``chemistry`` / ``cycling.parameter_set``).
+#: The oracle's SEI model ("ec reaction limited") needs EC-diffusivity and SEI
+#: parameters, which other PyBaMM sets lack.
+SUPPORTED_PARAMETER_SETS = ("Chen2020", *CUSTOM_PARAMETER_SETS)
+
+
+def check_chemistry(chemistry: str, parameter_set: str | None = None) -> None:
+    """Raise ValueError for an unsupported ``chemistry``, or one that differs from the
+    config's ``parameter_set`` (a calibration YAML paired with another cell)."""
+    if chemistry not in SUPPORTED_PARAMETER_SETS:
+        raise ValueError(f"Unknown chemistry {chemistry!r}; choose one of {list(SUPPORTED_PARAMETER_SETS)}.")
+    if parameter_set and parameter_set != chemistry:
+        raise ValueError(
+            f"Config chemistry {chemistry!r} does not match parameter_set {parameter_set!r}. "
+            "Point the experiment at a calibration YAML whose chemistry matches its parameter_set.")
+
+
 def resolve_parameter_values(name: str):
     """A custom set from :data:`CUSTOM_PARAMETER_SETS`, else ``pybamm.ParameterValues(name)``."""
     import pybamm

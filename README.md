@@ -139,10 +139,11 @@ demonstration/AL-loop role:
 
 - The shipped degradation presets (`nominal`/`accelerated`/`severe`) are
   calibrated against the **Chen2020 (LG M50, NMC811/graphite) parameter set**
-  running **SPMe**. Other chemistries (`Xu2019`, `Prada2013`/LFP) and other
-  models (`SPM`, `DFN`) run, but with an uncalibrated degradation trajectory —
-  pair them with their own calibration YAML (see `config_oracle_matr.yml` for
-  an LFP example) rather than trusting the default preset's cycle-to-EOL count.
+  running **SPMe**. The other supported parameter sets (the LiR2032 coin cells,
+  `parameter_sets.SUPPORTED_PARAMETER_SETS`) run with an uncalibrated degradation
+  trajectory — pair them with their own calibration YAML rather than trusting the
+  default preset's cycle-to-EOL count. Other PyBaMM sets are rejected: they lack
+  the SEI parameters the oracle's degradation model needs.
 - **Particle cracking / active-material-loss (LAM) submodels are currently
   disabled in every preset.** This works around an upstream PyBaMM regression
   in the particle-mechanics ("swelling and cracking") submodel — see the

@@ -171,10 +171,12 @@ def test_base_oracle_yaml_emits_chemistry():
 
 
 def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
-    """#14: an LFP-declared calibration YAML must not pair with an NMC parameter set."""
+    """#14: a calibration YAML declaring one chemistry must not pair with another set."""
     from battery_oracle.experiment import build_oracle_from_config
+    from battery_oracle.parameter_sets import SUPPORTED_PARAMETER_SETS
+    a, b = SUPPORTED_PARAMETER_SETS[:2]
     cfg = {
-        "cycling": {"parameter_set": "Chen2020", "chemistry": "Prada2013"},
+        "cycling": {"parameter_set": a, "chemistry": b},
         "degradation": {"preset": "accelerated"},
         "eis": {}, "ecm": {},
         "protocols": [{"C_rate_1": 100, "C_rate_2": 50, "duration_1": 1,

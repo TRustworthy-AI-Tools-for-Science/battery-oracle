@@ -18,9 +18,9 @@ import numpy as np
 class OracleConfig:
     n_cycles: int = 1
     frequencies: np.ndarray | None = None
-    # Multi-chemistry (#14): validated PyBaMM parameter-set name. Ignored if an
-    # explicit parameter_values object is passed. Non-Chen2020 chemistries need
-    # their own calibration YAML (bounds/preset) — see _SUPPORTED_CHEMISTRIES.
+    # Multi-chemistry (#14): validated parameter-set name. Ignored if an explicit
+    # parameter_values object is passed. Non-Chen2020 chemistries need their own
+    # calibration YAML (bounds/preset) — see parameter_sets.SUPPORTED_PARAMETER_SETS.
     chemistry: str = "Chen2020"
     degradation_preset: str = "accelerated"
     eol_capacity_fraction: float = 0.80

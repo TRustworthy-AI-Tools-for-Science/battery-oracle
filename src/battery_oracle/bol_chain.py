@@ -916,10 +916,7 @@ class ChainModel:
         # Electrolyte exhausted (c_e <= 0 anywhere) or non-finite voltage: the cell could
         # not carry the measured current from here on -- the real one did -- so the
         # history ends here for scoring; the graded penalty scores what is left.
-        try:
-            ce_min_t = np.asarray(sol[CE_MIN_VAR].entries, float).ravel()
-        except Exception:                       # noqa: BLE001
-            ce_min_t = np.ones_like(ts)
+        ce_min_t = np.asarray(sol[CE_MIN_VAR].entries, float).ravel()
         # physical floor: below CE_FLOOR x c0 the candidate is treated as depleted, so
         # the fit cannot buy rate limitation with an electrolyte state no real cell has
         c0 = float(pv["Initial concentration in electrolyte [mol.m-3]"])
@@ -949,11 +946,8 @@ class ChainModel:
                     f"envelope probe ({pr['charge_ma']:.0f} mA charge / {pr['discharge_ma']:.0f} mA discharge) "
                     f"failed: electrolyte min {pr['c_e_min_rel']} c0, simulated {sim_end - t_probe:.0f} of "
                     f"{t_end - t_probe:.0f} s ({diag.get('stopped') or diag['termination']})")
-        try:
-            diag["T_max_K"] = float(np.max(sol["Volume-averaged cell temperature [K]"].entries))
-            diag["c_e_min_rel"] = float(np.min(ce_min_t) / c0)
-        except Exception:                       # noqa: BLE001 - diagnostics only
-            pass
+        diag["T_max_K"] = float(np.max(sol["Volume-averaged cell temperature [K]"].entries))
+        diag["c_e_min_rel"] = float(np.min(ce_min_t) / c0)
         # OCP guard: surface stoichiometry vs the OCP data range.
         ocp = {}
         for dom in ("negative", "positive"):

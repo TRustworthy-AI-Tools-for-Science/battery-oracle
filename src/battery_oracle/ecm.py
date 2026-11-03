@@ -54,18 +54,15 @@ def _init_autoeis_patches() -> None:
     # shared-memory corruption can propagate back, killing the parent too.  Spawn
     # starts a fresh interpreter with no inherited native JIT state.
     # Must run before AutoEIS is used, as mpire is pulled in at autoeis import.
-    try:
-        import mpire as _mpire
-        _orig_wp_init = _mpire.WorkerPool.__init__
-        def _spawn_wp_init(self, *args, **kwargs):
-            kwargs.setdefault('start_method', 'spawn')
-            _orig_wp_init(self, *args, **kwargs)
-        _mpire.WorkerPool.__init__ = _spawn_wp_init
-        # Note: _orig_wp_init must stay reachable — _spawn_wp_init looks it up
-        # via closure over this function's locals, so it must not be
-        # garbage-collected while the patched __init__ can still be called.
-    except Exception:
-        pass
+    import mpire as _mpire
+    _orig_wp_init = _mpire.WorkerPool.__init__
+    def _spawn_wp_init(self, *args, **kwargs):
+        kwargs.setdefault('start_method', 'spawn')
+        _orig_wp_init(self, *args, **kwargs)
+    _mpire.WorkerPool.__init__ = _spawn_wp_init
+    # Note: _orig_wp_init must stay reachable — _spawn_wp_init looks it up
+    # via closure over this function's locals, so it must not be
+    # garbage-collected while the patched __init__ can still be called.
 
     # Monkeypatch autoeis.utils.initialize_priors to fix its excessively wide prior
     # (the same fix as inference.py's training-path patch). Without it the admittance

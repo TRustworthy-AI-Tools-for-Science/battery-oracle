@@ -66,6 +66,7 @@ from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_conf
 from battery_oracle.ecm import randles_stub_ecm
 from battery_oracle.failures import OracleFailure
 from battery_oracle.oracle import PyBaMMOracle
+from battery_oracle.parameter_sets import SUPPORTED_PARAMETER_SETS
 
 log = logging.getLogger(__name__)
 
@@ -1578,7 +1579,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
                         "Computed from the cache when omitted.")
     p.add_argument("--dataset", default="custom", help="Label written into the config provenance.")
     p.add_argument("--chemistry", default="Chen2020",
-                   choices=["Chen2020", "Xu2019", "Prada2013"],
+                   choices=list(SUPPORTED_PARAMETER_SETS),
                    help="Cell chemistry; written to the output config's parameter_set + chemistry (#14).")
     p.add_argument("--cell-id", default=None, help="Cell label; defaults to the cache's cell_id.")
     p.add_argument("--preset", default="accelerated",

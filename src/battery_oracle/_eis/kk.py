@@ -12,8 +12,12 @@ Implements the three-step procedure from Luo et al. (2021):
   4. kk_residuals    - normalised residuals at the original measurement grid
 """
 
+import logging
+
 import numpy as np
 from scipy.interpolate import CubicSpline as _CubicSpline
+
+log = logging.getLogger(__name__)
 
 
 def kk_interpolate(freq, Z, n_per_decade=20):
@@ -174,7 +178,8 @@ def linkk_residuals(freq, Z, c: float = 0.85, max_M: int = 50):
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             _, _, _Z_fit, res_real, res_imag = linKK(f, Z, c=c, max_M=max_M)
-    except Exception:
+    except Exception as exc:                  # noqa: BLE001 - a diagnostic, not the state
+        log.warning("linKK failed (%s: %s)", type(exc).__name__, str(exc)[:200])
         return None
     return f, np.asarray(res_real), np.asarray(res_imag)
 
