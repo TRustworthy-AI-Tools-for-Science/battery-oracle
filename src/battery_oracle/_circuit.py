@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from itertools import permutations
+from typing import NamedTuple
 
 import numpy as np
 
@@ -51,6 +52,28 @@ def _param_labels_from_circuit(circuit: str) -> list[str]:
 
 ECM_PARAM_NAMES = _param_labels_from_circuit(DEFAULT_CIRCUIT)
 """Canonical ECM parameter names derived from ``DEFAULT_CIRCUIT``."""
+
+
+class CircuitRoles(NamedTuple):
+    """What each element of an R/C/P circuit is (see :func:`circuit_roles`)."""
+    labels: list[str]               # AutoEIS parameter labels, circuit order
+    ohmic: str                      # the series resistor (not inside any [R, CPE] arc)
+    pairs: list[tuple[str, str]]    # the (R, CPE) arcs
+    series_cpes: list[str]          # CPEs not inside any arc, e.g. "P2"
+
+
+def circuit_roles(circuit: str) -> CircuitRoles:
+    """Labels, ohmic resistor, arcs and series CPEs of ``circuit``."""
+    labels = _param_labels_from_circuit(circuit)
+    pairs = randles_pairs_from_circuit(circuit)
+    arc_rs = {r for r, _ in pairs}
+    arc_ps = {p for _, p in pairs}
+    ohmic = next((lbl for lbl in labels if lbl.startswith("R") and lbl not in arc_rs), None)
+    if ohmic is None:
+        raise ValueError(f"circuit {circuit!r} has no series (ohmic) resistor")
+    series = [lbl[:-1] for lbl in labels
+              if lbl.startswith("P") and lbl.endswith("w") and lbl[:-1] not in arc_ps]
+    return CircuitRoles(labels, ohmic, pairs, series)
 
 
 # ---------------------------------------------------------------------------

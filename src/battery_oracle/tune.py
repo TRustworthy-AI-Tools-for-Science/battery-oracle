@@ -58,10 +58,7 @@ from typing import Any
 
 import numpy as np
 
-from battery_oracle._circuit import (
-    _param_labels_from_circuit,
-    randles_pairs_from_circuit,
-)
+from battery_oracle._circuit import _param_labels_from_circuit, circuit_roles
 from battery_oracle.experiment import load_default_ecm_circuit, load_oracle_config
 from battery_oracle.ecm import randles_stub_ecm
 from battery_oracle.failures import OracleFailure
@@ -88,11 +85,8 @@ def _ecm_indices(circuit: str) -> tuple[int, list[int]]:
     resistors inside the brackets. Returns ``(ohmic_index, [arc_r_indices])`` into
     the ECM parameter vector whose labels are ``_param_labels_from_circuit(circuit)``.
     """
-    labels = _param_labels_from_circuit(circuit)
-    pairs = randles_pairs_from_circuit(circuit)
-    arc_rs = [r for r, _ in pairs]
-    ohmic = next((l for l in labels if l.startswith("R") and l not in arc_rs), labels[0])
-    return labels.index(ohmic), [labels.index(r) for r in arc_rs]
+    labels, ohmic, pairs, _ = circuit_roles(circuit)
+    return labels.index(ohmic), [labels.index(r) for r, _ in pairs]
 
 
 def _reconstruct_ecm_spectrum(circuit: str, params, frequencies: np.ndarray) -> np.ndarray:

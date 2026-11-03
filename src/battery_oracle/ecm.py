@@ -8,8 +8,7 @@ import threading
 import numpy as np
 
 from battery_oracle._circuit import DEFAULT_CIRCUIT as _PROJECT_CIRCUIT
-from battery_oracle._circuit import _param_labels_from_circuit
-from battery_oracle._circuit import randles_pairs_from_circuit as _randles_pairs_from_circuit
+from battery_oracle._circuit import circuit_roles
 
 log = logging.getLogger(__name__)
 
@@ -155,12 +154,7 @@ def randles_stub_ecm(
     peak_idx = int(np.argmax(-Z_imag))
     omega_peak = 2 * np.pi * frequencies[peak_idx]
 
-    labels = _param_labels_from_circuit(circuit)
-    pairs = _randles_pairs_from_circuit(circuit)
-    arc_rs = {r for r, _ in pairs}
-    arc_ps = {p for _, p in pairs}
-    ohmic_label = next((l for l in labels if l.startswith("R") and l not in arc_rs),
-                       labels[0])
+    labels, ohmic_label, pairs, series_cpes = circuit_roles(circuit)
     weights = [0.6, 0.4] if len(pairs) == 2 else [1.0 / max(len(pairs), 1)] * len(pairs)
 
     values = {ohmic_label: R_ohmic}
@@ -168,10 +162,9 @@ def randles_stub_ecm(
         values[r] = R_total_rc * w
         values[f"{p}w"] = 1.0 / max(values[r] * omega_peak, 1e-9)
         values[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
-    for l in labels:                                   # series CPE(s): P not in any arc
-        if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
-            values[l] = 1.0 / max(R_ohmic * omega_peak, 1e-9)
-            values[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
+    for p in series_cpes:
+        values[f"{p}w"] = 1.0 / max(R_ohmic * omega_peak, 1e-9)
+        values[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
 
     half = np.array([values[l] for l in labels], dtype=np.float64)
     return np.concatenate([half, half])
@@ -254,21 +247,16 @@ def autoeis_ecm(
     #   - each arc resistor <- share of the RC resistance (0.6/0.4 for two arcs,
     #     else split evenly); its CPE admittance/exponent from the seed maps
     #   - any series CPE (a P not paired with an R) from the seed maps
-    labels = _param_labels_from_circuit(circuit)
-    pairs  = _randles_pairs_from_circuit(circuit)      # [("R3","P4"), ("R5","P6")] for C9
-    arc_rs = [r for r, _ in pairs]
-    arc_ps = {p for _, p in pairs}
-    ohmic  = next((l for l in labels if l.startswith("R") and l not in arc_rs), "R1")
+    labels, ohmic, pairs, series_cpes = circuit_roles(circuit)
     weights = [0.6, 0.4] if len(pairs) == 2 else [1.0 / max(len(pairs), 1)] * len(pairs)
     p0 = {ohmic: max(R0_est, 1e-4)}
     for (r, p), w in zip(pairs, weights):
         p0[r] = R_rc * w
         p0[f"{p}w"] = cpe_w_seed.get(f"{p}w", cpe_w_default)
         p0[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
-    for l in labels:                                   # series CPE(s): P not in any arc
-        if l.startswith("P") and l.endswith("w") and l[:-1] not in arc_ps:
-            p0[l] = cpe_w_seed.get(l, cpe_w_default)
-            p0[f"{l[:-1]}n"] = cpe_n_seed.get(f"{l[:-1]}n", cpe_n_default)
+    for p in series_cpes:
+        p0[f"{p}w"] = cpe_w_seed.get(f"{p}w", cpe_w_default)
+        p0[f"{p}n"] = cpe_n_seed.get(f"{p}n", cpe_n_default)
 
     _raw_samples: dict | None = None
     _variables: list[str] = []
@@ -300,8 +288,10 @@ def autoeis_ecm(
         # a ~64x chain-unstable statistic that lands far in the training tail while
         # the median is stable. Matching the training statistic keeps the oracle's
         # observed state in-distribution (fixes the P2w VarianceAlignment collapse).
+        # In circuit-label order (the vector's documented layout), whatever order
+        # AutoEIS lists its variables in.
         half = np.array(
-            [float(np.median(_raw_samples[k])) for k in _variables],
+            [float(np.median(_raw_samples[k])) for k in labels],
             dtype=np.float64,
         )
         if _diag is not None:

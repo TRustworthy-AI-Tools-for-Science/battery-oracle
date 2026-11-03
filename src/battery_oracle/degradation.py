@@ -5,6 +5,8 @@ import copy
 
 import pybamm as _pb
 
+from battery_oracle.params import _scaled
+
 
 # ---------------------------------------------------------------------------
 # Degradation configuration helper
@@ -151,7 +153,7 @@ def _build_degradation_config(
             "Negative electrode exchange-current density [A.m-2]",
             "Positive electrode exchange-current density [A.m-2]",
         ):
-            pv[key] = (lambda fn, s: lambda *a, **kw: fn(*a, **kw) * s)(pv[key], kinetics_scale)
+            pv[key] = _scaled(pv[key], kinetics_scale)
 
     if preset == "nominal":
         # PyBaMM 26.6.2.0 regression: particle mechanics ('swelling and cracking')
