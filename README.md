@@ -40,7 +40,6 @@ uv sync --extra drt              # + DRT peaks (hybrid-drt)
 |------------|---------------------------------------------------------------|----------------------------------------------|
 | `autoeis`  | Bayesian ECM fitting via AutoEIS                              | falls back to the fast analytic Randles stub |
 | `drt`      | distribution-of-relaxation-times peaks (`hybrid-drt`)         | DRT peaks omitted                            |
-| `rich`     | prettier logging handler                                      | plain stdlib logging                         |
 
 ## Usage
 

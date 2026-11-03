@@ -21,7 +21,6 @@ pip install "battery-oracle[autoeis] @ git+https://github.com/TRustworthy-AI-Too
 |------------|---------------------------------------------------------------|----------------------------------------------|
 | `autoeis`  | Bayesian ECM fitting via AutoEIS                              | falls back to the fast analytic Randles stub |
 | `drt`      | distribution-of-relaxation-times peaks (`hybrid-drt`)         | DRT peaks omitted                            |
-| `rich`     | prettier logging handler                                      | plain stdlib logging                         |
 | `docs`     | Sphinx + furo + myst-nb to build these docs                   | —                                            |
 
 Heavy optional dependencies (AutoEIS/JAX, Optuna, DRT git packages) are

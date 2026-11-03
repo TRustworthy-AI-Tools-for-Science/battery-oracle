@@ -153,8 +153,8 @@ Rejected physics, with their tests and registrations:
 | tune.py, tune_plots.py, `battery-oracle-tune` entry point | ~2,430 | `battery_forecast/oracle_tune/` (BF already has its own CLI) |
 | `save_to_csv` (BattMAP format), `plot_diagnostics` | ~370 | BF utils/plots |
 | `make_pybamm_candidates` | 52 | BF candidates |
-| `_plotting.py`, `_eis/drt.py`, the `kk_*` pipeline, `ecm_kk_validate` | ~400 | BF analysis/eis (it already re-exports them) |
-| `experiment.run_experiment`, config_experiment_defaults.yml | ~200 | BF (it has its own `run_experiment`) |
+| `_plotting.py`, the `kk_*` pipeline, `ecm_kk_validate` | ~300 | BF analysis/eis (it already re-exports them). `_eis/drt.py` stays: the oracle records per-cycle `drt_peaks`, which the exp2 audit reads. |
+| ~~`experiment.run_experiment`, config_experiment_defaults.yml~~ | — | stays in battery-oracle (decision 2026-11-03): the oracle's standalone protocol-file runner; BF does not use it |
 
 - Keep `linkk_rmse` in the core: it's a per-cycle physical check.
 - **Public API for what BF uses:**
