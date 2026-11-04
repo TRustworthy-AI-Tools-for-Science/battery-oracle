@@ -1654,22 +1654,19 @@ class PyBaMMOracle:
         return full[:len(self._ecm_param_names)]
 
     def _ecm_std_half(self, diag: dict) -> np.ndarray:
-        """Per-parameter AutoEIS posterior std, aligned to the mean vector.
-
-        The mean half is built by iterating ``_raw_variables`` (see ``autoeis_ecm``:
-        ``half = [median(samples[k]) for k in _variables]``), so the std MUST iterate
-        the same order to line up with the means. Returns all-NaN when AutoEIS fell
-        back to the Randles stub (no samples), which a downstream DMDc/audit consumer
-        drops or imputes.
+        """Per-parameter AutoEIS posterior std, aligned to the mean vector: both are in
+        the circuit's label order (``autoeis_ecm`` takes the medians in label order,
+        whatever order AutoEIS lists its variables in). All-NaN when AutoEIS fell back
+        to the Randles stub (no samples), which a downstream DMDc/audit consumer drops
+        or imputes.
         """
-        n_params = len(self._ecm_param_names)
+        out = np.full(len(self._ecm_param_names), np.nan)
         samples = diag.get("_raw_samples")
-        variables = diag.get("_raw_variables") or []
-        out = np.full(n_params, np.nan)
         if not samples:
             return out
-        vals = [float(np.std(np.asarray(samples[k]))) for k in variables[:n_params]]
-        out[:len(vals)] = vals
+        for i, k in enumerate(self._ecm_param_names):
+            if k in samples:
+                out[i] = float(np.std(np.asarray(samples[k])))
         return out
 
 

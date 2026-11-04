@@ -158,5 +158,7 @@ def fix_parameter_flips_dicts(sample_dicts, circuit: str) -> None:
 
     Lowest-level public entry point.  Arc pairs are derived from ``circuit``.
     """
+    if not isinstance(circuit, str) or not circuit:
+        raise ValueError(f"fix_parameter_flips_dicts needs the circuit string, got {circuit!r}")
     pairs = randles_pairs_from_circuit(circuit)
     _fix_arc_flips(list(sample_dicts), pairs)
