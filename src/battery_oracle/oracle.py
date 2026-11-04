@@ -1227,7 +1227,8 @@ class PyBaMMOracle:
 
         # DoD damage is accumulated BEFORE the EIS linearisation so it reduces ε_s
         # there and shows up in the impedance (see _accumulate_dod_lam).
-        self._accumulate_dod_lam(protocol)
+        step_stats = self._step_stats(last_cycle)
+        self._accumulate_dod_lam(step_stats)
         eis_pv, lam_frac = self._eis_parameter_values(sol)
         sei_thick, dead_li_thick, delta_R_ohmic = self._ohmic_films(sol)
 
@@ -1274,7 +1275,7 @@ class PyBaMMOracle:
             "cumulative_dod_lam_ah":    self._cumulative_dod_lam_ah,
             # Per-step throughput / duration / end voltage (see _step_stats) --
             # what the tune engine's step-shape term compares to real GCPL steps.
-            "step_stats":         self._step_stats(last_cycle),
+            "step_stats":         step_stats,
             # EIS spectra at this call, jones2022 raw-data convention
             # (freq/Hz, Re(Z)/Ohm, -Im(Z)/Ohm) so a Nyquist plot is just
             # ax.plot(Z_charge_real, Z_charge_neg_imag).
@@ -1392,8 +1393,11 @@ class PyBaMMOracle:
         return (float(last_cycle.steps[4][T_VAR].entries[-1]),
                 float(last_cycle.steps[1][T_VAR].entries[-1]))
 
-    def _accumulate_dod_lam(self, protocol: np.ndarray) -> None:
-        """DoD / charge-induced-stress LAM increment (see __init__).
+    def _accumulate_dod_lam(self, step_stats: list[dict]) -> None:
+        """DoD / charge-induced-stress LAM increment (see __init__), from the simulated
+        cycle: the depth of discharge is the discharge step's throughput / nominal
+        capacity, the stress uses the first charge stage's C-rate (a step stopped early
+        at a voltage limit counts only what it passed).
 
         Called before the EIS linearisation, so depth-of-discharge damage reduces ε_s
         there and therefore shows up in the impedance as a grown charge-transfer arc
@@ -1403,11 +1407,10 @@ class PyBaMMOracle:
         """
         if self._dod_lam_scale <= 0.0:
             return
-        p = np.asarray(protocol)
-        dod_frac = max(0.0, float(p[4]) * float(p[5]) / self._real_cell_capacity_mah)
-        stress = float(np.sqrt(
-            max(0.0, float(p[0]) / self._real_cell_capacity_mah) * dod_frac
-        ))
+        dis = next(r for r in step_stats if r["kind"] == "dis")
+        chg = next(r for r in step_stats if r["kind"] == "chg")
+        dod_frac = max(0.0, float(dis["frac"]))
+        stress = float(np.sqrt(max(0.0, float(chg["crate"])) * dod_frac))
         self._cumulative_dod_throughput_ah += dod_frac
         self._cumulative_dod_lam_frac += (
             self._dod_lam_scale * stress * dod_frac

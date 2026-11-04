@@ -356,3 +356,20 @@ def test_mesh_setting_x_factor_refines_the_electrolyte_mesh():
     d = model.default_var_pts
     assert vp["r_n"] == 80 and vp["x_n"] == 2 * d["x_n"] and vp["x_s"] == 2 * d["x_s"]
     assert o._model_submesh(model) is None          # uniform: PyBaMM's submeshes
+
+
+def test_dod_lam_follows_the_simulated_discharge():
+    """The DoD-LAM increment uses what the cycle discharged (a discharge stopped at the
+    voltage limit counts only what it passed), not the requested current x duration."""
+    def stats(frac):
+        return [{"kind": "dis", "frac": frac, "crate": 1.0}, {"kind": "rest"},
+                {"kind": "chg", "frac": 0.2, "crate": 1.0}, {"kind": "chg"}, {"kind": "rest"}]
+
+    full, cut = PyBaMMOracle(dod_lam_scale=1.0), PyBaMMOracle(dod_lam_scale=1.0)
+    full._accumulate_dod_lam(stats(0.8))
+    cut._accumulate_dod_lam(stats(0.2))
+    assert cut._cumulative_dod_throughput_ah == pytest.approx(0.2)
+    assert 0.0 < cut._cumulative_dod_lam_frac < full._cumulative_dod_lam_frac
+    off = PyBaMMOracle()
+    off._accumulate_dod_lam(stats(0.8))
+    assert off._cumulative_dod_lam_frac == 0.0
