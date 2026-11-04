@@ -240,29 +240,30 @@ def run_candidates(meta, inputs: list[dict], n_workers: int, timeout_s: float) -
     return costs
 
 
-_BEST: dict = {"cost": np.inf}
 #: worker-pool health of this process: workers killed from outside (rerun, not
 #: scored) and the current number of concurrent workers
 POOL_STATS: dict = {"killed_workers": 0, "workers": None}
 
 
-def _checkpoint_best(path: str | None, inputs: list, costs) -> None:
-    """Keep the best candidate seen so far; when ``path`` names a file, rewrite it on
-    every improvement, so a fit stopped by the job's time limit still leaves its best
-    parameters (PyBOP writes results only at the end)."""
+def _checkpoint_best(best: dict, path: str | None, inputs: list, costs) -> None:
+    """Keep the best candidate seen so far in ``best`` (one per fit problem); when
+    ``path`` names a file, rewrite it on every improvement, so a fit stopped by the
+    job's time limit still leaves its best parameters (PyBOP writes results only at the
+    end)."""
     import json
     import os
     import time
 
-    k = int(np.argmin(costs)) if len(costs) else -1
-    if k < 0 or not np.isfinite(costs[k]) or costs[k] >= _BEST["cost"]:
+    costs = np.asarray(costs, dtype=float).ravel()
+    k = int(np.argmin(costs)) if costs.size else -1
+    if k < 0 or not np.isfinite(costs[k]) or costs[k] >= best.get("cost", np.inf):
         return
-    best = {key: float(np.asarray(v, dtype=float).ravel()[0]) for key, v in dict(inputs[k]).items()}
-    _BEST.update(cost=float(costs[k]), inputs=best, time=time.time())
+    inputs_k = {key: float(np.asarray(v, dtype=float).ravel()[0]) for key, v in dict(inputs[k]).items()}
+    best.update(cost=float(costs[k]), inputs=inputs_k, time=time.time())
     if path:
         tmp = f"{path}.tmp"
         with open(tmp, "w") as fh:
-            json.dump({"best_cost": _BEST["cost"], "best_inputs": best,
+            json.dump({"best_cost": best["cost"], "best_inputs": inputs_k,
                        "written": time.strftime("%Y-%m-%d %H:%M:%S")}, fh, indent=1)
         os.replace(tmp, path)
 
@@ -278,19 +279,27 @@ def _install_parallel_batches() -> None:
 
     def set_run(self, workers: int = 1, timeout_s: float = 600.0, checkpoint: str | None = None) -> None:
         """Concurrent candidate workers, the per-candidate time limit and the
-        best-so-far checkpoint file of this problem's fit."""
+        best-so-far checkpoint file of this problem's fit (its best so far resets)."""
         self._n_workers = max(1, int(workers))
         self._timeout_s = float(timeout_s)
         self._checkpoint = checkpoint
+        self._best = {"cost": np.inf}
 
     def evaluate_batch(self, inputs, calculate_sensitivities: bool = False):
-        n = getattr(self, "_n_workers", 1)
-        if n <= 1 or len(inputs) <= 1 or calculate_sensitivities:
+        if calculate_sensitivities:
             return original(self, inputs, calculate_sensitivities)
         inputs = list(inputs)
-        costs = run_candidates(self, inputs, n, self._timeout_s)
-        _checkpoint_best(self._checkpoint, inputs, costs)
-        return Evaluation(values=costs)
+        n = getattr(self, "_n_workers", 1)
+        if n <= 1 or len(inputs) <= 1:
+            result = original(self, inputs, calculate_sensitivities)
+            costs = result.values
+        else:
+            costs = run_candidates(self, inputs, n, self._timeout_s)
+            result = Evaluation(values=costs)
+        # both paths keep the problem's best so far (and its checkpoint file)
+        _checkpoint_best(self.__dict__.setdefault("_best", {"cost": np.inf}), getattr(self, "_checkpoint", None),
+                         inputs, costs)
+        return result
 
     MetaProblem.evaluate_batch = evaluate_batch
     MetaProblem.set_run = set_run

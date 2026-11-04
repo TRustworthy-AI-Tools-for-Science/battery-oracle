@@ -61,19 +61,19 @@ def test_candidate_exception_is_still_scored_inf(fake_problem):
 
 
 def test_fit_checkpoint_keeps_the_best_candidate(tmp_path):
-    """parallel_batches writes the best-so-far candidate (FitConfig.checkpoint), so a
-    fit killed at the job time limit still leaves its parameters."""
+    """Each fit problem keeps its own best-so-far candidate (FitConfig.checkpoint), so a
+    fit killed at the job time limit still leaves its parameters, and two fits in one
+    process do not share a best."""
     import json
 
-    from battery_oracle.fit import pybop_ext
-
     path = tmp_path / "cell.checkpoint.json"
-    pybop_ext._BEST.clear()
-    pybop_ext._BEST["cost"] = np.inf
-    pybop_ext._checkpoint_best(str(path), [{"a": 1.0}, {"a": np.array([2.0])}], np.array([3.0, 1.0]))
+    best, other = {"cost": np.inf}, {"cost": np.inf}
+    pybop_ext._checkpoint_best(best, str(path), [{"a": 1.0}, {"a": np.array([2.0])}], np.array([3.0, 1.0]))
     first = json.loads(path.read_text())
     assert first["best_cost"] == 1.0 and first["best_inputs"] == {"a": 2.0}
-    pybop_ext._checkpoint_best(str(path), [{"a": 5.0}], np.array([4.0]))            # worse: unchanged
+    pybop_ext._checkpoint_best(best, str(path), [{"a": 5.0}], np.array([4.0]))            # worse: unchanged
     assert json.loads(path.read_text())["best_inputs"] == {"a": 2.0}
-    pybop_ext._checkpoint_best(str(path), [{"a": 7.0}], np.array([np.inf]))         # failed: unchanged
+    pybop_ext._checkpoint_best(best, str(path), [{"a": 7.0}], np.array([np.inf]))         # failed: unchanged
     assert json.loads(path.read_text())["best_cost"] == 1.0
+    pybop_ext._checkpoint_best(other, None, [{"a": 9.0}], np.array([2.0]))                # another fit
+    assert other["cost"] == 2.0 and best["cost"] == 1.0
