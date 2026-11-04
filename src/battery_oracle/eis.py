@@ -123,10 +123,12 @@ def windows_from_stamps(stamps):
     return start, end
 
 
-def equilibrium_impedance(model_cls, pv, frequencies, soc: float) -> np.ndarray:
-    """Impedance [Ohm] of a relaxed cell at ``soc`` (PyBaMM ``EISSimulation``, double
-    layer on, isothermal)."""
+def equilibrium_impedance(model, pv, frequencies, soc: float, *, var_pts=None,
+                          submesh_types=None) -> np.ndarray:
+    """Impedance [Ohm] of a relaxed cell at ``soc`` (PyBaMM ``EISSimulation``) for a
+    built PyBaMM model (double layer on: ``surface form: differential``), on the given
+    mesh (None: PyBaMM's defaults)."""
     import pybamm
 
-    sim = pybamm.EISSimulation(model_cls(options={"surface form": "differential"}), parameter_values=pv)
+    sim = pybamm.EISSimulation(model, parameter_values=pv, var_pts=var_pts, submesh_types=submesh_types)
     return np.array(sim.solve(frequencies, initial_soc=soc)["Impedance [Ohm]"])

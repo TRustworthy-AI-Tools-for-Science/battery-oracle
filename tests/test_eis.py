@@ -67,3 +67,22 @@ def test_linearised_impedance_at_the_initial_state_reproduces_pybop_eis():
     mine = linearised_impedance(sim, np.zeros(f.size), np.tile(y0[:, None], (1, f.size)), f,
                                 impedance_scale(model, pv0))
     assert np.allclose(mine, np.asarray(stock), rtol=1e-5, atol=1e-9)
+
+
+@pytest.mark.slow
+def test_equilibrium_impedance_carries_the_contact_resistance():
+    """With the contact-resistance option the whole spectrum shifts right by R_c (a series
+    resistor); without it the parameter is ignored."""
+    import pybamm
+
+    from battery_oracle.eis import equilibrium_impedance
+
+    pv = pybamm.ParameterValues("Chen2020")
+    r_c = 0.05
+    pv.update({"Contact resistance [Ohm]": r_c}, check_already_exists=False)
+    f = np.logspace(3, -1, 6)
+    plain = equilibrium_impedance(pybamm.lithium_ion.DFN(options={"surface form": "differential"}), pv, f, 0.5)
+    with_rc = equilibrium_impedance(pybamm.lithium_ion.DFN(options={"surface form": "differential",
+                                                                    "contact resistance": "true"}), pv, f, 0.5)
+    np.testing.assert_allclose(with_rc.real - plain.real, r_c, rtol=1e-6)
+    np.testing.assert_allclose(with_rc.imag, plain.imag, rtol=1e-6, atol=1e-12)

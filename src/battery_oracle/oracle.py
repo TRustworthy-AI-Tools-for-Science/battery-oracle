@@ -1477,7 +1477,14 @@ class PyBaMMOracle:
             if d_r > 0.0:
                 Z = (Z.real + d_r) + 1j * Z.imag
             return self._add_eis_noise(Z)
-        Z = equilibrium_impedance(_MODEL_CLS, eis_pv, self.frequencies, soc)
+        # the cycling model's contact resistance and mesh; isothermal and without SEI
+        # (temperature and the films enter analytically below)
+        opts = {"surface form": "differential"}
+        if self._deg_opts.get("contact resistance") == "true":
+            opts["contact resistance"] = "true"
+        model = _MODEL_CLS(options=opts)
+        Z = equilibrium_impedance(model, eis_pv, self.frequencies, soc, var_pts=self._model_var_pts(model),
+                                  submesh_types=self._model_submesh(model))
         # Arrhenius temperature dependence (#11): the EIS model is solved
         # isothermally, so temperature enters analytically. Scale the
         # charge-transfer arc by exp(E_a/R (1/T - 1/T_ref)) and the
