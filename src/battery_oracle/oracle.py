@@ -100,7 +100,7 @@ class PyBaMMOracle:
     this instance for a new run starting from a fresh cell.
 
     If the PyBaMM simulation fails (even after an emergency retry with the emergency
-    solver on the same model), :class:`OracleFailure` is raised -- the model is never
+    solver on the same model), :class:`~battery_oracle.OracleFailure` is raised -- the model is never
     swapped for a reduced one.  The caller should
     treat this as battery end-of-life and end the active learning loop; the
     oracle state is **not** reset automatically.
@@ -162,7 +162,7 @@ class PyBaMMOracle:
         rates and surfaces ``T_cell_K`` in the state vector). See
         ``T_ambient_K``/``h_total_W_per_m2K``.
     eol_capacity_fraction : float
-        SOH threshold below which :class:`OracleFailure` is raised (default 0.80).
+        SOH threshold below which :class:`~battery_oracle.OracleFailure` is raised (default 0.80).
     capacity_check : bool
         If ``True``, append a C/20 reference discharge after each cycle to
         measure usable capacity directly.  Slower but more accurate.
@@ -1676,7 +1676,7 @@ class PyBaMMOracle:
 
 
 def oracle_parameter_values(**oracle_kwargs):
-    """The parameter values a :class:`PyBaMMOracle` built with ``oracle_kwargs`` simulates:
+    """The parameter values a :class:`~battery_oracle.PyBaMMOracle` built with ``oracle_kwargs`` simulates:
     the degradation preset's edits and ``kinetics_scale`` included, with the oracle's own
     voltage limits as the cut-offs (so fitted values are relative to exactly that)."""
     oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, **oracle_kwargs)

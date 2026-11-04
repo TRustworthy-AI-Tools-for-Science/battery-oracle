@@ -132,6 +132,31 @@ Severity presets are not the same physics run faster: they change the mechanism 
 a protocol-sensitive plating channel whose observable signature is dead-lithium ohmic
 growth.
 
+### The presets over eight cycles
+
+Eight calls of one protocol (Chen2020 cell, `real_cell_capacity_mah` 200: charge stages
+300 mA then 150 mA for 15 min each, 200 mA discharge, so 1.5C / 0.75C / 1C on the
+simulated cell), one fresh oracle per preset (`bin/generate_degradation_figures.py`).
+At this rate SEI dominates every preset: after eight cycles the SOH is 0.9781
+(`nominal`), 0.9780 (`accelerated`) and 0.9774 (`severe`), with 0, 2.6 and 7.2 mAh lost
+to plating; the dead-lithium film grows to 0.02 nm and 0.69 nm. The presets separate at
+higher charge rates and lower temperatures, where plating grows.
+
+```{image} _static/degradation/degradation_soh.png
+:alt: SOH over eight oracle calls for the three presets
+:width: 70%
+```
+
+```{image} _static/degradation/degradation_mechanisms.png
+:alt: Cumulative capacity lost to SEI and to plating per preset
+:width: 90%
+```
+
+```{image} _static/degradation/degradation_films.png
+:alt: SEI and dead-lithium film thickness per preset
+:width: 90%
+```
+
 ## From hidden state to observable impedance
 
 In equilibrium EIS the impedance model has no degradation submodels, so the cycling

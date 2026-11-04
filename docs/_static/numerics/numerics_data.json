@@ -5,13 +5,13 @@
       "IDAKLUSolver": {
         "completed": true,
         "n_steps": 1,
-        "solve_s": 0.6,
+        "solve_s": 1.24,
         "error": null
       },
       "CasadiSolver(safe)": {
         "completed": true,
         "n_steps": 1,
-        "solve_s": 0.8,
+        "solve_s": 4.45,
         "error": null
       }
     }
@@ -38,17 +38,219 @@
   },
   "jax_cache": {
     "name": "jax_cache",
-    "available": false,
-    "with_clear": [],
-    "without_clear": [],
-    "note": "autoeis not installed; run with `uv run --extra autoeis`.",
+    "available": true,
+    "with_clear": [
+      {
+        "iter": 0,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 1,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 2,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 3,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 4,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 5,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 6,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 7,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 8,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 9,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 10,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 11,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 12,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 13,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 14,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 15,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 16,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 17,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 18,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 19,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 20,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 21,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 22,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 23,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 24,
+        "rss_mb": 845.8
+      }
+    ],
+    "without_clear": [
+      {
+        "iter": 0,
+        "rss_mb": 836.6
+      },
+      {
+        "iter": 1,
+        "rss_mb": 838.2
+      },
+      {
+        "iter": 2,
+        "rss_mb": 839.0
+      },
+      {
+        "iter": 3,
+        "rss_mb": 842.3
+      },
+      {
+        "iter": 4,
+        "rss_mb": 842.5
+      },
+      {
+        "iter": 5,
+        "rss_mb": 843.3
+      },
+      {
+        "iter": 6,
+        "rss_mb": 843.3
+      },
+      {
+        "iter": 7,
+        "rss_mb": 844.6
+      },
+      {
+        "iter": 8,
+        "rss_mb": 844.6
+      },
+      {
+        "iter": 9,
+        "rss_mb": 844.8
+      },
+      {
+        "iter": 10,
+        "rss_mb": 845.0
+      },
+      {
+        "iter": 11,
+        "rss_mb": 845.2
+      },
+      {
+        "iter": 12,
+        "rss_mb": 845.2
+      },
+      {
+        "iter": 13,
+        "rss_mb": 845.2
+      },
+      {
+        "iter": 14,
+        "rss_mb": 845.2
+      },
+      {
+        "iter": 15,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 16,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 17,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 18,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 19,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 20,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 21,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 22,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 23,
+        "rss_mb": 845.8
+      },
+      {
+        "iter": 24,
+        "rss_mb": 845.8
+      }
+    ],
+    "note": null,
     "subprocess_returncode": 0,
     "subprocess_crashed": false
   },
   "mpire_fork": {
     "name": "mpire_fork",
-    "available": false,
-    "note": "autoeis/mpire not installed (No module named 'autoeis'); demo skipped.",
+    "available": true,
+    "note": "battery_oracle patches mpire.WorkerPool to start_method='spawn' at import (oracle.py), so forked SUNDIALS/CasADi JIT state is never inherited. This demo is documentation-only: the fork-time corruption is nondeterministic and environment-dependent, so it is described rather than asserted.",
     "subprocess_returncode": 0,
     "subprocess_crashed": false
   }

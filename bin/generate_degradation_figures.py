@@ -144,7 +144,7 @@ def main(argv=None) -> None:
 
     for f in ("degradation_soh.png", "degradation_mechanisms.png",
               "degradation_films.png", "degradation_data.json"):
-        print("wrote", (outdir / f).relative_to(REPO_ROOT))
+        print("wrote", outdir / f)
 
 
 if __name__ == "__main__":

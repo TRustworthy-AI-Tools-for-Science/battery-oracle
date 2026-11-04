@@ -128,7 +128,9 @@ myst_enable_extensions = [
     "tasklist",
 ]
 myst_heading_anchors = 3
-suppress_warnings = ["mystnb.unknown_mime_type"]
+# ref.python: the public classes are documented both as battery_oracle.X (re-exports)
+# and in their modules, so a type annotation resolves to two equal targets
+suppress_warnings = ["mystnb.unknown_mime_type", "ref.python"]
 
 
 # -- linkcode: [source] links to the GitHub source line ----------------------

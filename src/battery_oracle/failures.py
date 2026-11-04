@@ -14,7 +14,7 @@ class FailureKind(str, Enum):
     """Machine-readable classification of an oracle failure/degradation.
 
     A ``str``-Enum so the value serialises directly to CSV/JSON (``fk.value``)
-    and compares equal to its string form. Stored on :class:`OracleFailure` and
+    and compares equal to its string form. Stored on :class:`~battery_oracle.OracleFailure` and
     (for non-fatal degradations) in the per-cycle history dict, so an audit hook
     can correlate failure modes with calibration outcomes without string-matching
     the human-readable message.

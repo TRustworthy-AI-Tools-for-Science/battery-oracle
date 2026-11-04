@@ -1,4 +1,4 @@
-"""Load an experiment-protocol YAML and build/run a :class:`PyBaMMOracle` from it.
+"""Load an experiment-protocol YAML and build/run a :class:`~battery_oracle.PyBaMMOracle` from it.
 
 The one shipped YAML that the oracle actually *executes*. ``config_oracle_defaults.yml``
 documents the oracle's internal defaults; this module instead reads a protocol
@@ -202,7 +202,7 @@ def _validate_config(cfg: dict) -> None:
 
 
 def oracle_kwargs_from_config(cfg: dict, oracle_cfg: dict | None = None) -> dict:
-    """Map a validated experiment config ``dict`` to :class:`PyBaMMOracle` ``**kwargs``.
+    """Map a validated experiment config ``dict`` to :class:`~battery_oracle.PyBaMMOracle` ``**kwargs``.
 
     Precedence: ``OracleConfig`` defaults < the oracle YAML (``oracle_cfg``, default the
     packaged ``config_oracle_defaults.yml``) < the experiment YAML's ``cycling`` /
@@ -250,12 +250,12 @@ def protocols_from_config(cfg: dict) -> list[np.ndarray]:
 
 
 def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
-    """Construct a :class:`PyBaMMOracle` from a config dict (or a path to load first).
+    """Construct a :class:`~battery_oracle.PyBaMMOracle` from a config dict (or a path to load first).
 
     The base oracle layer is ``cfg``'s optional top-level ``oracle_config`` field
     (a ``config_oracle_*.yml``, e.g. a tune-oracle calibration output), or else the
     packaged ``config_oracle_defaults.yml``. Resolves the ``parameter_set`` string
-    to a ``pybamm.ParameterValues`` and imports :class:`PyBaMMOracle` lazily so the
+    to a ``pybamm.ParameterValues`` and imports :class:`~battery_oracle.PyBaMMOracle` lazily so the
     parse/mapping layer stays PyBaMM-free.
     """
     if not isinstance(cfg, dict):
@@ -283,7 +283,7 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
 
 
 def build_oracle_from_oracle_config(source: str | Path | dict, *, ecm_model_fn=None) -> "PyBaMMOracle":
-    """Build a :class:`PyBaMMOracle` straight from an oracle/calibration config.
+    """Build a :class:`~battery_oracle.PyBaMMOracle` straight from an oracle/calibration config.
 
     Unlike :func:`build_oracle_from_config`, this needs no experiment YAML /
     protocols list -- it is the convenient entry point for tooling that just wants
@@ -332,7 +332,7 @@ def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> lis
     -------
     list of dict
         The oracle history (``oracle.history``).  If the oracle reaches
-        end-of-life (:class:`OracleFailure`) partway through, the loop stops and
+        end-of-life (:class:`~battery_oracle.OracleFailure`) partway through, the loop stops and
         the history accumulated so far is returned.
     """
     import numpy as np

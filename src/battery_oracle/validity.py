@@ -240,7 +240,7 @@ def _step_mask(t, i_app, i_1c) -> tuple[np.ndarray, np.ndarray]:
 
 
 def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> tuple[np.ndarray, np.ndarray]:
-    """(times, |V_a - V_b|) at the samples of ``t_a`` in the common time range, outside the current steps of either
+    """(times, ``|V_a - V_b|``) at the samples of ``t_a`` in the common time range, outside the current steps of either
     solution (``_step_mask``; around a cycler stop two meshes switch a fraction of a second
     apart, and a fixed-time difference there measures that timing, not the mesh)."""
     t_a, v_a, t_b = np.asarray(t_a, float), np.asarray(v_a, float), np.asarray(t_b, float)
@@ -253,7 +253,7 @@ def voltage_difference(t_a, v_a, i_a, t_b, v_b, i_b, i_1c: float) -> tuple[np.nd
 
 
 def _charge_balance(sol, ie_nodes, lay, i_app, scale_i) -> dict:
-    """|i_e + i_s - i_app| / max(|i_app|, i_1C) at every node and time, per domain
+    """``|i_e + i_s - i_app| / max(|i_app|, i_1C)`` at every node and time, per domain
     (separator: i_e = i_app)."""
     nn, ns, _ = lay["n"]
     out = {}
@@ -268,7 +268,7 @@ def _charge_balance(sol, ie_nodes, lay, i_app, scale_i) -> dict:
 
 def charge_balance_residual(sol, pv) -> dict:
     """The pointwise charge balance of a solution over time: for each domain, the largest
-    |i_e + i_s - i_app| / max(|i_app|, i_1C) over its nodes at each time (the "charge
+    ``|i_e + i_s - i_app| / max(|i_app|, i_1C)`` over its nodes at each time (the "charge
     balance" exact law is its maximum)."""
     lay = layout(sol, pv)
     area = (float(pv["Electrode height [m]"]) * float(pv["Electrode width [m]"])

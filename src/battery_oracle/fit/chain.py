@@ -62,7 +62,7 @@ EPS_N = "Negative electrode active material volume fraction"
 CONTACT_R = "Contact resistance [Ohm]"
 OCV0, OCV100 = "Open-circuit voltage at 0% SOC [V]", "Open-circuit voltage at 100% SOC [V]"
 #: Typical misfit that counts as 1 in the combined cost (voltage 10 mV; impedance
-#: 5% of |Z|): keeps the time-domain and EIS parts comparable.
+#: 5% of ``|Z|``): keeps the time-domain and EIS parts comparable.
 SIGMA_V = 0.010
 SIGMA_Z_REL = 0.05
 #: Voltage window of the fit model, wider than the cycler's, so the cycler stops (not
@@ -454,7 +454,7 @@ def _smooth(y, n):
 
 
 def curve_feature(qg, v, trim_ah: float = 2e-3):
-    """(q*, V*) of the main dQ/dV peak (= interior minimum of |dV/dQ|) of a voltage
+    """(q*, V*) of the main dQ/dV peak (= interior minimum of ``|dV/dQ|``) of a voltage
     curve on the uniform charge grid ``qg`` [Ah], after the same smoothing as the
     measured feature."""
     n = int(round(FEATURE_SMOOTH_AH / (qg[1] - qg[0])))
@@ -468,7 +468,7 @@ def curve_feature(qg, v, trim_ah: float = 2e-3):
 def measured_ocv_feature(data: dict, pair_index: int = 2, min_step_s: float = 600.0) -> dict | None:
     """Main dQ/dV feature of the measured pseudo-OCV (mean of a formation charge and
     the discharge after it at equal state; polarisation cancels to first order at
-    equal |I|), in the cumulative-discharge coordinate of ``history_rest_points``."""
+    equal ``|I|``), in the cumulative-discharge coordinate of ``history_rest_points``."""
     tk = np.concatenate([np.asarray(c["t"], float) for c in data["current"] if c["group"] == 0])
     ik = np.concatenate([np.asarray(c["I"], float) for c in data["current"] if c["group"] == 0])
     o = np.argsort(tk, kind="stable")

@@ -24,7 +24,9 @@ State-vector layout
    :nosignatures:
 
    battery_oracle.state_vector_schema
-   battery_oracle.STATE_VECTOR_SCHEMA
+
+``battery_oracle.STATE_VECTOR_SCHEMA`` is ``state_vector_schema`` of the default circuit:
+a dict of block name to ``(start, stop)`` slice of the state vector.
 
 ECM fitters
 -----------

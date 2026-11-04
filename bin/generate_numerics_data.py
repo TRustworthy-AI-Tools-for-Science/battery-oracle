@@ -280,7 +280,7 @@ def _savefig(fig, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
-    print(f"  wrote {path.relative_to(REPO_ROOT)}")
+    print(f"  wrote {path}")
 
 
 IN_PROCESS = {"solver_family": demo_solver_family, "silent_truncation": demo_silent_truncation}
@@ -322,7 +322,7 @@ def main(argv=None) -> None:
 
     data_path = outdir / "numerics_data.json"
     data_path.write_text(json.dumps(results, indent=2) + "\n")
-    print(f"\nwrote {data_path.relative_to(REPO_ROOT)} ({len(results)} demo(s))")
+    print(f"\nwrote {data_path} ({len(results)} demo(s))")
 
 
 if __name__ == "__main__":

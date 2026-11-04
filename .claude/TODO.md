@@ -22,9 +22,10 @@ could not be confirmed from the code alone.
 
 - [ ] Build the docs with `sphinx-build -W` after the rewrite (not run). The API page
   now autosummarises every module, so docstring markup warnings may surface.
-- [ ] Regenerate the figures in `docs/_static/degradation` and `docs/_static/numerics`
-  with the DFN (they were made with SPMe and are no longer referenced by the docs),
-  then reference them again from `degradation.md` / `numerics.md`.
+- [ ] `bin/generate_numerics_data.py`: on PyBaMM 26.10 and the DFN the silent-truncation
+  and JAX-cache demos no longer show the effect their sections describe, and the
+  cracking demo fails on missing crack parameters (Chen2020 has none) before the
+  initialisation failure it is meant to show; rework them before citing them.
 - [ ] CI (`ci.yml`, `docs.yml`) triggers on `main` only (Phase 0, item 3).
 - [ ] The CPE seeds and `ecm_rescale_target_r0` are jones2022 training statistics;
   document or move them with the featurisation they belong to **(unverified intent)**.

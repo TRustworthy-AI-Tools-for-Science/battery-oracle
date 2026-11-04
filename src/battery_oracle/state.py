@@ -87,7 +87,7 @@ class CycleResult:
     failure_kind : FailureKind or None
         Non-fatal solver status of this cycle: ``FailureKind.SOLVER_DEGRADED`` when the
         emergency solver finished it, ``None`` for a primary-solver cycle. (A *fatal* failure raises
-        :class:`OracleFailure` instead of returning a ``CycleResult``.)
+        :class:`~battery_oracle.OracleFailure` instead of returning a ``CycleResult``.)
     protocol : np.ndarray
         The protocol vector exactly as received by ``run_cycle`` (before
         sanitisation).

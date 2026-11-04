@@ -49,6 +49,15 @@ A call that needed the retry is returned normally, with
 {class}`~battery_oracle.OracleFailure` (`SOLVER_FAILURE`, or `VOLTAGE_INFEASIBLE`
 when the error mentions the voltage). The model is never replaced by a simpler one.
 
+Both solvers integrate the same DFN cycle (a CC discharge to the cut-off, then a CC
+charge into CV) to the same voltage trace; IDAKLU takes 1.2 s and the safe-mode Casadi
+solver 4.5 s (`bin/generate_numerics_data.py --only solver_family`).
+
+```{image} _static/numerics/solver_family.png
+:alt: Terminal voltage of one cycle with IDAKLU and with Casadi in safe mode
+:width: 75%
+```
+
 ## The C-rate ceiling
 
 Stiffness and the cost of consistent initialisation grow with the applied current.
