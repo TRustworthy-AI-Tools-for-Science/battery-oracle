@@ -1,27 +1,17 @@
-# Model hierarchy: DFN, SPMe, SPM
+# The model
 
-The `model` kwarg selects which member of the standard porous-electrode model
-hierarchy backs both the cycling simulation and the internal EIS simulation:
+The oracle's cycling model is PyBaMM's Doyle–Fuller–Newman model
+(`pybamm.lithium_ion.DFN`) {cite:p}`doyle1993,sulzer2021`. There is no reduced-order
+alternative and no fallback to one: a cycle that does not solve raises
+{class}`~battery_oracle.OracleFailure`. This page states the equations, the model
+options and parameter sets the oracle uses, how it computes impedance, and the
+assumptions every result inherits.
 
-```python
-oracle = PyBaMMOracle(model="SPMe")   # "SPM" | "SPMe" (default) | "DFN"
-```
+## Equations
 
-All three are PyBaMM implementations {cite:p}`sulzer2021` sharing one parameter set
-(Chen2020, an LGM50 5 Ah NMC811/graphite–SiOₓ cell {cite:p}`chen2020`). Switching
-models changes the level of physical resolution, not the chemistry. 
-
-This page
-states what each model solves, the asymptotic assumptions that generate the reduced
-models, and where those assumptions fail in ways that matter for this package's
-outputs (degradation trajectories and impedance spectra).
-
-## The full model (DFN)
-
-The Doyle–Fuller–Newman model {cite:p}`doyle1993` couples concentrated-solution
-theory in the electrolyte to Fickian diffusion in a continuum of spherical particles,
-resolved through the electrode thickness (a "pseudo-2D" $x \times r$ domain). Per
-electrode $k \in \{\mathrm{n}, \mathrm{p}\}$:
+The DFN couples concentrated-solution theory in the electrolyte to Fickian diffusion
+in spherical particles resolved through the electrode thickness (a pseudo-2D
+$x \times r$ domain). Per electrode $k \in \{\mathrm{n}, \mathrm{p}\}$:
 
 $$
 \frac{\partial c_{s,k}}{\partial t}
@@ -47,92 +37,158 @@ interfacial current density follows symmetric Butler–Volmer kinetics,
 $$
 j_k = 2\,j_{0,k}\sinh\!\left(\frac{F\eta_k}{2RT}\right),
 \qquad
-j_{0,k} = m_k(T)\, c_e^{1/2}\, (c_{s,k}^{\mathrm{surf}})^{1/2} (c_{s,k}^{\max}-c_{s,k}^{\mathrm{surf}})^{1/2},
-\qquad
 \eta_k = \phi_s - \phi_e - U_k(c_{s,k}^{\mathrm{surf}}) - \Delta\phi_{\mathrm{film}},
 $$
 
-where $\Delta\phi_{\mathrm{film}}$ carries the interphase-film resistances that the
-degradation submodels grow (see [Degradation](degradation.md)). Effective transport
+with the exchange-current density $j_{0,k}(c_e, c_{s,k}^{\mathrm{surf}}, T)$ of the
+parameter set, and $\Delta\phi_{\mathrm{film}}$ the drop across the SEI film that the
+SEI submodel grows (see [Degradation](degradation.md)). Effective transport
 coefficients use Bruggeman corrections $\theta^{\mathrm{eff}} = \theta\,\varepsilon^{b}$.
 
-## SPMe
+## Model options
 
-The SPMe is not an ad-hoc simplification; PyBaMM's implementation follows the
-systematic asymptotic derivation of Marquis et al. {cite:p}`marquis2019`. The
-expansion parameter is the ratio of the typical electrolyte potential drop to the
-thermal voltage (equivalently, of the electrolyte transport timescale to the
-discharge timescale). At leading order the interfacial current density is uniform
-through each electrode thickness, so one representative particle per electrode,
-driven by the $x$-averaged current, suffices. The first-order correction restores the
-electrolyte concentration profile, and contributes electrolyte ohmic and
-concentration overpotentials to the terminal voltage:
+The cycling model is built from the option dict of the degradation preset
+(`PyBaMMOracle.degradation_options`), extended by the oracle's settings:
 
-$$
-V = U_p(c_{s,p}^{\mathrm{surf}}) - U_n(c_{s,n}^{\mathrm{surf}})
-  + \eta_p - \eta_n + \eta_e + \Delta\phi_{e}^{\mathrm{Ohm}} + \Delta\phi_{s}^{\mathrm{Ohm}},
-$$
-
-where $\eta_e \propto \ln\!\big(c_e(x_p)/c_e(x_n)\big)$ is the concentration
-overpotential evaluated from the reduced electrolyte problem. The SPM truncates
-the same expansion at leading order: electrolyte dynamics are dropped entirely and
-$V$ contains only the OCPs and the (uniform) reaction overpotentials.
-
-### Assumptions inherited by every result in this package
-
-| Assumption | Where it enters | When it breaks |
+| Option | Value | Set by |
 |---|---|---|
-| Uniform through-thickness reaction distribution | SPM/SPMe cycling and the degradation state (SEI/plating are $x$-averaged) | High C-rate, thick/low-porosity electrodes: reaction localises at the separator, under-predicting local plating onset |
-| Single representative particle, single $R_k$ | Solid diffusion; $a_s = 3\varepsilon_s/r_p$ used in all film-resistance conversions | Wide particle-size distributions; local SOC heterogeneity |
-| Electrolyte correction is first-order only (SPMe) | Terminal voltage; EIS diffusion tail | Above ≈1C on this parameterisation the correction degrades; the oracle clamps protocols to a validated envelope (see [Numerical stability](numerics.md)) |
-| Isothermal at `temperature_K` | All rate constants via their Arrhenius forms evaluated at the fixed ambient $T$ | Self-heating at high C-rate; a temperature *sweep* here means a family of isothermal simulations, not a thermal model |
-| Bruggeman effective media | Electrolyte transport | Anisotropic/heterogeneous microstructures |
-| Chen2020 parameterisation | Everything | Chemistry other than NMC811/graphite; the calibration scales (calibrated in `battery-forecast`) absorb *some* cell-to-cell variation, not chemistry changes |
+| `SEI` | `ec reaction limited` | every preset |
+| `lithium plating` | `partially reversible` | `accelerated`, `severe` |
+| `contact resistance` | `true` | `contact_resistance_ohm` not `None` |
+| `thermal` | `lumped` | `thermal="lumped"` |
+| `use lumped thermal capacity` | `true` | lumped thermal with a set that has `Cell heat capacity [J.K-1.m-3]` (LiR2032) |
 
-## Impedance and EIS Computation
+The cycling model keeps PyBaMM's algebraic surface form (no double layer). The EIS
+models add `surface form: differential` (below).
 
-`pybamm.EISSimulation` linearises the chosen model about an equilibrated state at
-the requested SOC and evaluates the small-signal impedance $Z(\omega) = \delta
-V/\delta I$ over the frequency grid. Linearisation requires every equation to be
-differential, which is why the oracle constructs the EIS model with
-`{"surface form": "differential"}`: interfacial charge balance is closed by an
-explicit double-layer ODE,
+The mesh is PyBaMM's default unless `radial_mesh` is set:
+`{"points": n, "kind": "uniform" | "surface", "stretch": s, "x_factor": k}` sets the
+particle radial points, an exponential mesh clustered at the particle surface
+(`kind: surface`), and multiplies the electrode and separator points by `k`
+({mod}`battery_oracle.model_options`). A stage-A fit records the mesh it converged on,
+and the oracle built from the fit uses it.
+
+## Parameter sets
+
+`chemistry` (or `cycling.chemistry` / `cycling.parameter_set`) is one of
+`battery_oracle.parameter_sets.SUPPORTED_PARAMETER_SETS`. Other PyBaMM sets are
+rejected: the SEI model needs EC-diffusivity and SEI parameters they lack.
+
+**`Chen2020`** (default): PyBaMM's LG M50 5 Ah NMC811/graphite–SiOₓ cell
+{cite:p}`chen2020`. The default protocol bounds, the degradation presets and the
+first-call `initial_soc` are set for this cell.
+
+**`LiR2032`** (alias `LiR2032_MohtatGraphite_MarquisLCO_ThermoD`, the name the
+stage-A fits were run under): the LiCoO2/graphite coin cell of the jones2022 dataset
+{cite:p}`jones2022`, at its real size. It is built by
+{func}`battery_oracle.parameter_sets.lir2032` on PyBaMM's `Ai2020` set
+{cite:p}`ai2020`, which supplies geometry, porosities, active fractions, particle
+radii, Bruggeman exponents, electrolyte transport, conductivities, thermal and SEI
+parameters. Changes from the template:
+
+- one electrode layer, of the template's area per capacity scaled to the nominal
+  capacity (an effective area; a stage-A fit sets it);
+- nominal capacity 42 mAh (measured on the jones2022 cells; datasheet 35 mAh), voltage
+  window 3.0–4.3 V, zero contact resistance;
+- coin-can volume, cooling area and whole-cell heat capacity (2.6 J/K), heat-transfer
+  coefficient 10 W m⁻² K⁻¹;
+- activation energies of the exchange-current densities and particle diffusivities
+  from PyBaMM's Ramadass2004 set, replacing Ai2020's 5 kJ/mol;
+- positive OCP of PyBaMM's `Marquis2019` set {cite:p}`marquis2019` (a flat plateau
+  ending in a steep wall near full lithiation), with zero entropic term;
+- positive particle diffusivity $D = D_0\,\Theta(y, T)$, with the thermodynamic factor
+  $\Theta = -\frac{F}{RT}\,y(1-y)\,\frac{\mathrm{d}U_p}{\mathrm{d}y}$ of that OCP
+  (floored at $10^{-3}$), so only $D_0$ is free;
+- negative OCP of `Mohtat2020` (`graphite_ocp=` also accepts `Ecker2015`, `Chen2020`,
+  `Ramadass2004`, `Ai2020`).
+
+The degradation presets are not calibrated for LiR2032.
+
+`parameter_scales` and `parameter_overrides` (the `bol` section) are applied after
+the degradation preset: a scale multiplies a numeric or functional parameter
+({mod}`battery_oracle.params`), an override sets an absolute value. The nominal
+capacity used for the current mapping is read after them.
+
+## Impedance
+
+The oracle synthesises two spectra per call, at the end of the discharged rest and of
+the charged rest, by one of two methods (`eis_mode`). Both linearise a DFN with the
+double layer on (`surface form: differential`): the interfacial charge balance is
+closed by a double-layer ODE,
 
 $$
 C_{\mathrm{dl}}\frac{\partial(\phi_s-\phi_e)}{\partial t} = \frac{i_{\mathrm{app}}}{a\,\delta} - j,
 $$
 
-which simultaneously (i) converts the algebraic current-balance constraint into an
-ODE (an index reduction, making the linearisation well-posed) and (ii) supplies the
-high-frequency capacitive semicircle. Consequences of the model choice:
+which turns the algebraic current-balance constraint into an ODE (making the
+linearisation well posed) and gives the high-frequency capacitive arc.
 
-- **SPM** impedance lacks the electrolyte diffusion branch entirely — the
-  low-frequency tail is purely solid-state diffusion.
-- **SPMe** resolves *one* dominant charge-transfer arc per electrode pair. Distinct
-  anode/cathode arcs that a 2-RQ equivalent circuit nominally separates are only
-  weakly identifiable — this is the "single-arc fidelity limit" that caps how well
-  the second arc ($R_5$) can ever be matched during calibration.
-- **DFN** adds through-thickness electrolyte relaxation, at roughly an order of
-  magnitude more states and a much stiffer linearisation.
+### Equilibrium EIS (default)
 
-```{important}
-The EIS model is rebuilt **fresh** each call and does *not* include the degradation
-submodels. Degradation enters the spectrum through deliberate post-hoc corrections
-(film resistances added in series; LAM injected as a reduced active-material
-fraction). This is a controlled divergence from stock PyBaMM — see
-[Divergences from stock PyBaMM](divergences.md) for the formulas and their validity
-limits.
-```
+{func}`battery_oracle.eis.equilibrium_impedance` runs `pybamm.EISSimulation` on a DFN
+built with only `surface form: differential`, at the state of charge read from the
+rest, and assumes the cell does not change during the sweep. The EIS model has none of
+the cycling options (no SEI, plating, contact resistance or thermal submodel) and uses
+PyBaMM's default mesh. Degradation and temperature enter as corrections:
 
-## Cost and Stiffness
+1. the negative active-material fraction is reduced by the total active-material loss
+   before linearisation;
+2. with lumped thermal, the spectrum is solved at $T_{\mathrm{ref}} = 298.15$ K and
+   scaled to the cell temperature $T$ at the rest:
+   $Z \leftarrow R_0\,a_{\mathrm{el}} + a_{\mathrm{ct}}\,(Z - R_0)$, with
+   $a = \exp\!\big(\tfrac{E_a}{R}(\tfrac{1}{T} - \tfrac{1}{T_{\mathrm{ref}}})\big)$,
+   $E_a$ = `E_a_J_per_mol` (30 kJ/mol) for $a_{\mathrm{ct}}$ and
+   `E_a_electrolyte_J_per_mol` (15 kJ/mol) for $a_{\mathrm{el}}$, and $R_0$ the
+   real part at the highest frequency;
+3. the SEI and dead-lithium film resistance $\Delta R_{\mathrm{ohm}}$ is added to the
+   real part ([Degradation](degradation.md));
+4. measurement noise is added ([protocol](protocol.md)).
 
-Empirically on this parameter set (one 5-step cycle, IDAKLU where possible): SPM is
-the cheapest and least stiff (no electrolyte PDE); SPMe is ~1.5–3× SPM; DFN is
-~10–30× SPMe with a substantially harder DAE initialisation, and is the most likely
-to fall back to the emergency solver at control-mode switches. The degradation
-presets were calibrated against SPMe; under SPM the missing electrolyte
-overpotential lowers $\eta$ at fixed current (slower SEI/plating), while under DFN
-the local overpotential at the separator edge exceeds the $x$-average (earlier
-plating onset). The same preset therefore reaches end-of-life at a different cycle
-count in each model — the [demonstrations notebook](notebooks/02_demonstrations)
-quantifies this on a common protocol.
+The SOC passed to the EIS is the average negative-particle stoichiometry at the end of
+the rest divided by the parameter set's initial negative stoichiometry, clipped to
+[`soc_clip_min`, `soc_clip_max`] = [0.05, 0.99].
+
+### Non-stationary EIS
+
+The jones2022 spectra are measured after a 20 min rest at open circuit following a
+1–4C step, with a ~300 s sweep from high to low frequency: the cell is still relaxing.
+With `eis_mode="nonstationary"` ({mod}`battery_oracle.eis`; needs PyBOP) the oracle
+computes the spectrum the way the measurement was made:
+
+1. A DFN with the oracle's cycling options, the double layer and PyBOP's EIS
+   voltage/current variables ({func}`~battery_oracle.eis.eis_model`) starts from the
+   first state of the rest (current already zero) and is integrated at zero current
+   through the rest and the sweep.
+2. Frequency $f_k$ is measured in a window $[t_k^{\mathrm{lo}}, t_k^{\mathrm{hi}}]$
+   after the rest ({func}`~battery_oracle.eis.sweep_windows`: each window lasts
+   `eis_sweep_periods`$/f_k$ + `eis_sweep_overhead_s`, from high to low frequency). The
+   model is linearised at the simulated state at the window centre:
+   $Z_k = -x_V/x_I$ with $(j\omega_k M - J(y(t_k)))\,x = b$
+   ({func}`~battery_oracle.eis.linearised_impedance`).
+3. The lock-in leakage of the voltage drift is added: over whole periods of a
+   sinusoidal current of amplitude $A$, a linear drift $\mathrm{d}V/\mathrm{d}t$ adds
+   $-2\,(\mathrm{d}V/\mathrm{d}t)/(\omega A)$ to the impedance
+   ({func}`~battery_oracle.eis.drift_leakage`), the leading term of the treatment of
+   Hallemans et al. {cite:p}`hallemans2023`. $A$ is `eis_amplitude_mA` (5 mA) mapped to
+   the simulated cell, and the drift is the mean slope over each window.
+
+The model carries temperature, the SEI film and contact resistance itself, so only the
+dead-lithium resistance and the noise are added afterwards. The rest step is extended
+by the sweep length so the cycle keeps the real timing. When the double-layer solve
+fails at the start of the rest, the first 30 s are integrated with the cycling model
+and the measurement starts from there. If the non-stationary spectrum fails (or
+PyBOP is not installed), the oracle logs a warning, uses the
+equilibrium spectrum, and records `eis_mode_used = "equilibrium (non-stationary failed)"`.
+The stage-A fit uses the same functions ([Fitting](fitting.md)).
+
+## Assumptions inherited by every result
+
+| Assumption | Where it enters | When it breaks |
+|---|---|---|
+| Single particle size per electrode | solid diffusion; $a_s = 3\varepsilon_s/r_p$ in the film-resistance conversion | wide particle-size distributions |
+| Bruggeman effective media | electrolyte and solid transport | anisotropic or heterogeneous microstructures |
+| Isothermal at `temperature_K` (default) | every Arrhenius-dependent parameter | self-heating at high rate; use `thermal="lumped"` |
+| x-averaged film state for the EIS correction | equilibrium EIS ohmic shift | through-thickness SEI or plating heterogeneity, which the DFN resolves but the correction averages |
+| Equilibrium EIS model without degradation submodels | the equilibrium spectrum | film capacitance and SOC-dependent film effects; see [Divergences](divergences.md) |
+| Protocol currents clipped to `dfn_max_crate` | every cycle | protocols above 1.5C, unless the bound is raised |
+| Parameter set | everything | a chemistry other than the set's; the calibration scales absorb some cell-to-cell variation, not a change of chemistry |

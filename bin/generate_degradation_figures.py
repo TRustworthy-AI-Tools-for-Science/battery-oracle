@@ -32,7 +32,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from battery_oracle import OracleFailure, PyBaMMOracle  # noqa: E402
-from battery_oracle._plotting import label_axes, slipstream  # noqa: E402
+from _figstyle import label_axes, slipstream  # noqa: E402
 from battery_oracle.ecm import randles_stub_ecm
 
 plt.rcParams.update({"font.family": "serif", "figure.dpi": 120,
@@ -67,7 +67,7 @@ def run_preset(preset: str, n_cycles: int) -> dict:
             print(f"  [{preset}] EOL/solver stop at cycle {i}: {exc}")
             rec["eol_cycle"] = i
             break
-        h = oracle._history[-1]
+        h = oracle.history[-1]
         for k in HIST_KEYS:
             v = h.get(k)
             rec[k].append(float(v) if v is not None and np.isfinite(v) else float("nan"))

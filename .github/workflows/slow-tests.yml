@@ -17,6 +17,6 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       - name: Sync (core + dev + autoeis + tune)
-        run: uv sync --group dev --extra autoeis --extra tune
+        run: uv sync --group dev --extra autoeis --extra fit
       - name: Slow + AutoEIS tests
         run: uv run pytest -m slow -q

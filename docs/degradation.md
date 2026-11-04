@@ -1,17 +1,15 @@
-# Degradation: mechanisms, presets, and their observable signatures
+# Degradation: mechanisms, presets and their observable signatures
 
-`degradation_preset` selects which aging mechanisms are active in the cycling model
-and with what kinetic constants. This page gives the governing equations of each
-mechanism as implemented, the exact preset definitions, how the hidden degradation
-state is mapped into the *observable* impedance, and simulated evidence of how the
-mechanism mix changes with severity.
+`degradation_preset` selects which ageing submodels the DFN carries and with which
+constants ({func}`battery_oracle.degradation._build_degradation_config`). This page
+gives each mechanism as implemented, the preset definitions, how the hidden
+degradation state reaches the impedance, and how state of health is computed.
 
-## Mechanism 1 — SEI growth (`"SEI": "ec reaction limited"`)
+## Mechanism 1: SEI growth (`"SEI": "ec reaction limited"`)
 
-Solvent (ethylene carbonate) is reduced at the electrode/SEI interface; EC must
-first diffuse through the existing film. With $c_{\mathrm{EC}}^{s}$ the EC
-concentration at the inner interface, the through-film flux and interfacial reaction
-rate balance in steady state:
+Ethylene carbonate (EC) is reduced at the inner SEI interface after diffusing
+through the film. With $c_{\mathrm{EC}}^{s}$ the EC concentration at that interface,
+transport and reaction balance:
 
 $$
 \underbrace{\frac{D_{\mathrm{EC}}\,(c_{\mathrm{EC}}^{0}-c_{\mathrm{EC}}^{s})}{L_{\mathrm{SEI}}}}_{\text{transport}}
@@ -23,29 +21,29 @@ $$
   = -\frac{\bar V_{\mathrm{SEI}}}{2F}\, j_{\mathrm{SEI}},
 $$
 
-a series (mixed-control) law {cite:p}`reniers2019,pinson2013`. Two properties drive
-the package's design decisions:
+a mixed-control law {cite:p}`reniers2019,pinson2013`. Two properties matter for the
+calibration scales:
 
-1. **Exponential overpotential sensitivity.** $j_{\mathrm{SEI}} \propto
-   e^{-F\eta/2RT}$ with $\eta_{\mathrm{SEI}}$ containing the negative-electrode
-   overpotential. Anything that raises $\eta$ at fixed current — including the
-   calibration knob `kinetics_scale`, which *deliberately* lowers the
-   exchange-current density — accelerates SEI growth as a side effect. This
-   confounding is why a separate `sei_rate_scale` exists (calibrated in
-   `battery-forecast`).
-2. **Regime switching.** `sei_rate_scale` multiplies $D_{\mathrm{EC}}$ (on top of a
-   universal ×0.25 electrolyte-quality correction; see
-   [Divergences](divergences.md)). Suppressing $D_{\mathrm{EC}}$ only slows growth
-   while transport is rate-limiting; once the interfacial reaction becomes the
-   bottleneck, further reduction has sharply diminishing returns. Empirically on
-   this parameterisation, $D_{\mathrm{EC}}$ scales of 0.5/0.25/0.1 produced 15-cycle
-   ohmic-growth responses of 133 %/111 %/82.5 % — strongly sublinear. R1-growth
-   calibration is therefore *not* fully solved by this knob; treat large
-   `sei_rate_scale` excursions as saturated.
+1. **Overpotential sensitivity.** $j_{\mathrm{SEI}}$ is exponential in
+   $\eta_{\mathrm{SEI}}$, which contains the negative-electrode overpotential.
+   Anything that raises it at fixed current accelerates SEI growth, including
+   `kinetics_scale < 1`, which lowers the exchange-current density. `sei_rate_scale`
+   exists to offset that side effect.
+2. **Regime switching.** `sei_rate_scale` multiplies $D_{\mathrm{EC}}$. Lowering
+   $D_{\mathrm{EC}}$ slows growth only while transport limits it; once the reaction
+   limits, further reduction has sharply diminishing effect. Scaling the SEI kinetic
+   rate constant instead does not change growth monotonically, so the oracle does not
+   scale it.
 
-## Mechanism 2 — lithium plating (`"lithium plating": "partially reversible"`)
+Every preset multiplies the parameter set's `EC diffusivity [m2.s-1]` by
+`ec_diffusivity_base_factor` (0.25) × `sei_rate_scale`. The base factor represents a
+commercial electrolyte with film-forming additives, which forms a denser SEI than the
+LP30 baseline of the parameter sets {cite:p}`reniers2019`; it is a cell property,
+applied identically in every preset.
 
-Metallic deposition with Tafel-type kinetics in the plating direction
+## Mechanism 2: lithium plating (`"lithium plating": "partially reversible"`)
+
+Metallic lithium deposits with Tafel-type kinetics in the plating direction
 {cite:p}`okane2022`:
 
 $$
@@ -54,136 +52,130 @@ j_{\mathrm{pl}} = -F\,k_{\mathrm{pl}}\, c_{e}\,
 \qquad \eta_{\mathrm{pl}} = \phi_s - \phi_e \;(\text{vs. Li/Li}^+),
 $$
 
-with a stripping branch returning *reversibly* plated lithium to the active
-inventory, and a first-order transfer of plated lithium into an electrochemically
-disconnected **dead-lithium** pool governed by the decay constant $\gamma$
-(`Dead lithium decay constant [s-1]`). Operationally, as exploited by the
-calibration:
+with a stripping branch that returns reversibly plated lithium to the inventory, and a
+first-order transfer of plated lithium into a disconnected dead-lithium pool with
+decay constant $\gamma$ (`Dead lithium decay constant [s-1]`).
 
-- `plating_rate_scale` (× $k_{\mathrm{pl}}$) sets how much lithium plates per cycle —
-  it moves **both** dead-Li accumulation (hence ohmic growth) **and** end-of-life,
+- `plating_rate_scale` multiplies $k_{\mathrm{pl}}$: it sets how much lithium plates
+  per cycle, and moves dead-lithium accumulation (hence ohmic growth) and end of life
   in the same direction.
-- `dead_li_decay_scale` (× $\gamma$) redistributes a given amount of plated lithium
-  between the dead pool and dissolution — larger $\gamma$ → less net dead-Li film →
-  less ohmic growth, largely *without* the EOL shift. The two knobs are therefore
-  (approximately) independent levers on (R1-growth, EOL).
+- `dead_li_decay_scale` multiplies $\gamma$: it moves plated lithium between the dead
+  pool and dissolution. A larger $\gamma$ gives less net dead-lithium film and less
+  ohmic growth.
 
-Because $j_{\mathrm{pl}}$ is exponential in the local overpotential, plating is the
-mechanism that carries **C-rate sensitivity** in this package — by design, since the
-stress-driven cracking/LAM pathway is disabled (next section).
+Plating is exponential in the local overpotential, so it is the mechanism that makes
+the presets C-rate sensitive. The DFN resolves the overpotential through the
+electrode thickness; plating starts first at the separator side of the negative
+electrode.
 
+Chen2020 has no plating parameters. Keys absent from the parameter set are copied from
+PyBaMM's `OKane2022` set (plating and stripping exchange-current densities, initial
+and typical plated-lithium concentrations, transfer coefficient, rate constant, dead
+lithium decay constant and rate, lithium-metal partial molar volume); keys already
+present are kept. The preset then sets the rate constant, the decay constant and an
+initial plated-lithium concentration of zero (a fresh cell: OKane2022's formation
+plating would strip during early low-rate cycling and drive the plating-loss
+integrator negative).
 
-## Mechanism 3 — particle cracking / LAM: deliberately disabled
+## Mechanism 3: particle cracking and active-material loss: disabled
 
-Stock O'Kane-style coupling (crack growth from diffusion-induced stress
-{cite:p}`ai2020` → fresh SEI on crack faces → accelerated LAM) is off in every
-preset because the cracking stress submodel fails DAE initialisation against the
-Chen2020 graphite OCP on current PyBaMM (see [Numerical stability](numerics.md),
-"Particle cracking + Chen2020: initialization failure").
-Two consequences you must account for when interpreting results:
+PyBaMM's `"particle mechanics": "swelling and cracking"` submodel {cite:p}`ai2020`,
+and SEI on cracks, are off in every preset. The code records the reason: with the
+Chen2020 LG M50 graphite OCP the cracking stress submodel fails DAE initialisation at
+$t=0$ (`IDAGetDky: IDA_BAD_K`) on PyBaMM 26.6.2.0 (see [Numerical stability](numerics.md)).
+Whether this still holds on PyBaMM 26.10 has not been re-checked. Consequences:
 
-- there is no stress-driven LAM channel, so `lam_pct` and the crack-SEI film are
-  identically zero unless the optional throughput-based `dod_lam_scale` term is
-  enabled (off by default, and deliberately so — it must be calibrated against a
-  deep-DoD dataset before use);
-- C-rate sensitivity that the literature attributes to cracking is *re-supplied*
-  through plating kinetics in the `accelerated`/`severe` presets. This reproduces
-  the phenomenology (faster fade at higher C) with a different microscopic cause —
-  a modelling substitution, not a claim about mechanism.
+- there is no stress-driven loss of active material: the PyBaMM LAM variable and the
+  crack-SEI loss are zero, unless the optional `dod_lam_scale` term (below) is on;
+- C-rate sensitivity that the literature attributes to cracking comes from plating
+  kinetics in `accelerated` and `severe`. This reproduces faster fade at higher rate
+  with a different microscopic cause.
+
+## Mechanism 4: depth-of-discharge LAM term (`dod_lam_scale`, off by default)
+
+An empirical, additive loss of active material driven by depth of discharge and a
+charge-induced stress proxy, integrated per call from the requested protocol:
+
+$$
+d_i = \frac{I_d\,t_d}{Q_{\mathrm{real}}},\quad
+s_i = \sqrt{\frac{I_{c1}}{Q_{\mathrm{real}}}\, d_i},\quad
+T_i = T_{i-1} + d_i,\quad
+\Delta\mathrm{LAM}_i = k_{\mathrm{DoD}}\;\frac{s_i\, d_i}{2\sqrt{T_i}},
+$$
+
+with $k_{\mathrm{DoD}}$ = `dod_lam_scale` and $I_d, t_d, I_{c1}$ the protocol's
+discharge current and duration and first charge current, so the cumulative loss grows as the square root of throughput. The
+cumulative fraction reduces the negative active-material fraction in the EIS (it grows
+the charge-transfer arcs) and enters the state-of-health budget as a fraction of the
+nominal capacity. It is a labelled empirical term: leave it at 0 until a literature
+value or a deep-discharge dataset sets its size.
 
 ## Preset definitions
 
 | | `nominal` | `accelerated` (default) | `severe` |
 |---|---|---|---|
-| SEI (`ec reaction limited`) | ✓ | ✓ | ✓ |
-| Lithium plating (partially reversible) | — | ✓ | ✓ |
+| SEI (`ec reaction limited`) | yes | yes | yes |
+| Lithium plating (`partially reversible`) | no | yes | yes |
 | $k_{\mathrm{pl}}$ [m s⁻¹] | — | $10^{-8}$ | $10^{-7}$ |
 | $\gamma$ [s⁻¹] | — | $4\times10^{-6}$ | $10^{-4}$ |
-| Particle cracking / SEI-on-cracks | — (disabled) | — (disabled) | — (disabled) |
-| Target EOL at 1C [cycles] | ~200–400 | ~40–70 | ~20–50 |
+| Particle cracking, SEI on cracks | no | no | no |
 
-All presets share the ×0.25 EC-diffusivity correction (electrolyte quality treated
-as a cell property, not a severity setting) and zero initial plated-lithium
-concentration (the oracle models a fresh cell; OKane2022's formation-cycle plated Li
-would otherwise strip during early low-C cycling and drive the plating-loss
-integrator negative).
+The numeric constants come from `degradation.preset_constants.<preset>` of the oracle
+YAML (`plating_kinetic_rate_constant_m_s`, `dead_lithium_decay_constant_s`,
+`initial_plated_lithium_concentration_mol_m3`), with the values above as fallbacks.
+The YAML also lists the submodel switches and a `target_eol_cycles_at_1c` per preset;
+the code does not read those keys (the submodels are fixed per preset in the code), and
+the targets have not been checked against the DFN.
 
-## Simulated mechanism mix vs. severity
-
-The figures below were produced by `bin/generate_degradation_figures.py` (8 oracle
-calls of the same 1.5C-charge protocol per preset; data in
-`docs/_static/degradation/degradation_data.json`).
-
-```{figure} _static/degradation/degradation_soh.png
-:width: 75%
-
-SOH trajectories. Over this short window SEI dominates total lithium loss, so the
-presets separate only slowly in SOH — after 8 cycles: nominal 0.9781, accelerated
-0.9781, severe 0.9772. The plating pathway compounds: its per-cycle contribution
-grows with the accumulating film while SEI growth self-limits as
-$L_{\mathrm{SEI}}$ thickens.
-```
-
-```{figure} _static/degradation/degradation_mechanisms.png
-:width: 100%
-
-Cumulative capacity loss by mechanism (note the shared axis). The SEI channel is
-nearly *identical* across presets (~0.156 Ah after 8 cycles) — severity presets do
-not touch SEI constants. What changes is the plating channel: zero for `nominal`,
-2.4 mAh for `accelerated`, 8.7 mAh for `severe` at the same protocol. SEI-on-cracks
-is identically zero (mechanism disabled).
-```
-
-```{figure} _static/degradation/degradation_films.png
-:width: 95%
-
-Interphase films — the quantities that feed the impedance. SEI thickness growth is
-preset-independent; the dead-lithium film differs by ~30× between `accelerated`
-(0.031 nm) and `severe` (0.94 nm) after 8 cycles, because `severe` combines 10×
-plating kinetics with a decay constant that still leaves substantial net
-accumulation.
-```
-
-Interpretation: severity presets are not "the same physics, faster". Instead, they change
-the mechanism mix. A surrogate trained on `nominal` sees a pure-SEI world
-(monotone, protocol-insensitive R1 growth); `accelerated`/`severe` add a
-protocol-sensitive channel whose observable signature is dead-Li-driven ohmic
-growth. Regenerate with more cycles to see EOL separation:
-
-```bash
-uv run python bin/generate_degradation_figures.py --cycles 20
-```
+Severity presets are not the same physics run faster: they change the mechanism mix.
+`nominal` is SEI only, with protocol-insensitive growth; `accelerated` and `severe` add
+a protocol-sensitive plating channel whose observable signature is dead-lithium ohmic
+growth.
 
 ## From hidden state to observable impedance
 
-The EIS model contains no degradation submodels; the cycling solution's degradation
-state is injected into each synthesized spectrum as follows (specific surface area
-$a_s = 3\varepsilon_s/r_p$, electrode volume $V_{el} = L\,W\,H$):
+In equilibrium EIS the impedance model has no degradation submodels, so the cycling
+solution's degradation state is injected into each spectrum. With the beginning-of-life
+negative electrode's specific surface area $a_s = 3\varepsilon_s/r_p$ and volume
+$V_{el} = L_n W H$:
 
 $$
 \Delta R_{\mathrm{ohm}} =
-\underbrace{\frac{L_{\mathrm{SEI}}}{\sigma_{\mathrm{SEI}}\, a_s V_{el}}}_{\text{SEI film}}
-+ \underbrace{\frac{L_{\mathrm{SEI,cr}}}{\sigma_{\mathrm{SEI}}\, 2 N_{\mathrm{cr}} V_{el}\, l_{\mathrm{cr}}}}_{\text{crack SEI }(\equiv 0)}
-+ \underbrace{\frac{\rho_{\mathrm{dead}}\, L_{\mathrm{dead}}}{a_s V_{el}}}_{\text{dead Li}},
+\frac{L_{\mathrm{SEI}}}{\sigma_{\mathrm{SEI}}\, a_s V_{el}}
++ \frac{\rho_{\mathrm{dead}}\, L_{\mathrm{dead}}}{a_s V_{el}},
 \qquad
 \varepsilon_s \leftarrow \varepsilon_s\,(1-\mathrm{LAM}),
 $$
 
-following the film-resistance form of Christensen & Newman
-{cite:p}`christensen2004` with $\rho_{\mathrm{dead}}$ $\approx 0.05$ $\Omega$,m. The
-$\Delta R_{\mathrm{ohm}}$ shifts the whole spectrum along the real axis (it grows
-the fitted $R_1$); the LAM injection shrinks $a_s$, which grows the charge-transfer
-arc ($R_{ct} \propto 1/(a_s j_0)$) — i.e. degradation reaches the 18-D ECM state the
-surrogate observes, not just the hidden SOH. Assumptions and validity limits of this
-post-hoc coupling are catalogued in [Divergences](divergences.md).
+the film-resistance form of Christensen and Newman {cite:p}`christensen2004`, with
+$\sigma_{\mathrm{SEI}} = 1/$`SEI resistivity [Ohm.m]` of the parameter set,
+$\rho_{\mathrm{dead}} = 0.05\ \Omega\,\mathrm{m}$, and the x-averaged SEI and
+dead-lithium thicknesses at the end of the call. $\Delta R_{\mathrm{ohm}}$ shifts the
+spectrum along the real axis (it grows the fitted ohmic resistance). LAM is the PyBaMM
+negative-electrode LAM plus the DoD term, clipped to `lam_ceiling` (0.95), and is
+applied when above $10^{-4}$; shrinking $a_s$ grows the charge-transfer arcs
+($R_{ct} \propto 1/(a_s j_0)$). Degradation therefore reaches the ECM state the
+surrogate observes, not only the hidden SOH. In non-stationary EIS the model carries
+the SEI film itself and only the dead-lithium term is added. The limits of this
+coupling are listed in [Divergences](divergences.md).
 
 ## End-of-life accounting
 
-`OracleFailure` is raised when SOH falls below `eol_capacity_fraction` (default
-0.80). SOH is computed from the **cumulative lithium-inventory-loss integrators**
-(SEI + SEI-on-cracks + plating), which carry across calls via the threaded solver
-state, *not* from the voltage-limited discharge capacity — the latter conflates
-protocol choice with health. The plating integrator is clamped at ≥ 0: stripping
-returns lithium to the active pool and must not register as capacity *gain*. Set
-`capacity_check=True` to append a C/20 reference discharge each call and measure
-usable capacity directly (~20× slower; sensitive to both LLI and impedance rise).
+SOH is computed from the irreversible-loss budget, not from the voltage-limited
+discharge capacity, which conflates protocol with health:
+
+$$
+\mathrm{SOH} = 1 - \frac{\Delta\mathrm{LLI} + \mathrm{LAM}_{\mathrm{PyBaMM}}\,Q_{\mathrm{nom}} + \mathrm{LAM}_{\mathrm{DoD}}\,Q_{\mathrm{nom}}}{Q_{\mathrm{nom}}},
+$$
+
+where $Q_{\mathrm{nom}}$ is the parameter set's nominal capacity and
+$\Delta\mathrm{LLI}$ is the lithium inventory lost since the first call: PyBaMM's
+cumulative `Loss of capacity to negative SEI`, `... SEI on cracks` and
+`... lithium plating` (the last clamped at ≥ 0, since stripping returns lithium to the
+inventory), minus their value after the first call. The integrators carry across calls
+through the threaded solution. {class}`~battery_oracle.OracleFailure`
+(`END_OF_LIFE`) is raised when SOH falls below `eol_capacity_fraction` (0.80).
+
+`capacity_check=True` appends a C/20 reference charge and discharge to every cycle
+and reports that discharge's capacity as `capacity_ah` (much slower; sensitive to both
+lithium loss and impedance rise). It does not change the SOH definition.

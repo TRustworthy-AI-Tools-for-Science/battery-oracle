@@ -1,156 +1,143 @@
 # Numerical stability
 
-Discretising any of the [model hierarchy](models.md) by the method of lines yields a
-stiff, semi-explicit index-1 differential-algebraic system
+The DFN discretised by the method of lines is a stiff, semi-explicit index-1
+differential-algebraic system
 
 $$
 M\,\dot{y} = f(y, t), \qquad 0 = g(y, t),
 $$
 
-where the algebraic block $g$ carries the through-cell current balance (unless the
-`surface form: differential` option converts it to a double-layer ODE), terminal
-voltage under CV control, and event functions for step termination. The oracle
-drives hundreds of such solves per campaign, across degradation option sets and
-accumulated state, and layers a JAX/NumPyro Bayesian fitter on top. Every subsection
-below documents one failure mode, its mechanism at the solver level, the workaround
-implemented, and — where the failure is deterministically reproducible — an
-empirical with/without demonstration produced by `bin/generate_numerics_data.py`
-(records in `docs/_static/numerics/numerics_data.json`).
+where the algebraic block $g$ holds the potentials and the through-cell current
+balance (unless `surface form: differential` turns the interfacial balance into a
+double-layer ODE) and the experiment's step-termination events. The oracle runs many
+such solves per campaign, with accumulated degradation state, and can run a JAX
+Bayesian fitter in the same process. Each section below gives one failure mode, its
+mechanism, and what the code does about it. Whether a solution that completes is
+physically valid is a separate question, answered in [Physical validity](validity.md).
 
 ```{note}
-Reproducibility of the *failures* is version- and platform-dependent (PyBaMM,
-SUNDIALS build, JAX). The generator records the actual outcome on the machine it
-runs on; the committed records reflect this environment. Notably, the minimal CC→CV
-reproduction below completes under both solver families on this PyBaMM/SUNDIALS
-build — the failure that motivated the workaround manifests under the full
-degradation option set with threaded `starting_solution` state, where consistent
-re-initialisation is materially harder.
+Reproducing the failures depends on the PyBaMM, SUNDIALS and JAX builds. Statements
+below that cite a PyBaMM version are what the code records for that version.
 ```
 
-## Model choice and the C-rate envelope
+## Solvers
 
-Stiffness and DAE dimension grow down the hierarchy SPM → SPMe → DFN
-{cite:p}`doyle1993,marquis2019`. On the Chen2020 parameterisation, SPMe accuracy
-degrades above ≈1C (the first-order electrolyte correction leaves its asymptotic
-regime) and the DAE solver diverges above ≈2–3C. The oracle therefore clamps
-protocol currents to a validated envelope rather than solving unvalidated inputs
-(see [protocol semantics](protocol.md)).
-This is a harness decision: silent clipping keeps an active-learning loop alive at
-the cost of a flat response beyond the clamp boundary.
+SUNDIALS IDA {cite:p}`hindmarsh2005` integrates the DAE with variable-order BDF and
+a modified Newton iteration, and needs consistent initial conditions
+$(y_0, \dot y_0)$ at the start of every experiment step (`IDACalcIC`). The oracle
+builds two solvers ({meth}`~battery_oracle.PyBaMMOracle.reset` rebuilds both):
 
-## CC→CV control-mode switches: cross-family solver fallback
+| Solver | Settings (YAML `solver`) | Role |
+|---|---|---|
+| `IDAKLUSolver` | `dfn.rtol` $10^{-6}$, `dfn.atol` $10^{-8}$ | primary |
+| `CasadiSolver(mode="safe")` {cite:p}`andersson2019` | `emergency.rtol` $10^{-2}$, `emergency.atol` $10^{-5}$, `dfn.dt_max_s` 1 s | retry after any primary failure |
 
-SUNDIALS IDA {cite:p}`hindmarsh2005` integrates the DAE with variable-order (1–5)
-BDF and a modified Newton iteration, and requires consistent initial conditions
-$(y_0, \dot y_0)$ satisfying both $f$ and $g$ (computed via `IDACalcIC`) at the
-start of every experiment step. A constant-current → constant-voltage transition
-swaps the active algebraic constraint discontinuously (from $I = I_{\mathrm{app}}$
-to $V = V_{\mathrm{hold}}$): the BDF history is invalid across the switch and the
-new algebraic Jacobian is near-singular precisely at the voltage limit. The
-signature is `IDA_ERR_FAIL` — repeated local error-test failures driving
-$h \to h_{\min}$ — and it is tolerance-independent: it was verified to persist
-at rtol $10^{-2}$, $10^{-3}$, and $10^{-6}$, which is diagnostic of a structural
-initialisation problem rather than a precision problem.
+A switch of control mode at a voltage limit (constant current to constant voltage)
+swaps the active algebraic constraint discontinuously: the BDF history is invalid
+across the switch and the new algebraic Jacobian is near-singular at the limit. The
+signature is `IDA_ERR_FAIL`, repeated error-test failures driving the step to its
+minimum. The code records that this failure persisted at rtol $10^{-2}$, $10^{-3}$
+and $10^{-6}$: a structural initialisation problem, not a precision one. The retry
+therefore uses a different integrator family, not looser IDA tolerances: the safe-mode
+CasADi solver advances in short windows (`dt_max`) with event checks and
+re-initialisation after each, and crosses control-mode boundaries that defeat a single
+`IDACalcIC`. The oracle's cycle is two-stage CC with no CV hold; the C/20 capacity
+check (`capacity_check`) has one.
 
-The implemented mitigation is a fallback to a different integrator family, not a
-tolerance retry: `CasadiSolver(mode="safe")` advances in short fixed windows
-(`dt_max`) with event checks and re-initialisation after each window, so it
-traverses control-mode boundaries that defeat IDA's single consistent-IC
-computation. IDAKLU remains the primary (it is substantially faster on the smooth
-interior of a step); the emergency path pays ~2–5× per solve but only on failures.
+A call that needed the retry is returned normally, with
+`failure_kind = FailureKind.SOLVER_DEGRADED`. If the retry also fails the call raises
+{class}`~battery_oracle.OracleFailure` (`SOLVER_FAILURE`, or `VOLTAGE_INFEASIBLE`
+when the error mentions the voltage). The model is never replaced by a simpler one.
 
-```{figure} _static/numerics/solver_family.png
-:width: 90%
+## The C-rate ceiling
 
-The same CC→CV experiment under each family (`--only solver_family`). On this build
-both complete — see the note above; the recorded solve times show the IDAKLU/CasADi
-cost ordering that motivates keeping IDAKLU primary.
-```
+Stiffness and the cost of consistent initialisation grow with the applied current.
+The oracle clips protocol currents to `dfn_max_crate` (1.5C) of the simulated cell's
+nominal capacity, in addition to `c_max_mA` ([protocol](protocol.md)). This is a
+harness decision: clipping keeps an active-learning loop alive at the cost of a flat
+response beyond the bound. A cell whose measured protocols exceed 1.5C (the jones2022
+coin cells are cycled at up to ~3.8C) needs `protocol_bounds.dfn_max_crate` raised.
 
-## Silent truncation: partial solutions returned as success
+## Silent truncation
 
-PyBaMM's experiment loop catches internal `SolverError`s on its own callback path
-and returns whatever was integrated without raising an error or warning. A cycle whose CV hold and
-final rest were dropped is indistinguishable from success by return type. Because
-the oracle reads SOC and film state from specific step indices of the last cycle,
-consuming a truncated solution would silently corrupt every downstream quantity
-(EIS SOC, degradation integrators, SOH). The guard is structural:
-`len(cycle.steps)` is compared against `experiment.cycle_lengths[-1]` for every
-cycle a call adds, and a shortfall raises
-{class}`~battery_oracle.OracleFailure` — on both the primary *and* emergency paths.
+PyBaMM's experiment loop catches solver errors on its own callback path and returns
+what was integrated, without raising or warning. A cycle missing its last steps is
+indistinguishable from success by return type. The oracle reads SOC, film state and
+the EIS start from fixed step indices of the last cycle, so a truncated solution would
+corrupt every downstream quantity. The guard (`_is_truncated`) compares
+`len(cycle.steps)` of every cycle the call added with
+`experiment.cycle_lengths[-1]`. A shortfall on the primary solver triggers the retry;
+a shortfall on the retry raises `OracleFailure` with `SOLVER_TRUNCATION`.
 
-```{figure} _static/numerics/silent_truncation.png
-:width: 70%
+## Non-stationary EIS solves
 
-Requested vs completed step count in the final cycle (`--only silent_truncation`) —
-the quantity the guard compares.
-```
+The double-layer model of the non-stationary EIS ([the model](models.md)) starts at
+the beginning of a rest, where the current has just stopped. It is solved with
+`IDAKLUSolver(rtol=1e-6, atol=1e-6)` single-threaded, then, on a `SolverError`, with
+the algebraic error test suppressed. If both fail, the first 30 s of the rest are
+integrated with the cycling model (no double layer; it has already solved this rest)
+and the double-layer model starts from there. The double layer relaxes in
+milliseconds and the first EIS window opens after the rest, so the measured spectrum
+does not change. Any remaining failure is caught: the oracle uses the equilibrium
+spectrum for that rest and records it in `eis_mode_used`.
 
-## Particle cracking + Chen2020: initialization failure
+## Particle cracking with Chen2020
 
-Enabling `"particle mechanics": "swelling and cracking"` {cite:p}`ai2020` with the
-Chen2020 parameter set fails at $t=0$ with `IDAGetDky: IDA_BAD_K` (or, on newer
-versions, a missing-crack-parameter error before that point). Mechanism: the
-cracking stress submodel evaluates $\partial U/\partial c$ at the initial
-stoichiometry; Chen2020's interpolated LGM50 graphite OCP returns derivative values
-inconsistent enough that `IDACalcIC` cannot produce consistent $(y_0,\dot y_0)$,
-and the subsequent derivative-order query fails. The root cause was isolated by
-parameter bisection: replacing only `Negative electrode OCP [V]` with Chen2020's
-function in an otherwise-Ai2020 set reproduces the failure.
+With `"particle mechanics": "swelling and cracking"` {cite:p}`ai2020` and the
+Chen2020 parameter set, the code records a failure at $t=0$ with
+`IDAGetDky: IDA_BAD_K` on PyBaMM 26.6.2.0. Mechanism: the cracking stress submodel
+evaluates $\partial U/\partial c$ at the initial stoichiometry, and the interpolated
+LG M50 graphite OCP gives derivatives inconsistent enough that `IDACalcIC` cannot
+find consistent initial conditions. Parameter bisection isolated it: replacing only
+`Negative electrode OCP [V]` with Chen2020's function in an otherwise-Ai2020 set
+reproduces the failure. Cracking is disabled in every preset; see
+[Degradation](degradation.md) for the consequences. The code also records that
+lowering the critical stress $\sigma_c$ does not create a C-rate threshold (the LAM
+rate $\beta(\sigma_h/\sigma_c)^m$ is a smooth power law, so $\sigma_c$ cancels from
+the C-rate sensitivity ratio) while it amplifies the Jacobian entry
+$\partial(\text{rate})/\partial\sigma \propto \sigma_c^{-2}$, which caused IDA
+convergence failures.
 
-Workaround: cracking is disabled in all presets and C-rate sensitivity is
-re-supplied through plating kinetics — an explicit mechanism substitution whose
-interpretive consequences are discussed in [Degradation](degradation.md)
-("Mechanism 3 — particle cracking / LAM: deliberately disabled").
-A historical dead end is documented in the code for future maintainers: lowering the
-critical stress $\sigma_c$ does not create a C-rate threshold (the LAM rate
-$\beta(\sigma_h/\sigma_c)^m$ is a smooth power law — $\sigma_c$ cancels from the
-C-rate sensitivity *ratio*) while amplifying the Jacobian entry
-$\partial(\text{rate})/\partial\sigma \propto \sigma_c^{-2}$ 16-fold, which was
-itself causing IDA convergence failures.
+## AutoEIS and JAX: unbounded compilation cache
 
-## AutoEIS / JAX: unbounded XLA compilation cache
+Each NumPyro {cite:p}`phan2019` inference JIT-compiles new XLA executables
+{cite:p}`jax2018`, and the process-wide cache keeps them. Over a long campaign the
+accumulated executables exhaust the address space of the execution engine and the
+process dies with an allocation failure inside native code, which Python cannot
+catch. {func}`~battery_oracle.autoeis_ecm` calls `jax.clear_caches()` after every
+inference, trading recompilation time for bounded memory.
 
-Each NumPyro {cite:p}`phan2019` inference JIT-compiles fresh XLA executables
-{cite:p}`jax2018`; the process-wide compilation cache retains them, and in a
-long-running oracle campaign (~40 inferences) the accumulated executables exhaust
-the C++ execution engine's address space — terminating the process with an
-allocation failure *inside native code*, unrecoverable from Python. The fit wrapper
-therefore calls `jax.clear_caches()` in a `finally` after every inference,
-trading ~0.5 s of recompilation per call for bounded memory. With the `[autoeis]`
-extra installed, `--only jax_cache` measures max-RSS vs inference count with and
-without the workaround (the crash-prone arm runs in a subprocess and is recorded by
-exit code if it dies).
+## Process hygiene: fork, spawn and native lifetimes
 
-## Process hygiene: fork vs spawn, and native-object lifetimes
+- **mpire fork inheritance.** AutoEIS parallelises with mpire, whose Linux default
+  start method is `fork`. A forked child inherits the parent's SUNDIALS contexts,
+  CasADi JIT code pages and held native mutexes at the same virtual addresses; writes
+  after copy-on-write can segfault the child and corrupt shared state. On the first
+  AutoEIS fit the package patches `mpire.WorkerPool` to `start_method="spawn"`.
+- **IDAKLU/CasADi accumulation.** PyBaMM's discretisation attaches processed symbols
+  to model objects across builds, and IDAKLU does not fully release earlier compiled
+  CasADi functions when rebound. Over hundreds of solves in one process this can
+  corrupt memory and segfault inside the solver with no Python traceback. Every call
+  builds a fresh `pybamm.Simulation`; `reset()` also rebuilds the model and both
+  solvers, which bounds native lifetimes to one campaign.
+- **Threads.** NumPyro's parameter store and tracing state are not thread-safe, so
+  AutoEIS inference is serialised by a module-level lock. The oracle's own lock covers
+  the PyBaMM solve only.
+- **Forked fit workers.** The stage-A fit evaluates candidates in forked processes.
+  Forking after PyBaMM's multi-threaded (OpenMP) IDAKLU has run deadlocks the workers,
+  so the fit's solvers are single-threaded
+  ({func}`battery_oracle.fit.pybop_ext.single_thread_solver`), and each candidate runs
+  under a hard time limit ([Fitting](fitting.md)).
 
-Two related lifetime problems with native state:
+## Discretisation patch
 
-- **`mpire` fork inheritance.** AutoEIS parallelises with `mpire`, whose Linux
-  default start method is `fork`. A forked child inherits the parent's address
-  space — including SUNDIALS contexts, CasADi JIT-compiled code pages, and any held
-  native mutexes — at identical virtual addresses. First write triggers
-  copy-on-write against inconsistent native state; the child segfaults, and shared
-  memory channels can propagate corruption *back into the parent*.
-  `battery_oracle` monkeypatches `mpire.WorkerPool` to `start_method="spawn"` at
-  import time (before AutoEIS can import mpire), paying interpreter-restart cost
-  for clean state. This is nondeterministic to reproduce, so `--only mpire_fork`
-  documents rather than asserts it.
-- **IDAKLU/CasADi accumulation.** PyBaMM's discretisation attaches processed
-  symbols to model objects across rebuilds, and IDAKLU's workspace does not fully
-  release prior compiled CasADi function handles on rebinding. Over hundreds of
-  solves in one process these accumulate and eventually corrupt memory —
-  segfaulting inside `idaklu_solver` with no Python traceback. The oracle rebuilds
-  model + both solvers in `reset()` (once per experiment/policy), bounding native
-  lifetimes to a single campaign segment.
-
-## Regenerating the evidence
-
-```bash
-uv run --extra autoeis python bin/generate_numerics_data.py --all
-uv run python bin/generate_numerics_data.py --all --skip-crashy   # core-only
-```
-
-Crash-prone demos run in isolated subprocesses with incremental checkpointing, so a
-worker segfault yields a recorded exit code and partial data rather than aborting
-the run. See [references](references.md) for the solver and tooling literature.
+`PyBaMMOracle()` applies the `harmonic_flux_coefficients` patch of
+{mod}`battery_oracle.patches` (non-strict: on a PyBaMM other than 26.10.1.0 it warns
+and stock averaging is used). PyBaMM's finite volumes put a node coefficient on cell
+edges with the harmonic mean only when it multiplies a bare gradient; the DFN
+electrolyte current multiplies its effective conductivity by a combination of
+gradients, $(\kappa\,\mathrm{tor})(\chi\nabla c_e - \nabla\phi_e)$, which is averaged
+arithmetically at the electrode|separator interfaces where $\varepsilon^b$ jumps. The
+patch uses the harmonic mean for a coefficient that multiplies any combination of
+gradient terms, as upstream PyBaMM PR #5856 does. The stage-A chain model (double
+layer on) has no such term.

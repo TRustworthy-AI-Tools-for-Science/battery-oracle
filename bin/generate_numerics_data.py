@@ -46,7 +46,7 @@ if str(SRC) not in sys.path:
 
 # Slipstream palette for consistent figures (fall back to defaults if unavailable).
 try:
-    from battery_oracle._plotting import slipstream
+    from _figstyle import slipstream
     C_FAIL, C_OK = slipstream(0.9), slipstream(0.4)
 except Exception:  # pragma: no cover
     C_FAIL, C_OK = "#F14124", "#4E67C8"
@@ -67,7 +67,7 @@ def demo_solver_family(outdir: Path) -> dict:
     """
     import pybamm
 
-    model = pybamm.lithium_ion.SPMe()
+    model = pybamm.lithium_ion.DFN()
     experiment = pybamm.Experiment([
         "Discharge at C/2 until 3.0 V",
         "Charge at C/2 until 4.2 V",
@@ -114,7 +114,7 @@ def demo_silent_truncation(outdir: Path) -> dict:
     """
     import pybamm
 
-    model = pybamm.lithium_ion.SPMe()
+    model = pybamm.lithium_ion.DFN()
     steps = ["Discharge at C/2 until 3.0 V", "Rest for 600 seconds",
              "Charge at C/2 until 4.2 V", "Rest for 600 seconds"]
     experiment = pybamm.Experiment([tuple(steps)])
@@ -149,7 +149,7 @@ def worker_cracking(out: Path) -> None:
     rec = {"name": "cracking_regression", "with_cracking": {}, "without_cracking": {}}
     # without cracking — the oracle's actual config: completes
     try:
-        m = pybamm.lithium_ion.SPMe(options={"SEI": "ec reaction limited"})
+        m = pybamm.lithium_ion.DFN(options={"SEI": "ec reaction limited"})
         sim = pybamm.Simulation(m, experiment=pybamm.Experiment(
             [("Discharge at C/2 until 3.0 V", "Charge at C/2 until 4.2 V")]),
             solver=pybamm.CasadiSolver(mode="safe", dt_max=60.0))
@@ -161,7 +161,7 @@ def worker_cracking(out: Path) -> None:
 
     # with cracking on Chen2020 — expected to fail at init (IDA_BAD_K) or complain
     try:
-        m = pybamm.lithium_ion.SPMe(options={
+        m = pybamm.lithium_ion.DFN(options={
             "SEI": "ec reaction limited",
             "particle mechanics": "swelling and cracking",
         })

@@ -1,143 +1,131 @@
 # Divergences from stock PyBaMM
 
-`battery_oracle` makes a series of deliberate departures
-from out-of-the-box PyBaMM behaviour for the purposes of solving a specific fidelity, stability,
-or calibration problem. These departures are catalogued here so results can be interpreted and challenged with full comprehension of what is *model* and what is *harness*.
-
-Code references are to `src/battery_oracle/oracle.py` unless stated.
+`battery_oracle` departs from out-of-the-box PyBaMM in deliberate ways, each to solve
+a fidelity, stability or calibration problem. They are listed here so a result can be
+read with a clear view of what is *model* and what is *harness*. Code references are
+to `src/battery_oracle/oracle.py` unless stated.
 
 ## 1. Stateful cycling across calls
 
-A stock `pybamm.Simulation` is stateless; the oracle threads
-`solve(starting_solution=...)` through successive calls so degradation integrators
-(LLI, film thicknesses) accumulate over an entire active-learning campaign.
-Consequences:
+A stock `pybamm.Simulation` is stateless. The oracle passes the previous call's
+solution as `solve(starting_solution=...)`, so the cell state and the degradation
+integrators (lithium loss, film thicknesses) accumulate over a whole campaign.
 
-- **Cycle-level summary variables are accumulated per call.** Each call's steps are
-  wrapped as a single experiment *cycle* (a tuple), because a flat step list would
-  make PyBaMM treat every step as its own cycle and inflate the LLI integrators.
-- **The first call initialises at `initial_soc=0.8`**. Chen2020's default negative
-  stoichiometry (0.901) gives an OCV ≈ 4.10 V that instantly violates the charge
-  voltage limit and triggers a spurious infeasibility event.
-- **State is protected by a lock**. The oracle is sequential by construction.
+- **One call is one PyBaMM cycle.** The five steps are wrapped in a tuple. A flat step
+  list would make every step a cycle and inflate PyBaMM's cycle-level summaries.
+- **The first call starts at `initial_soc=0.8`.** Chen2020's default negative
+  stoichiometry gives an open-circuit voltage close to the charge limit, which would
+  stop the first charge at once.
+- **No rollback.** A failed call leaves the cell as the solver left it.
+- **The SOC reported** is the average negative stoichiometry at the end of a rest over
+  the parameter set's initial negative stoichiometry, clipped to [0.05, 0.99].
 
-## 2. Degradation → EIS coupling is post-hoc (the largest divergence)
+## 2. Degradation reaches the impedance through corrections
 
-`pybamm.EISSimulation` linearises a fresh, undegraded model. Stock PyBaMM
-provides no path from a degraded cycling solution into an impedance simulation. The
-oracle bridges this with two controlled injections per call (`_eis_and_correct`):
+`pybamm.EISSimulation` linearises a model at a relaxed state; stock PyBaMM has no path
+from a degraded cycling solution into it.
 
-1. **Film resistances in series.** X-averaged SEI, crack-SEI, and dead-lithium
-   thicknesses are read from the cycling solution and converted to a lumped ohmic
-   shift $\Delta R_{\mathrm{ohm}}$ via the Christensen–Newman film form
-   {cite:p}`christensen2004` (formulas in [Degradation](degradation.md),
-   "From hidden state to observable impedance"), then added to $\mathrm{Re}\,Z$
-   at all frequencies.
-2. **LAM as a parameter override.** Cumulative active-material loss reduces the
-   negative-electrode active-material volume fraction in the EIS parameter set
-   before linearisation, shrinking $a_s$ and hence growing the charge-transfer arc.
-
-**Required assumptions:** films are purely resistive (no film capacitance, so
-no new time constant appears in the spectrum); the degradation state is frozen
-during the "measurement"; X-averaged thicknesses suffice (consistent with the
-SPMe's uniform-reaction assumption, inconsistent with a DFN's through-thickness
-heterogeneity). A fully coupled alternative — linearising the degradation-equipped
-model — would capture film capacitance and SOC-dependent film effects, at the cost
-of a much stiffer linearisation and no guarantee of well-posedness with the plating
-submodel active.
+- **Equilibrium EIS** (default) linearises a fresh DFN with only
+  `surface form: differential`: none of the cycling options (SEI, plating, contact
+  resistance, thermal) and PyBaMM's default mesh. Degradation enters by
+  (1) a film resistance in series, from the x-averaged SEI and dead-lithium
+  thicknesses {cite:p}`christensen2004` ([Degradation](degradation.md)), added to
+  $\mathrm{Re}\,Z$ at every frequency; (2) the loss of active material, as a reduced
+  negative active-material fraction before linearisation; (3) with lumped thermal, an
+  Arrhenius scaling of the spectrum to the cell temperature ([the model](models.md)).
+  Assumptions: the films are purely resistive (no film capacitance, so no new time
+  constant); the state is frozen during the measurement; x-averaged thicknesses
+  suffice, which ignores the through-thickness heterogeneity the DFN resolves.
+- **Non-stationary EIS** (`eis_mode="nonstationary"`) linearises the cycling model
+  (its options, the double layer, the deployed mesh) at the simulated state of each
+  frequency's window during the sweep after the rest, and adds the lock-in drift
+  leakage {cite:p}`hallemans2023`. Only the dead-lithium resistance is added
+  afterwards.
 
 ## 3. Particle cracking disabled everywhere
 
-PyBaMM's `"particle mechanics": "swelling and cracking"` fails DAE initialisation
-against Chen2020's LGM50 graphite OCP (the stress submodel evaluates
-$\partial U/\partial c$ at $t=0$, where the interpolated OCP returns derivatives
-inconsistent enough to defeat consistent-initial-condition computation; root cause
-isolated by parameter bisection — swapping only the negative OCP reproduces the
-failure). Stock behaviour would be to enable it per O'Kane et al.
-{cite:p}`okane2022`; the oracle instead re-supplies C-rate sensitivity via plating
-kinetics. See [Numerical stability](numerics.md) for the reproduction and
-[Degradation](degradation.md) for the interpretive consequences.
+O'Kane et al. {cite:p}`okane2022` couple particle cracking, SEI on crack faces and
+active-material loss. The oracle turns particle mechanics off in every preset because
+the cracking stress submodel fails DAE initialisation with the Chen2020 graphite OCP
+(recorded on PyBaMM 26.6.2.0; see [Numerical stability](numerics.md)). C-rate
+sensitivity comes from plating kinetics instead ([Degradation](degradation.md)).
 
-## 4. Parameter surgery on Chen2020
+## 4. Parameter changes
 
-The parameter set is modified at construction (`_build_degradation_config`):
+The parameter set is modified at construction (`degradation._build_degradation_config`,
+then `params.apply_parameter_scales` / `apply_parameter_overrides`):
 
 | Modification | Mechanism | Rationale |
 |---|---|---|
-| `EC diffusivity [m2.s-1]` × 0.25 (× `sei_rate_scale`) | direct override | FEC/VC-containing commercial electrolytes form a denser SEI than Chen2020's LP30 baseline {cite:p}`reniers2019`; applied to *all* presets — electrolyte quality is a cell property, not a severity setting |
-| Exchange-current densities × `kinetics_scale` | **function wrapper**, not scalar overwrite | Chen2020's $j_0(c_e, c_s^{\mathrm{surf}}, T)$ are callables; wrapping preserves concentration/temperature dependence while rescaling magnitude. Needed because research coin cells show ~10× larger relative charge-transfer arcs than the automotive-grade Chen2020 pouch |
-| Plating parameter block borrowed from OKane2022 | copy-if-absent | Chen2020 lacks plating constants entirely; only genuinely missing keys are copied so caller-supplied values win |
-| `Initial plated lithium concentration` = 0 | override | OKane2022's formation-cycle plated Li strips during early low-C cycling and drives the plating-loss integrator negative on a fresh cell |
-| Plating rate / dead-Li decay constants × calibration scales | override | the two orthogonalised calibration levers (calibrated in `battery-forecast`) |
+| `EC diffusivity [m2.s-1]` × 0.25 × `sei_rate_scale` | direct override | commercial electrolytes with film-forming additives form a denser SEI than the LP30 baseline {cite:p}`reniers2019`; applied in every preset |
+| both exchange-current densities × `kinetics_scale` | function wrapper | the $j_0(c_e, c_s^{\mathrm{surf}}, c_{s,\max}, T)$ are callables; wrapping keeps their dependence and rescales the magnitude |
+| plating parameters from OKane2022 | copied only where absent | Chen2020 has none; values already in the set win |
+| `Initial plated lithium concentration [mol.m-3]` = 0 | override | a fresh cell; OKane2022's formation plating would strip and drive the plating loss negative |
+| plating rate constant and dead-lithium decay constant × their scales | override | the two plating calibration scales |
+| `bol.parameter_scales`, `bol.parameter_overrides` | multiplier / absolute value, after the preset | beginning-of-life values of a stage-A fit; scales compose with `kinetics_scale` |
+| `Contact resistance [Ohm]` | added with the `contact resistance` option | `bol.contact_resistance_ohm` |
+| `Ambient temperature [K]` | override when not 298.15 K, or from `T_ambient_K` with lumped thermal | ambient setting |
 
-> Note: scaling `SEI kinetic rate constant [m.s-1]`
-(the parameter the `ec reaction limited` submodel reads for kinetics) was
-tried as a second SEI lever and reverted. At 0.1× it made 15-cycle R1 growth
-worse (236 % vs 82.5 %), i.e. the submodel's parameter sensitivity is not the
-naïve monotone relationship. R1-growth-rate calibration remains only partially
-solved.
+`LiR2032` is a custom set built on Ai2020 ([the model](models.md)).
 
 ## 5. Protocol semantics and current scaling
 
-Stock PyBaMM accepts whatever experiment string you write. The oracle imposes:
+Stock PyBaMM runs whatever experiment string it is given. The oracle imposes:
 
-- **Same-C-rate-fraction mapping.** Protocol currents are specified at the *real*
-  cell's scale (mA) and mapped onto the 5 Ah simulation cell as
-  $I_{\mathrm{sim}} = I_{\mathrm{real}} \cdot Q_{\mathrm{sim}}/Q_{\mathrm{real}}$
-  (`real_cell_capacity_mah`). The embedded assumption is that degradation and
-  (relative) impedance respond to C-rate, not absolute current; geometric
-  differences (coin vs pouch areal current density) are absorbed empirically by
-  `kinetics_scale` and by the ECM-fit rescaling (§7).
-- **Sanitisation to a validated envelope.** Currents are clamped to
-  [50, 10 000] mA·(scaled) — 2C upper bound on the 5 Ah cell — and durations to
-  [60 s, 8 h] with 15-min caps per CC charge stage, because SPMe accuracy degrades
-  above ≈1C and the DAE solver diverges above ≈2–3C. Out-of-envelope requests are
-  silently clipped, not rejected: in an active-learning loop the oracle must
-  return an answer for any proposed protocol.
-- **A fixed 5-step faithful cycle** (discharge → rest → CC1 → CC2 → rest), after
-  Jones, Stimming & Lee {cite:p}`jones2022`, with EIS read at the two post-rest
-  states.
+- **Same-C-rate mapping.** Protocol currents are at the real cell's scale and are
+  mapped onto the simulated cell as
+  $I_{\mathrm{sim}} = I_{\mathrm{real}}\,Q_{\mathrm{nom}}/Q_{\mathrm{real}}$
+  (`real_cell_capacity_mah`). This assumes degradation and relative impedance respond
+  to C-rate, not to absolute current.
+- **A bounded envelope.** Currents are clipped to `[c_min_mA, min(c_max_mA,
+  dfn_max_crate · Q_nom)]` (default ceiling 1.5C), durations to [60 s, 8 h], each CC
+  charge stage to 900 s, and (with `discharge_mode: cutoff`) the discharge is given at
+  least 1 h so it reaches the cut-off. Requests outside are clipped, not rejected, so
+  an active-learning loop always gets an answer.
+- **A fixed 5-step cycle** (discharge, rest, CC1, CC2, rest) after Jones, Stimming &
+  Lee {cite:p}`jones2022`, with EIS at the two rests.
 
-## 6. Solver orchestration (stock PyBaMM would silently mislead)
+## 6. Solver orchestration
 
-Three behaviours differ from a naïve `sim.solve()` (details and reproductions in
-[Numerical stability](numerics.md)):
+Three behaviours differ from a plain `sim.solve()` ([Numerical stability](numerics.md)):
 
-- **Cross-family fallback**: IDAKLU primary; on failure, retry with
-  `CasadiSolver(mode="safe")` — deliberately a different integrator family, since
-  the CC→CV failure is tolerance-independent.
-- **Silent-truncation guard**: PyBaMM's experiment loop catches internal solver
-  errors and returns the partially-integrated solution without raising an error message. The oracle
-  compares steps completed against steps requested and raises `OracleFailure`.
-- **Periodic native rebuild** in `reset()`: model + solver objects are reconstructed
-  per experiment to bound the lifetime of IDAKLU/CasADi native allocations, which
-  otherwise accumulate over hundreds of solves and eventually corrupt memory.
+- **Cross-family retry.** IDAKLU (rtol $10^{-6}$, atol $10^{-8}$) first; on any
+  failure, `CasadiSolver(mode="safe")` on the same model and cell state.
+- **Silent-truncation guard.** PyBaMM's experiment loop can return a partial solution
+  without raising. The oracle compares the steps completed with the steps requested
+  and treats a shortfall as a failure.
+- **Native rebuild in `reset()`.** The model and both solvers are rebuilt per campaign
+  to bound the lifetime of IDAKLU/CasADi native allocations.
 
 ## 7. Measurement realism and the ECM fit
 
-Stock PyBaMM produces a noiseless impedance. The oracle layers on: white and/or
-$1/f$ flicker noise (amplitude $\propto |Z|/\sqrt{f}$ — the source of realistic
-low-frequency scatter; see [protocol.md](protocol.md), "EIS noise"),
-and, with `eis_mode="nonstationary"`, the lock-in leakage of the simulated voltage
-drift during the sweep {cite:p}`hallemans2023`. The AutoEIS Bayesian ECM fit is itself modified.
+Stock PyBaMM gives a noiseless impedance. The oracle adds white and/or $1/f$ flicker
+noise ([protocol](protocol.md)) and, in non-stationary mode, the drift leakage. The
+AutoEIS fit {cite:p}`omurabaki2023autoeis` is modified ({mod}`battery_oracle.ecm`):
 
-- **Scale-equivariant rescaling ("Option B").** The 5 Ah simulation cell's
-  impedance is ~16× smaller than the ~43 mAh coin cells the downstream featurisation
-  was trained on, pushing fitted CPE admittances ($\sim 1/Z$) out of distribution.
-  Since AutoEIS is scale-equivariant ($Z \to sZ \Rightarrow R \to sR,\; Q \to Q/s,\;
-  n \to n$), spectra are rescaled to a target ohmic resistance before fitting and
-  resistances divided back afterwards.
-- **Posterior median, not mean** — the series-CPE admittance posterior is
-  heavy-tailed; the mean is a chain-unstable ~64× outlier statistic.
-- **Prior monkeypatch** on `autoeis.utils.initialize_priors` (excessively wide
-  default priors), a Randles-stub analytic fallback on inference failure, and
-  process-hygiene patches (`jax.clear_caches()` per fit, `mpire` forced to spawn).
+- **Scale-equivariant rescaling.** AutoEIS is scale-equivariant
+  ($Z \to sZ \Rightarrow R \to sR,\; Q \to Q/s,\; n \to n$). The spectrum is rescaled
+  so its high-frequency real part equals `ecm_rescale_target_r0` (0.1334 Ohm) before
+  fitting, so CPE admittances land in the range of the downstream featurisation; the
+  resistor samples are divided back afterwards, the admittances and exponents are
+  reported at the rescaled scale. `null` disables it.
+- **Posterior median, not mean.** The series-CPE admittance posterior is heavy-tailed.
+- **Narrower priors.** `autoeis.utils.initialize_priors` is replaced: exponents
+  Uniform(0, 1), every other parameter LogNormal around its initial guess with
+  $\pm 3\sigma$ spanning a factor of 100.
+- **Initial guesses** from the circuit: the ohmic resistor from the high-frequency
+  real part, arc resistances 0.6/0.4 of the remaining low-frequency resistance, CPE
+  seeds from `ecm.cpe_seeds`.
+- **Fallback.** An inference error falls back to the Randles stub for that spectrum
+  (posterior std NaN, `converged = False`).
+- **Process hygiene.** `jax.clear_caches()` after every fit; mpire worker pools
+  forced to `start_method="spawn"`; inference serialised by a lock.
 
-## 8.Settings Consistent with PyBaMM
+## 8. What is stock PyBaMM
 
-To bound the list: the discretisations, the SPM/SPMe/DFN equations themselves, the
-Butler–Volmer forms, the SEI/plating submodel equations, and all Chen2020 values not
-listed in §4 are stock PyBaMM. Anyone auditing a result should therefore focus on
-§2 (EIS coupling), §4 (parameter surgery), and §5 (protocol clipping) — these are
-where this package's numbers can differ from a hand-rolled PyBaMM script given "the
-same" inputs.
+The DFN equations, the SEI and plating submodel equations, the Butler–Volmer forms,
+`EISSimulation`, the parameter values not listed in §4 and, outside the patch listed
+in [Numerical stability](numerics.md), the discretisation are stock PyBaMM. When
+auditing a result, look first at §2 (EIS coupling), §4 (parameter changes) and §5
+(protocol clipping): these are where the package's numbers differ from a hand-written
+PyBaMM script given the same inputs.

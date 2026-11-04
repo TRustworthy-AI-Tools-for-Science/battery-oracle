@@ -12,120 +12,114 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![PyPI](https://img.shields.io/pypi/v/battery-oracle)](https://pypi.org/project/battery-oracle/)
 
-A standalone PyBaMM/SPMe battery oracle. Given a 6-D charge/discharge protocol
-it runs a PyBaMM single-particle-with-electrolyte (SPMe) simulation, synthesises
-an EIS spectrum, and fits an equivalent-circuit model (ECM). This mimics the same
-kind of featurised state a real cell would, allowing the battery oracle to act as a
-digital twin.
+A stateful PyBaMM battery oracle. Given a 6-D charge/discharge protocol, it runs one
+cycle of PyBaMM's Doyle–Fuller–Newman (DFN) model continuing from the previous call's
+solution, synthesises an impedance spectrum after the discharged and the charged rest,
+and fits an equivalent-circuit model (ECM) to each. It returns the same kind of
+featurised state a real cell would, with degradation (SEI growth, lithium plating,
+dead lithium) accumulating across calls, so it can stand in for a cell in an
+active-learning loop.
+
+The optional `[fit]` extra adds the stage-A fit: the beginning-of-life DFN parameters
+fitted to a cell's whole measured history with PyBOP, and physical-validity checks of
+the fitted cell.
 
 ## Install
 
+Python 3.12+, PyBaMM 26.10.
+
 ```bash
-pip install battery-oracle                    # core (PyBaMM + Randles-stub ECM)
-pip install "battery-oracle[autoeis]"          # + Bayesian ECM fitting
+pip install "battery-oracle @ git+https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle.git"
 ```
 
-For development (editable install, all extras), managed with
-[uv](https://docs.astral.sh/uv/):
+For development, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync                          # core (PyBaMM + Randles-stub ECM)
+uv sync                          # core + dev group (includes the [fit] and [notebook] extras)
 uv sync --extra autoeis          # + Bayesian ECM fitting (AutoEIS)
-uv sync --extra drt              # + DRT peaks (hybrid-drt)
 ```
 
-### Extras
+| Extra      | Enables | Without it |
+|------------|---------|------------|
+| `autoeis`  | Bayesian ECM fitting with AutoEIS | the analytic Randles stub; posterior-std slots are NaN |
+| `drt`      | DRT peaks (also needs hybrid-drt and Mittag-Leffler from git) | DRT peaks empty |
+| `fit`      | `battery_oracle.fit` and non-stationary EIS (PyBOP, pinned commit) | no fitting; equilibrium EIS only |
 
-| Extra      | Enables                                                        | Without it                                   |
-|------------|---------------------------------------------------------------|----------------------------------------------|
-| `autoeis`  | Bayesian ECM fitting via AutoEIS                              | falls back to the fast analytic Randles stub |
-| `drt`      | distribution-of-relaxation-times peaks (`hybrid-drt`)         | DRT peaks omitted                            |
+See the [installation docs](https://trustworthy-ai-tools-for-science.github.io/battery-oracle/install.html)
+for the PyBOP pin and the DRT libraries.
 
 ## Usage
 
 ```python
 from battery_oracle import PyBaMMOracle, Protocol
 
-oracle = PyBaMMOracle(degradation_preset="accelerated")  # ready to call immediately
+oracle = PyBaMMOracle(degradation_preset="accelerated")   # a fresh cell, ready to call
 
 protocol = Protocol(
-    charge_current_1_mA=1000.0, charge_current_2_mA=500.0,
+    charge_current_1_mA=200.0, charge_current_2_mA=100.0,
     charge_duration_1_h=0.25, charge_duration_2_h=0.25,
-    discharge_current_mA=1000.0, discharge_duration_h=1.0,
+    discharge_current_mA=100.0, discharge_duration_h=1.0,
 )
-result = oracle.run_cycle(protocol)   # runs SPMe → EIS → ECM
-print(result.soh)
+result = oracle.run_cycle(protocol)     # one DFN cycle -> EIS -> ECM
+print(result.soh, result.ecm_charge)
 ```
 
-`oracle.run_cycle(...)` returns a `CycleResult` with named fields (`soh`,
-`soc_charge`, `soc_discharge`, `capacity_ah`, `eis_charge`/`eis_discharge`,
-`ecm_charge`/`ecm_discharge`, `protocol_applied`, ...) instead of a bare array.
-The original array-in/array-out contract (`oracle(protocol) -> np.ndarray`,
-also accepting a raw `np.ndarray`/sequence) is unchanged and still supported —
-it's what a downstream active-learning/DMDc loop consumes:
+`run_cycle` returns a `CycleResult` (`soh`, `soc_charge`, `soc_discharge`,
+`capacity_ah`, `eis_charge`/`eis_discharge`, `ecm_charge`/`ecm_discharge` and their
+posterior std, `protocol_applied`, ...). `oracle(u)` takes a protocol or a plain array
+and returns only the state vector: the ECM posterior medians of both spectra followed
+by their posterior standard deviations (length 4P for a P-parameter circuit, plus
+`T_cell_K` with lumped thermal). Slice it by name with `oracle.state_vector_schema`.
 
-```python
-u = protocol.to_array()             # 6-D protocol as a plain array
-state = oracle(u)                    # -> np.ndarray, unchanged contract
-```
+Settings live in `OracleConfig` (one default each) and can be passed as keywords, an
+`OracleConfig`, or an oracle YAML (`PyBaMMOracle.from_config("my_cell.yml")`). Pass the
+circuit your experiment is featurised with (`circuit="R1-[R2,P3]-[R4,P5]"`); without
+one the oracle uses `battery_oracle.DEFAULT_CIRCUIT`.
 
-The ECM circuit is configurable (`PyBaMMOracle(circuit="R1-[R2,P3]-[R4,P5]", ...)`);
-in practice take it from the experiment config (`ecm.circuit`), so the oracle's state
-vector matches the featurization of the real experiment. Without one it falls back to
-`battery_oracle.DEFAULT_CIRCUIT` (the 7-parameter circuit above). A fully-configured oracle can
-also be built directly from a calibration YAML with
-`PyBaMMOracle.from_config()` (packaged defaults), `.from_config("calce")`
-(a packaged per-dataset calibration), or `.from_config("my_cell.yml")`.
+## Experiments from YAML
 
-The reduced-order model is selectable with `model="SPMe"` (default), `"SPM"`, or
-`"DFN"` — see the [model docs](https://trustworthy-ai-tools-for-science.github.io/battery-oracle/models.html)
-and the [numerical-stability notes](https://trustworthy-ai-tools-for-science.github.io/battery-oracle/numerics.html).
-
-## Experiments (from a YAML protocol)
-
-`config_experiment_defaults.yml` defines an experiment protocol (model, cycling,
-degradation, EIS, ECM, and one or more 6-D protocols) that the package can execute:
+`config_experiment_defaults.yml` defines cycling, degradation, EIS, ECM and one or
+more protocols, layered over the oracle YAML:
 
 ```python
 from battery_oracle import run_experiment
-history = run_experiment()   # runs the packaged config_experiment_defaults.yml
+history = run_experiment()                     # the packaged experiment
+history = run_experiment("my_experiment.yml")  # your own
 ```
-
-Pass a path (`run_experiment("my_experiment.yml")`) to run a custom protocol file.
 
 ## Documentation
 
-Full docs (guides, API reference, and the SPM/SPMe/DFN + numerical-stability
-notebooks) are published at
+Guides (the model, protocols, degradation, divergences from stock PyBaMM, numerical
+stability, physical validity, stage-A fitting) and the API reference:
 **<https://trustworthy-ai-tools-for-science.github.io/battery-oracle/>**.
 
-## Calibration
+## Downstream
 
-Fitting the oracle's degradation scales to a measured cell (the Optuna search and
-its plots) lives in `battery-forecast` (`battery_forecast.oracle_tune`); see its
-`docs/oracle_calibration.md`.
+Calibration of the degradation scales to measured ageing, CSV export, plots and the
+Kramers–Kronig analysis pipeline live in `battery-forecast`
+(`battery_forecast.oracle_tune`, `battery_forecast.oracle_checks`).
 
 ## Physics scope
 
-Be aware of what the oracle does and doesn't model before trusting it beyond a
-demonstration/AL-loop role:
+Know what the oracle models before trusting it beyond a demonstration or
+active-learning role:
 
-- The shipped degradation presets (`nominal`/`accelerated`/`severe`) are
-  calibrated against the **Chen2020 (LG M50, NMC811/graphite) parameter set**
-  running **SPMe**. The other supported parameter sets (the LiR2032 coin cells,
-  `parameter_sets.SUPPORTED_PARAMETER_SETS`) run with an uncalibrated degradation
-  trajectory — pair them with their own calibration YAML rather than trusting the
-  default preset's cycle-to-EOL count. Other PyBaMM sets are rejected: they lack
-  the SEI parameters the oracle's degradation model needs.
-- **Particle cracking / active-material-loss (LAM) submodels are currently
-  disabled in every preset.** This works around an upstream PyBaMM regression
-  in the particle-mechanics ("swelling and cracking") submodel — see the
-  comment in `_build_degradation_config` (`src/battery_oracle/oracle.py`) for
-  the full writeup. Capacity fade in the shipped presets comes from SEI growth
-  and lithium plating only; mechanical-stress-driven fade is not represented
-  (an optional, explicitly-disabled-by-default `dod_lam_scale` term
-  approximates depth-of-discharge-driven LAM as a stand-in — see its
-  docstring in `PyBaMMOracle.__init__` before enabling it).
+- Two parameter sets are supported: `Chen2020` (LG M50, NMC811/graphite, 5 Ah;
+  default) and `LiR2032` (the jones2022 LiCoO2/graphite coin cell, built on Ai2020).
+  Other PyBaMM sets lack the SEI parameters the degradation model needs and are
+  rejected.
+- The degradation presets (`nominal`/`accelerated`/`severe`) are not calibrated
+  against the DFN or the LiR2032 cell; calibrate them downstream.
+- Particle cracking and SEI on cracks are disabled in every preset (a DAE
+  initialisation failure with the Chen2020 graphite OCP). Capacity fade comes from SEI
+  growth and lithium plating; an optional, off-by-default `dod_lam_scale` term
+  approximates depth-of-discharge-driven active-material loss.
+- Protocol currents are clipped to 1.5C of the simulated cell by default
+  (`dfn_max_crate`).
+- The default (equilibrium) EIS model has no degradation submodels; degradation
+  enters the spectrum as a series film resistance and a reduced active-material
+  fraction. Non-stationary EIS (`eis_mode="nonstationary"`) linearises the cycling
+  model during the sweep instead.
 
 ## License
 

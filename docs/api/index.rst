@@ -1,7 +1,9 @@
 API reference
 =============
 
-Public objects re-exported from :mod:`battery_oracle` (see ``__all__``).
+The public API is ``battery_oracle.__all__`` (the names below re-exported from
+:mod:`battery_oracle`) and the modules listed after it. The stage-A fit,
+:mod:`battery_oracle.fit`, needs the ``[fit]`` extra (PyBOP).
 
 Oracle
 ------
@@ -10,10 +12,33 @@ Oracle
    :nosignatures:
 
    battery_oracle.PyBaMMOracle
+   battery_oracle.Protocol
+   battery_oracle.CycleResult
    battery_oracle.OracleFailure
+   battery_oracle.FailureKind
 
-Circuit constants
------------------
+State-vector layout
+-------------------
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   battery_oracle.state_vector_schema
+   battery_oracle.STATE_VECTOR_SCHEMA
+
+ECM fitters
+-----------
+Pass either as ``ecm_model_fn`` to :class:`~battery_oracle.PyBaMMOracle`.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   battery_oracle.autoeis_ecm
+   battery_oracle.randles_stub_ecm
+
+Circuit and protocol names
+--------------------------
 .. autosummary::
    :toctree: generated
 
@@ -21,29 +46,15 @@ Circuit constants
    battery_oracle.ECM_PARAM_NAMES
    battery_oracle.ACTION_FEATURE_NAMES
 
-ECM fitting functions
----------------------
-.. note::
-
-   ``_randles_stub_ecm`` and ``_autoeis_ecm`` are exported in
-   ``battery_oracle.__all__`` and are part of the public API, but keep their
-   leading underscore to signal they are lower-level building blocks passed as the
-   ``ecm_model_fn`` argument to :class:`~battery_oracle.PyBaMMOracle`. Prefer the
-   high-level oracle for normal use.
-
+YAML configuration and experiments
+----------------------------------
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   battery_oracle.randles_stub_ecm
-   battery_oracle.autoeis_ecm
-
-Experiment configuration
-------------------------
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
+   battery_oracle.load_oracle_config
+   battery_oracle.oracle_kwargs_from_oracle_config
+   battery_oracle.build_oracle_from_oracle_config
    battery_oracle.load_experiment_config
    battery_oracle.oracle_kwargs_from_config
    battery_oracle.protocols_from_config
@@ -51,3 +62,52 @@ Experiment configuration
    battery_oracle.run_experiment
    battery_oracle.load_default_ecm_circuit
 
+Oracle modules
+--------------
+.. autosummary::
+   :toctree: generated
+
+   battery_oracle.oracle
+   battery_oracle.oracle_config
+   battery_oracle.experiment
+   battery_oracle.state
+   battery_oracle.failures
+   battery_oracle.protocol
+   battery_oracle.circuit
+   battery_oracle.ecm
+   battery_oracle.eis
+   battery_oracle.degradation
+   battery_oracle.parameter_sets
+   battery_oracle.params
+   battery_oracle.model_options
+   battery_oracle.patches
+
+Physical validity
+-----------------
+.. autosummary::
+   :toctree: generated
+
+   battery_oracle.validity
+   battery_oracle.physicality
+
+Stage-A fit (``[fit]`` extra)
+-----------------------------
+.. autosummary::
+   :toctree: generated
+
+   battery_oracle.fit.chain
+   battery_oracle.fit.config
+   battery_oracle.fit.pybop_ext
+   battery_oracle.fit.checks
+
+EIS helpers
+-----------
+Internal modules used by the oracle: the linKK check (``linkk_rmse``), the
+white/flicker noise terms, and the DRT fit (needs hybrid-drt).
+
+.. autosummary::
+   :toctree: generated
+
+   battery_oracle._eis.kk
+   battery_oracle._eis.noise
+   battery_oracle._eis.drt
