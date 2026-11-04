@@ -110,13 +110,14 @@ def test_tolerance_limit_extrapolates_a_geometric_sequence():
         assert validity._tolerance_limit([L + c * q ** k for k in range(3)]) == pytest.approx(L, abs=1e-15)
 
 
-def test_measure_maps_each_continuity_record_to_its_own_field(monkeypatch):
-    names = {"i_e": 0.017, "N_e": 0.068, "c_e": 0.005, "phi_e": 2e-12}
-    recs = [{"name": f"validity[PJ248] {k} continuous across interfaces", "value": v, "note": ""}
-            for k, v in names.items()]
+def test_measure_reads_each_record_by_its_measure_key_not_its_name(monkeypatch):
+    """A record's raw value lands under its ``measure`` key, whatever the check is called."""
+    values = {"i_e": 0.017, "N_e": 0.068, "c_e": 0.005, "phi_e": 2e-12, "charge": 3e-4, "charge_integral": 2e-5}
+    recs = [{"name": f"renamed check {k}", "value": v, "note": "", "measure": k} for k, v in values.items()]
+    recs.append({"name": "electrolyte mesh layout", "value": None, "note": "no measure"})
     monkeypatch.setattr(validity, "check_solution", lambda sol, pv, cell="": recs)
     m = validity.measure(object(), None)
-    assert {k: m[k] for k in names} == names        # phi_e must not overwrite i_e
+    assert {k: m[k] for k in values} == values
 
 
 def test_step_mask_excludes_the_pre_step_sample_and_smoothed_onsets():
@@ -141,6 +142,7 @@ def test_step_mask_excludes_the_pre_step_sample_and_smoothed_onsets():
     assert judged[(t > 10.001 + validity.STEP_WINDOW_S) & (t < 30.0 - 1e-9)].all()
 
 
+@pytest.mark.slow
 def test_corrected_integral_charge_balance_holds_for_a_differential_dfn():
     """A DFN with the double layer: the integral balance in charge form (reactions + change of
     the double-layer charge a C_dl delta phi = applied charge) holds to solver tolerance,

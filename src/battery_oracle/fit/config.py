@@ -1,4 +1,4 @@
-"""Settings of a stage-A chain fit (:mod:`battery_oracle.bol_chain`), built once by the
+"""Settings of a stage-A chain fit (:mod:`battery_oracle.fit.chain`), built once by the
 caller and recorded in the fit report, so a report can be re-evaluated with the
 settings it was made with rather than whatever the environment holds later."""
 from __future__ import annotations
@@ -7,8 +7,11 @@ import dataclasses
 import os
 from dataclasses import dataclass, field
 
-#: default electrolyte floor (fraction of c0) for the depletion stop
-CE_FLOOR_DEFAULT = 0.1
+from battery_oracle.physicality import CE_FAIL_REL
+
+#: default electrolyte floor (fraction of c0) for the depletion stop: the physicality
+#: checks' fail threshold, so a fit cannot accept what the checks reject
+CE_FLOOR_DEFAULT = CE_FAIL_REL
 
 
 @dataclass(frozen=True)
@@ -27,7 +30,7 @@ class FitConfig:
     x_factor: int = 1
     validate_x_factor: int = 2
     # envelope probe after each candidate's history, in the argument order of
-    # bol_chain.with_envelope_probe: (charge mA, discharge mA) or
+    # chain.with_envelope_probe: (charge mA, discharge mA) or
     # (c1 mA, discharge mA, c2 mA) for a two-stage charge; None: no probe
     envelope_ma: tuple[float, ...] | None = None
     # electrolyte floor (fraction of c0): below it a candidate is treated as depleted

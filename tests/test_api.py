@@ -15,7 +15,6 @@ import pytest
 import battery_oracle
 from battery_oracle import (
     CycleResult,
-    OracleFailure,
     Protocol,
     PyBaMMOracle,
     randles_stub_ecm,
@@ -72,45 +71,20 @@ def test_protocol_from_array_wrong_length_raises():
 # ── __call__ golden path + Protocol/ndarray equivalence (needs a solve) ─────
 
 @pytest.mark.slow
-def test_call_returns_bare_ndarray_and_protocol_array_equivalence():
-    """__call__ still returns a bare ndarray of state_vector_len, and calling
-    with a Protocol produces the same state as calling with the equivalent
-    ndarray, given the same seed (two fresh oracles so neither call's
-    degradation/RNG state leaks into the other)."""
-    protocol_arr = PROTOCOL.copy()
+def test_call_returns_bare_ndarray_and_protocol_array_equivalence(one_cycle):
+    """__call__ returns a bare ndarray of state_vector_len, and calling with a Protocol
+    gives the same state as run_cycle with the equivalent ndarray (same seed, fresh
+    oracle each, so no degradation or RNG state leaks between them)."""
+    ref_oracle, ref = one_cycle
+    o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, seed=0)
+    state = o(Protocol.from_array(PROTOCOL))
+    assert isinstance(state, np.ndarray) and state.shape == (ref_oracle.state_vector_len,)
+    assert np.allclose(state, ref.state, equal_nan=True)
 
-    o1 = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False, seed=0)
-    o1.reset()
-    try:
-        state_arr = o1(protocol_arr)
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert isinstance(state_arr, np.ndarray)
-    assert state_arr.shape == (o1.state_vector_len,)
-
-    o2 = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False, seed=0)
-    o2.reset()
-    protocol_obj = Protocol.from_array(protocol_arr)
-    try:
-        state_from_protocol = o2(protocol_obj)
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle (Protocol path): {exc}")
-
-    assert np.allclose(state_arr, state_from_protocol, equal_nan=True)
-
-
-# ── run_cycle / CycleResult (needs a solve) ─────────────────────────────────
 
 @pytest.mark.slow
-def test_run_cycle_returns_cycle_result():
-    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False, seed=0)
-    oracle.reset()
-    protocol = PROTOCOL.copy()
-    try:
-        result = oracle.run_cycle(protocol)
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-
+def test_run_cycle_returns_cycle_result(one_cycle):
+    oracle, result = one_cycle
     assert isinstance(result, CycleResult)
     assert np.allclose(np.asarray(result), result.state, equal_nan=True)
 
@@ -234,15 +208,3 @@ def test_bare_install_defaults_to_randles_stub(monkeypatch, caplog):
 def test_version_is_nonempty_string():
     assert isinstance(battery_oracle.__version__, str)
     assert len(battery_oracle.__version__) > 0
-
-
-# ── run_experiment() no-arg ──────────────────────────────────────────────────
-
-@pytest.mark.slow
-def test_run_experiment_no_arg():
-    """run_experiment() with no path loads the packaged default config (A1.5)."""
-    from battery_oracle import run_experiment
-
-    history = run_experiment()
-    assert isinstance(history, list)
-    assert len(history) >= 1

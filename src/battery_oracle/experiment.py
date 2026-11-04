@@ -88,7 +88,7 @@ def load_experiment_config(path: str | Path | None = None) -> dict:
     Raises
     ------
     ValueError
-        On an unknown ``model.type`` / ``degradation.preset``, an empty or missing
+        On an unknown ``degradation.preset``, an empty or missing
         ``protocols`` list, or a protocol missing any of the six required fields.
     KeyError
         On a missing required top-level section.

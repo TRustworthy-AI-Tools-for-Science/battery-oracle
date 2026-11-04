@@ -18,7 +18,7 @@ spectrum is computed the way the measurement happened:
    (arXiv:2304.08126) give the general treatment; this is its leading term.
 
 The oracle (:class:`battery_oracle.oracle.PyBaMMOracle`) and the stage-A history
-fit (:mod:`battery_oracle.bol_chain`) both use these functions.
+fit (:mod:`battery_oracle.fit.chain`) both use these functions.
 """
 from __future__ import annotations
 
@@ -30,7 +30,10 @@ def eis_model(model_cls, options: dict, initial_state=None):
     exactly the model PyBOP's ``EISSimulator`` builds. ``initial_state``: a solution
     whose last state the model starts from (mapped by variable name in physical
     units, before the EIS variables are added)."""
-    from pybop.pybamm.eis_simulator import EISSimulator
+    try:
+        from pybop.pybamm.eis_simulator import EISSimulator
+    except ImportError as exc:
+        raise ImportError("non-stationary EIS needs PyBOP's EIS model: install battery-oracle[fit]") from exc
 
     model = model_cls(options=dict(options))
     if initial_state is not None:

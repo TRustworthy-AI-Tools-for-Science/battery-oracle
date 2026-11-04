@@ -4,11 +4,10 @@
 # battery_oracle.experiment.oracle_kwargs_from_oracle_config() and used to
 # override PyBaMMOracle's own Python-literal defaults. A field omitted here
 # falls back to that Python default. This is the fallback config: dataset-
-# specific calibrations produced by the tune-oracle skill live alongside it as
-# config_oracle_{dataset}.yml and override any field here (commonly
+# specific calibrations (battery-forecast's oracle_tune writes them as
+# config_oracle_{dataset}.yml) override any field here (commonly
 # `protocol_scaling` and `degradation`) -- point an experiment YAML's
-# top-level `oracle_config:` field at one to use it (see that skill for the
-# calibration workflow).
+# top-level `oracle_config:` field at one to use it.
 
 cycling:
   n_cycles: 1
@@ -36,7 +35,7 @@ cycling:
 #   parameters (e.g. exchange-current density). Composes with protocol_scaling.kinetics_scale.
 # parameter_overrides: {PyBaMM parameter name: absolute value}.
 # contact_resistance_ohm: series contact resistance in the 5 Ah PyBaMM frame; null = off.
-# Written by battery_oracle.bol_fit (battery-forecast: tune_oracle --fit-bol / --bol-only).
+# Written from a stage-A chain fit (battery_oracle.fit.chain.aggregate_chain; battery-forecast tune_oracle).
 bol:
   parameter_scales: {}
   parameter_overrides: {}
@@ -58,12 +57,12 @@ solver:
     atol: 1.0e-8
     dt_max_s: 1.0
 
-# Physical bounds for the Chen2020 SPMe (nominal capacity ~5 Ah). Sanitises
+# Protocol bounds for the Chen2020 cell (nominal capacity ~5 Ah). Sanitises
 # protocol vectors before building the PyBaMM Experiment -- see
 # oracle.py:_sanitise_current/_sanitise_duration/_protocol_to_experiment.
 protocol_bounds:
   c_min_mA: 50.0            # charge step 1 / discharge lower bound
-  c_max_mA: 10000.0         # 2C on a 5 Ah cell -- SPMe/solver accuracy degrades above this
+  c_max_mA: 10000.0         # 2C on a 5 Ah cell; the DFN ceiling is dfn_max_crate below
   c2_min_mA: 20.0           # charge step 2 (taper stage) lower bound
   c2_max_mA: 10000.0        # shares the 2C ceiling with c_max_mA (see oracle.py comment)
   dur_min_s: 60.0
@@ -91,7 +90,7 @@ eis:
   # "combined" noise budget split between the flicker (1/f) and white terms.
   noise_combined_flicker_frac: 0.75
   noise_combined_white_frac: 0.25
-  # SOC is clamped to this range before EIS is simulated (avoids the SPMe
+  # SOC is clamped to this range before equilibrium EIS is simulated (avoids the
   # particle-concentration singularities at the extremes).
   soc_clip_min: 0.05
   soc_clip_max: 0.99
@@ -116,7 +115,7 @@ ecm:
   circuit: "R1-[R2,P3]-[R4,P5]"
   # AutoEIS initial-guess seeds for the CPE terms, keyed by canonical AutoEIS
   # label. Admittance (w) seeds are jones2022 training-partition medians, kept
-  # close to the training scale; exponents (n) are typical for Li-ion SPMe at
+  # close to the training scale; exponents (n) are typical for Li-ion cells at
   # moderate SOC (Chen2020). Both circuits are seeded: the default 7-param (arcs
   # P3/P5) and the 9-param R1-P2-[R3,P4]-[R5,P6] (arcs P4/P6, same values; P2 its
   # series CPE). Unknown labels fall back to w_default/n_default.
@@ -195,8 +194,8 @@ degradation:
       initial_plated_lithium_concentration_mol_m3: 0.0
       target_eol_cycles_at_1c: "20-50"
 
-# Real-cell calibration knobs. These are what the tune-oracle skill searches over
-# when fitting the oracle to a specific dataset's real EIS + capacity data.
+# Real-cell calibration knobs. These are what the stage-B tune (battery-forecast
+# oracle_tune) searches over when fitting the oracle to a dataset's EIS + capacity data.
 protocol_scaling:
   # real_cell_capacity_mah varies per cell (e.g.
   # jones2022 PJ121 ~42 mAh, PJ100 ~45 mAh) and should be auto-detected per cell at
@@ -216,7 +215,7 @@ protocol_scaling:
                           # growth the WRONG direction). Needed because kinetics_scale
                           # has a side effect on SEI growth rate too (lower
                           # exchange-current density raises overpotential, which the SEI
-                          # growth law is exponential in -- see ORACLE.md SS2.1), so this
+                          # growth law is exponential in), so this
                           # knob exists to un-confound the two effects, even though it
                           # currently only partially succeeds.
   dead_li_decay_scale: 1.0  # multiplier on Dead lithium decay constant [s-1]:

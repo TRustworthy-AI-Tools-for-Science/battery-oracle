@@ -81,12 +81,15 @@ LIMITS = {
 }
 
 
-def _check(name, value, key, note=""):
+def _check(name, value, key, note="", *, measure: str):
+    """A check record; ``measure``: the key of its raw value in :func:`measure`."""
     lo, hi = LIMITS[key]
     if value is None or not np.isfinite(value):
-        return {"name": name, "status": "skip", "value": None, "limit": [lo, hi], "note": note or "not evaluable"}
+        return {"name": name, "status": "skip", "value": None, "limit": [lo, hi], "note": note or "not evaluable",
+                "measure": measure}
     status = "pass" if value < lo else ("warn" if value < hi else "fail")
-    return {"name": name, "status": status, "value": float(value), "limit": [lo, hi], "note": note}
+    return {"name": name, "status": status, "value": float(value), "limit": [lo, hi], "note": note,
+            "measure": measure}
 
 
 def entries(sol, name):
@@ -328,7 +331,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         where += f"; {int((~judged).sum())} samples within {STEP_WINDOW_S:g} s after {steps.size} current steps not judged"
         out.append(_check(tag + f"{key} continuous across interfaces", worst, label,
                           f"largest jump{unit} ({'/ max(|i_app|, i_1C)' if key in ('i_e', 'N_e') else ''}"
-                          f"{'/ c0' if key == 'c_e' else ''}) {where}"))
+                          f"{'/ c0' if key == 'c_e' else ''}) {where}", measure=key))
 
     # 2. charge balance and collector boundary conditions
     f = fields.get("i_e")
@@ -338,10 +341,10 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         nn, ns, _ = lay["n"]
         try:
             worst = float(max(r.max() for r in _charge_balance(sol, ie_nodes, lay, i_app, scale_i).values()))
-            out.append(_check(tag + "charge balance i_e + i_s = i_app", worst, "charge balance"))
+            out.append(_check(tag + "charge balance i_e + i_s = i_app", worst, "charge balance", measure="charge"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "charge balance i_e + i_s = i_app", None, "charge balance",
-                              f"{type(exc).__name__}: {str(exc)[:120]}"))
+                              f"{type(exc).__name__}: {str(exc)[:120]}", measure="charge"))
         # integral charge balance: all reactions (main + SEI + plating) in each electrode
         # carry the applied current (global charge conservation)
         try:
@@ -368,16 +371,17 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
                               f"max over windows of >= {CHARGE_WINDOW_S:g} s of |charge of all reactions (main + side)"
                               + (" + change of the double-layer charge a C_dl delta phi" if differential else "")
                               + " -/+ applied charge| / (max(|i_app|, i_1C) window); solver-segment joins and "
-                              "post-step windows not judged"))
+                              "post-step windows not judged", measure="charge_integral"))
         except Exception as exc:                        # noqa: BLE001
             out.append(_check(tag + "integral charge balance (all reactions carry i_app)", None, "charge balance",
-                              f"{type(exc).__name__}: {str(exc)[:120]}"))
+                              f"{type(exc).__name__}: {str(exc)[:120]}", measure="charge_integral"))
         # (judged outside the post-step window, like the interface continuity)
         coll = max(float(np.max(np.where(judged, np.abs(_boundary(arr, pos, 0.0)) / scale_i, 0.0))),
                    float(np.max(np.where(judged, np.abs(_boundary(arr, pos, lay["L"])) / scale_i, 0.0))))
-        out.append(_check(tag + "no electrolyte current at the collectors", coll, "collector current"))
+        out.append(_check(tag + "no electrolyte current at the collectors", coll, "collector current",
+                          measure="collector"))
     else:
-        out.append(_check(tag + "charge balance i_e + i_s = i_app", None, "charge balance"))
+        out.append(_check(tag + "charge balance i_e + i_s = i_app", None, "charge balance", measure="charge"))
 
     # 3. mesh oscillation inside each domain
     run = 0
@@ -393,7 +397,7 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         for sl in (slice(0, nn), slice(nn, nn + ns), slice(nn + ns, None)):
             run = max(run, _max_alternating_run(arr[sl], 1e-6 * span))
     out.append(_check(tag + "no mesh oscillation (alternating 2nd differences)", run, "oscillation run",
-                      "longest run of sign-alternating second differences of c_e, phi_e"))
+                      "longest run of sign-alternating second differences of c_e, phi_e", measure="oscillation"))
 
     # 4. lithium conservation
     try:
@@ -406,9 +410,9 @@ def check_solution(sol, pv, *, cell: str = "") -> list[dict]:
         total = held + lost
         drift = float(np.max(np.abs(total - total[0])) / abs(total[0]))
         out.append(_check(tag + "lithium conserved", drift, "lithium drift",
-                          "particles + electrolyte + side reactions + lost active material"))
+                          "particles + electrolyte + side reactions + lost active material", measure="lithium"))
     except Exception as exc:                            # noqa: BLE001
-        out.append(_check(tag + "lithium conserved", None, "lithium drift", str(exc)[:120]))
+        out.append(_check(tag + "lithium conserved", None, "lithium drift", str(exc)[:120], measure="lithium"))
     return out
 
 
@@ -424,18 +428,9 @@ def measure(sol, pv) -> dict:
     collector current, oscillation run and lithium balance (see :func:`check_solution`)."""
     m = {}
     for c in check_solution(sol, pv):
-        n = c["name"].split("] ", 1)[-1] if c["name"].startswith("validity[") else c["name"]
-        n = n.replace("validity ", "", 1) if n.startswith("validity ") else n
-        field = n.split(" ", 1)[0]               # exact first word: i_e / N_e / c_e / phi_e ...
-        key = (field if (field in ("i_e", "N_e", "c_e", "phi_e") and "continuous across interfaces" in n) else
-               "charge_integral" if "integral charge balance" in n else
-               "charge" if "charge balance" in n else
-               "collector" if "collectors" in n else
-               "oscillation" if "oscillation" in n else
-               "lithium" if "lithium conserved" in n else None)
-        if key:
-            m[key] = c["value"]
-            m[key + "_note"] = c["note"]
+        if "measure" in c:
+            m[c["measure"]] = c["value"]
+            m[c["measure"] + "_note"] = c["note"]
     try:
         tot = (entries(sol, "Total lithium in particles [mol]") + entries(sol, "Total lithium in electrolyte [mol]"))
         side = entries(sol, "Total lithium lost to side reactions [mol]")

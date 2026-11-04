@@ -17,8 +17,8 @@
 # config_oracle_defaults.yml's value, which itself falls back to
 # PyBaMMOracle's own Python-literal default.
 
-# Optional: path to a custom oracle-defaults YAML (e.g. a tune-oracle-skill
-# calibration output config_oracle_{dataset}.yml) to use instead of the
+# Optional: path to a custom oracle-defaults YAML (e.g. a calibration
+# output config_oracle_{dataset}.yml) to use instead of the
 # packaged config_oracle_defaults.yml as the base layer for every field below.
 # null (default) uses the packaged defaults.
 oracle_config: null

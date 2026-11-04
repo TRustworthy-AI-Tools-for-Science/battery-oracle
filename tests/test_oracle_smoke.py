@@ -234,18 +234,16 @@ def test_dfn_current_ceiling():
 
 
 @pytest.mark.slow
-def test_one_cycle_runs_dfn():
-    """A real DFN cycle runs end-to-end at full fidelity (DFN cold-start works)."""
-    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
-    oracle.reset()
-    try:
-        state = oracle(PROTOCOL)
-    except OracleFailure as exc:
-        pytest.skip(f"DFN oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert len(state) == oracle.state_vector_len
+def test_one_cycle_runs_at_full_fidelity(one_cycle):
+    """A real DFN cycle runs end-to-end at full fidelity (the model is never swapped)
+    and records one history row with the cycle's ECM fit and SOH."""
+    oracle, res = one_cycle
+    assert len(res.state) == oracle.state_vector_len
+    assert len(oracle.history) == 1
     h = oracle.history[-1]
-    # the model is never swapped: a completed cycle is always full fidelity
-    assert h["fidelity"] == "full"
+    assert h["fidelity"] == "full" and h["failure_kind"] is None
+    assert 0.0 < h["end_soh"] <= 1.0
+    assert len(h["ecm_params_charge"]) == len(oracle._ecm_param_names)
 
 
 def test_dfn_solver_failure_fails_loudly():
@@ -289,24 +287,18 @@ def test_state_vector_len_tracks_circuit():
 
 
 @pytest.mark.slow
-def test_returned_state_matches_schema_and_std_is_nan_for_stub():
+def test_returned_state_matches_schema_and_std_is_nan_for_stub(one_cycle):
     """Under the Randles stub the returned width equals state_vector_len and
     the σ slots are NaN (no AutoEIS posterior). Asserts against derived length."""
-    oracle = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, capacity_check=False)
-    oracle.reset()
-    try:
-        state = oracle(PROTOCOL)
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
+    oracle, res = one_cycle
+    state = res.state
     assert state.shape == (oracle.state_vector_len,)
     lo, hi = oracle.state_vector_schema["std_charge"]
     lo2, hi2 = oracle.state_vector_schema["std_discharge"]
     assert np.isnan(state[lo:hi]).all()
     assert np.isnan(state[lo2:hi2]).all()
-    # Means are finite.
     assert np.isfinite(state[: oracle.state_vector_schema["means_discharge"][1]]).all()
     h = oracle.history[-1]
-    assert h["failure_kind"] is None and h["fidelity"] == "full"
     assert "ecm_std_charge" in h and "ecm_std_discharge" in h
 
 
@@ -330,26 +322,6 @@ def test_lumped_thermal_populates_t_cell():
 
 
 @pytest.mark.slow
-def test_one_cycle_runs():
-    """Run a single (default, DFN) cycle with the Randles stub and check the history entry."""
-    oracle = PyBaMMOracle(
-        ecm_model_fn=randles_stub_ecm,
-        degradation_preset="accelerated",
-        capacity_check=False,
-    )
-    oracle.reset()
-    protocol = PROTOCOL.copy()
-    try:
-        oracle(protocol)
-    except OracleFailure as exc:
-        pytest.skip(f"oracle reported EOL/solver failure on the first cycle: {exc}")
-    assert len(oracle.history) == 1
-    h = oracle.history[-1]
-    assert "end_soh" in h
-    assert h["ecm_params_charge"] is not None
-    assert len(h["ecm_params_charge"]) == len(oracle._ecm_param_names)
-
-
 def test_radial_mesh_kwarg_builds_the_fit_mesh():
     """The oracle replays protocols on the chain fit's converged particle mesh
     (verify/radial_mesh_check.py: 40 points, clustered at the surface)."""

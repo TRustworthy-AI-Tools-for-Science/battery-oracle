@@ -64,7 +64,7 @@ class OracleConfig:
     # -- Beginning-of-life (BOL) fit (config_oracle_defaults.yml: bol.*) --
     # Multipliers / absolute values applied to the PyBaMM parameter set after
     # the degradation preset (see battery_oracle.params). Produced by
-    # the stage-A chain fit (battery_oracle.bol_chain) to the real cell's first cycles.
+    # the stage-A chain fit (battery_oracle.fit.chain) to the real cell's first cycles.
     parameter_scales: dict | None = None
     parameter_overrides: dict | None = None
     # Series contact resistance [Ohm] in the 5 Ah PyBaMM frame; None = off.

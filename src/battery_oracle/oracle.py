@@ -232,11 +232,11 @@ class PyBaMMOracle:
         self._init_parameter_values(cfg, parameter_values)
 
         # EIS model is built fresh each __call__ so degraded ParameterValues can
-        # be injected for LAM before each simulation (see §4.4 ORACLE.md).
+        # be injected for LAM before each simulation.
 
-        # Same discretisation as stage A: harmonic averaging of coefficients at the
-        # electrode|separator interfaces (battery_oracle.patches). Non-strict: on an
-        # untested PyBaMM it warns and the stock (arithmetic) averaging is used.
+        # Harmonic averaging of coefficients at the electrode|separator interfaces
+        # (battery_oracle.patches). Non-strict: on an untested PyBaMM it warns and the
+        # stock (arithmetic) averaging is used.
         from battery_oracle import patches as _patches
         _patches.apply(["harmonic_flux_coefficients"], strict=False)
 
@@ -501,6 +501,7 @@ class PyBaMMOracle:
         EIS noise generator re-seeded from ``seed`` (shared by __init__ and reset)."""
         self._rng = np.random.default_rng(self._seed)
         self._prev_solution = None
+        self._last_cycle_pv = None
         # Per-call history for diagnostic plots and EOL tracking.
         self._history: list[dict] = []
         self._last_Z: np.ndarray | None = None
@@ -651,6 +652,13 @@ class PyBaMMOracle:
     def last_solution(self):
         """PyBaMM solution of the most recent cycle (``None`` before the first)."""
         return self._prev_solution
+
+    @property
+    def last_parameter_values(self):
+        """PyBaMM parameter values the most recent cycle was solved with (``None`` before
+        the first): what :func:`battery_oracle.validity.check_solution` needs alongside
+        :attr:`last_solution`."""
+        return self._last_cycle_pv
 
     @property
     def degradation_options(self) -> dict:
@@ -969,7 +977,7 @@ class PyBaMMOracle:
         the simulated state at the centre of its window (``self._eis_win_lo/hi``
         after the rest; :func:`battery_oracle.eis.linearised_impedance`)
         and the lock-in leakage of the simulated voltage drift is added. Same physics
-        as stage A (:mod:`battery_oracle.bol_chain`). The cycling model itself keeps
+        as stage A (:mod:`battery_oracle.fit.chain`). The cycling model itself keeps
         its algebraic surface form: the double layer only matters at EIS frequencies,
         and in the experiment's instantaneous current steps it makes the DAE fail.
         """

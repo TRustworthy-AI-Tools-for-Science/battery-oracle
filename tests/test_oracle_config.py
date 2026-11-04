@@ -93,3 +93,24 @@ def test_oracle_keeps_its_config():
     assert (o.config.n_cycles, o.config.rest_s) == (3, 7.0)
     with pytest.raises(TypeError):
         PyBaMMOracle(not_a_setting=1)
+
+
+def test_packaged_yaml_documents_the_defaults():
+    """The packaged oracle YAML states OracleConfig's defaults: every field it sets
+    equals the default, except fields whose default is None (resolved at build time:
+    the YAML supplies them)."""
+    import math
+
+    default = OracleConfig()
+    stated = settings_from_yaml(load_oracle_config())
+    assert stated, "the packaged YAML sets no field"
+    for name, value in stated.items():
+        want = getattr(default, name)
+        if want is None:
+            continue
+        if isinstance(want, float):
+            assert math.isclose(float(value), want, rel_tol=1e-12), name
+        else:
+            assert value == want, name
+    assert set(stated) <= set(YAML_KEYS) | {"frequencies", "chemistry", "preset_constants"}
+

@@ -109,67 +109,6 @@ def test_load_oracle_config_packaged_default():
     assert set(oc["degradation"]["preset_constants"]) == {"nominal", "accelerated", "severe"}
 
 
-def test_oracle_kwargs_from_oracle_config_defaults_match_pybamm_literals():
-    """Every field the packaged oracle YAML documents must resolve to the same
-    literal PyBaMMOracle's own Python defaults use -- this is the parity
-    guarantee the whole refactor depends on (YAML present == default unchanged).
-    """
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    expected = {
-        "n_cycles": 1, "temperature_K": 298.15, "parameter_set": "Chen2020",
-        "real_cell_capacity_mah": 200.0, "rest_s": 1200.0, "initial_soc": 0.8,
-        "degradation_preset": "accelerated", "eol_capacity_fraction": 0.80,
-        "capacity_check": False, "ec_diffusivity_base_factor": 0.25, "lam_ceiling": 0.95,
-        "dod_lam_scale": 0.0, "kinetics_scale": 1.0, "sei_rate_scale": 1.0,
-        "dead_li_decay_scale": 1.0, "plating_rate_scale": 1.0,
-        "eis_noise_level": 0.02, "eis_noise_model": "combined",
-        "noise_combined_flicker_frac": 0.75, "noise_combined_white_frac": 0.25,
-        "soc_clip_min": 0.05, "soc_clip_max": 0.99, "linkk_c": 0.85, "linkk_max_M": 50,
-        "cpe_w_default": 0.1, "cpe_n_default": 0.80, "ecm_rescale_target_r0": 0.1334,
-        "autoeis_num_warmup": 500, "autoeis_num_samples": 200,
-        "emergency_solver_rtol": 1e-2, "emergency_solver_atol": 1e-5,
-        "c_min_mA": 50.0, "c_max_mA": 10_000.0, "c2_min_mA": 20.0, "c2_max_mA": 10_000.0,
-        "dur_min_s": 60.0, "dur_max_s": 28_800.0, "v_charge_max": 4.3,
-        "v_discharge_min": 3.0, "charge_stage_max_s": 900.0,
-    }
-    for key, val in expected.items():
-        if isinstance(val, float):
-            assert kw[key] == pytest.approx(val), key
-        else:
-            assert kw[key] == val, key
-    assert kw["cpe_w_seed"] == {"P3w": 0.071, "P5w": 0.043,
-                                "P2w": 7.32, "P4w": 0.071, "P6w": 0.043}
-    assert kw["cpe_n_seed"] == {"P3n": 0.80, "P5n": 0.75,
-                                "P2n": 0.85, "P4n": 0.80, "P6n": 0.75}
-    assert kw["preset_constants"]["plating_kinetic_rate_constant_m_s"] == pytest.approx(1e-8)
-
-
-def test_base_oracle_yaml_emits_dfn_solver_settings():
-    """#2: DFN solver tolerances + current ceiling map from the oracle YAML."""
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["dfn_solver_rtol"] == pytest.approx(1e-6)
-    assert kw["dfn_solver_atol"] == pytest.approx(1e-8)
-    assert kw["dfn_solver_dt_max_s"] == pytest.approx(1.0)
-    assert kw["dfn_max_crate"] == pytest.approx(1.5)
-
-
-def test_base_oracle_yaml_emits_thermal_and_arrhenius():
-    """#9/#10/#11: thermal, temperature-protocol, and Arrhenius fields map from YAML."""
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["thermal"] == "isothermal"
-    assert kw["T_ambient_K"] == pytest.approx(298.15)
-    assert kw["h_total_W_per_m2K"] == pytest.approx(10.0)
-    assert kw["use_temperature_protocol"] is False
-    assert kw["E_a_J_per_mol"] == pytest.approx(30e3)
-    assert kw["E_a_electrolyte_J_per_mol"] == pytest.approx(15e3)
-
-
-def test_base_oracle_yaml_emits_chemistry():
-    """#14: chemistry maps from the oracle YAML (defaults to Chen2020)."""
-    kw = oracle_kwargs_from_oracle_config(load_oracle_config())
-    assert kw["chemistry"] == "Chen2020"
-
-
 def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
     """#14: a calibration YAML declaring one chemistry must not pair with another set."""
     from battery_oracle.experiment import build_oracle_from_config

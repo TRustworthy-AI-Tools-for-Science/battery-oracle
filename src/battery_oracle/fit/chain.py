@@ -22,16 +22,17 @@ Model (``CHAIN_OPTIONS``): DFN with the EIS voltage/current variables (PyBOP's
 ``EISSimulator.set_up_for_eis``); double layer (``surface form: differential``);
 contact resistance; lumped thermal with the coin cell's whole-cell heat capacity
 (:mod:`battery_oracle.parameter_sets`); the oracle's EC reaction-limited SEI
-growth; the jones2022 cycler's voltage limits (``CYCLER_V_MIN``).
+growth; the cycler's voltage limits as the data states them (``apply_voltage_limits``).
 
 Two steps. The electrode balance (positive capacity, N:P, cyclable lithium) is
 fixed first by the closed-form OCV fit to the measured rest voltages and the
-formation dQ/dV feature (``ocv_balance``). Then fitted (PyBOP ``Parameter``; bounds
-centred on the warm start because PyBOP's population optimisers start at the prior
-mean): the seven kinetic/transport/double-layer multipliers and electrolyte
-diffusivity, contact resistance, electrode area (parallel-layer count), electrode
-thickness and the negative/positive thickness ratio, heat-transfer coefficient, and
-the length of each unrecorded rest between formation and cycling sequences.
+formation dQ/dV feature (``ocv_balance``); it also sets the electrode area. Then fitted
+(PyBOP ``Parameter``, uniform or log-uniform priors over ``LITERATURE_BOUNDS``;
+``fit_parameters_chain``): the seven kinetic/transport/double-layer multipliers and
+electrolyte diffusivity, contact resistance, electrode thickness and the
+negative/positive thickness ratio, negative tortuosity, separator MacMullin number,
+particle radii, heat-transfer coefficient, and the length of each unrecorded rest
+between formation and cycling sequences (the only priors centred on warm values).
 
 Initial state: the cell's first voltage (as received, after storage) is an open-
 circuit voltage; with the cyclable lithium it fixes both electrode stoichiometries
@@ -49,11 +50,10 @@ import logging
 from pathlib import Path
 import time
 from collections import OrderedDict
-from typing import Any
 
 import numpy as np
 
-from battery_oracle.fit_config import FitConfig
+from battery_oracle.fit.config import FitConfig
 from battery_oracle.model_options import radial_mesh, x_var_pts
 from battery_oracle.parameter_sets import ocp_data_range
 
@@ -118,14 +118,13 @@ CHAIN_OPTIONS = {
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 
 
-#: Cycler voltage limits of the jones2022 protocol, from the raw GCPL files and
-#: Jones et al. 2022 Methods: formation charge CC
-#: to 4.2 V then CV (40 -> ~4 mA); every cycling charge stage CC with a hard stop at
-#: 4.3 V (current to 0 within 1 s, no CV); every discharge a hard stop at 3.0 V. The
-#: measured current is the real cell's response to these limits: a model cell that
-#: reaches a limit earlier must stop (or hold, in CV) where the real cycler would have,
-#: not be forced on (a forced replay ends a formation discharge at 2.76 V against the
-#: measured 3.00 V).
+#: Cycler voltage limits come with the data (the dataset's protocol): the history's
+#: ``discharge_limit_v`` (a hard stop on every discharge) and, per group,
+#: ``charge_limit_v`` with ``charge_cv`` (hold the limit at constant voltage) or not (a
+#: hard stop). The measured current is the real cell's response to these limits: a model
+#: cell that reaches a limit earlier must stop (or hold, in CV) where the real cycler
+#: would have, not be forced on (a forced replay of a jones2022 formation discharge ends
+#: at 2.76 V against the measured 3.00 V).
 #: Hard stops are EXACT: the cut-off is an input parameter CUT_INPUT (0 conducting, 1
 #: stopped) and the solve runs in segments (ChainModel._solve_segments). A terminating
 #: event stops the integration where the voltage crosses its limit in the current's
@@ -133,9 +132,6 @@ EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 #: releases the cut when the measured step ends (the real step sequence goes on). A
 #: smooth latch would engage gradually, leaving a model cell near its limit in a
 #: partial-cut, CV-like state; with a saturating LiCoO2 surface that DAE is too stiff.
-CYCLER_V_MIN = 3.0
-CYCLER_V_MAX_CYCLING = 4.3
-CYCLER_V_MAX_FORMATION = 4.2
 VOLTAGE_LIMIT_WIDTH = 0.005          # V, smooth width of the formation CV hold
 LATCH_I_REF = 1e-3                   # A: below this the cycler current counts as rest
 V_HI_PARAM = "Cycler upper voltage limit [V]"
@@ -158,15 +154,15 @@ OUTPUT_VARS = ("Voltage [V]", CE_MIN_VAR, "Volume-averaged cell temperature [K]"
 #: Envelope probe: the fit's electrolyte floor protects only the measured
 #: history, but the oracle is asked for the whole jones2022 protocol space. With
 #: FitConfig.envelope_ma = (charge mA, discharge mA) every candidate's history is
-#: followed by the most demanding protocol in that space -- CC charge to the 4.3 V cycler
-#: stop, 20-min rest, CC discharge to the 3.0 V stop, 20-min rest -- and a candidate whose
+#: followed by the most demanding protocol in that space -- CC charge to the cycling charge
+#: stop, 20-min rest, CC discharge to the discharge stop, 20-min rest -- and a candidate whose
 #: electrolyte reaches the floor (or whose solve stops) in the probe is rejected. The
 #: chemistry2-25C envelope is ~159 mA in both directions (~3.8C; 480 cycling files of 8
 #: cells).
 PROBE_NAME = "envelope probe"
 PROBE_STEP_S, PROBE_REST_S, PROBE_GAP_S, PROBE_SAMPLE_S = 3600.0, 1200.0, 600.0, 5.0
 #: two-stage probe charge (FitConfig.envelope_ma = (c1, discharge, c2) mA): each stage
-#: runs up to this long or to the 4.3 V cycler stop -- the oracle's demanding cycle
+#: runs up to this long or to the cycling charge stop -- the oracle's demanding cycle
 #: (physicality.check_dfn_cycle: 3.8C then 2C for <= 0.25 h each, 3.8C discharge), which the
 #: single-stage probe did not cover (the second stage pushes in more lithium at high rate)
 PROBE_STAGE_S = 900.0
@@ -197,7 +193,10 @@ def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charg
         t4 = t3 + PROBE_REST_S
         tk = np.array([0.0, r, s1, s1 + r, s2, s2 + r, t2, t2 + r, t3, t3 + r, t4])
         ik = np.array([0.0, i_c, i_c, i_c2, i_c2, 0.0, 0.0, i_d, i_d, 0.0, 0.0])
+    # the cycling protocol's charge limit (the last measured cycling group's)
+    cyc = [g for g in data["groups"] if not g.get("formation")] or list(data["groups"])
     groups.append({"name": PROBE_NAME, "duration_s": t4 + r, "gap_before": PROBE_GAP_S, "formation": False,
+                   "charge_limit_v": float(cyc[-1]["charge_limit_v"]), "charge_cv": bool(cyc[-1]["charge_cv"]),
                    "probe": True, "charge_ma": float(charge_ma), "discharge_ma": float(discharge_ma),
                    "charge2_ma": None if charge2_ma is None else float(charge2_ma)})
     d["groups"] = groups
@@ -205,11 +204,11 @@ def with_envelope_probe(data: dict, charge_ma: float, discharge_ma: float, charg
     return d
 
 
-def apply_voltage_limits(model, width: float = VOLTAGE_LIMIT_WIDTH):
-    """Replace the EIS model's current equation I = I_app(t) with the jones2022 cycler
-    limits (see CYCLER_V_MIN): I = I_app (1 - cut) [x a CV factor during the formation
-    charge], with cut = CUT_INPUT switched by the two terminating events EVENT_LIMIT
-    (3.0 V on discharge, V_HI_PARAM(t) on charge outside CV) and EVENT_RELEASE (the
+def apply_voltage_limits(model, v_min: float, width: float = VOLTAGE_LIMIT_WIDTH):
+    """Replace the EIS model's current equation I = I_app(t) with the cycler limits (see
+    VOLTAGE_LIMIT_WIDTH): I = I_app (1 - cut) [x a CV factor during a CV charge], with
+    cut = CUT_INPUT switched by the two terminating events EVENT_LIMIT (``v_min`` on
+    discharge, V_HI_PARAM(t) on charge outside CV) and EVENT_RELEASE (the
     measured step ends). PyBaMM sign: I > 0 discharge. At rest cut = 0, so the
     impedance linearisation is unchanged (evaluate it with CUT_INPUT = 0)."""
     import pybamm
@@ -231,7 +230,7 @@ def apply_voltage_limits(model, width: float = VOLTAGE_LIMIT_WIDTH):
     # > 0 while conducting inside the limits; crosses 0 where V passes the limit in the
     # current's direction (charge in CV: no hard stop, the CV factor holds the limit)
     model.events.append(pybamm.Event(EVENT_LIMIT, cut + (1 - cut) * (
-        rest + dis * (v - CYCLER_V_MIN) + chg * ((1 - cv) * (v_hi - v) + cv))))
+        rest + dis * (v - float(v_min)) + chg * ((1 - cv) * (v_hi - v) + cv))))
     # > 0 while stopped inside a measured step; crosses 0 when the step ends (rest)
     model.events.append(pybamm.Event(EVENT_RELEASE, (1 - cut) + cut * (0.5 - rest)))
     model.variables[LATCH_VAR] = cut * pybamm.Scalar(1)
@@ -239,15 +238,14 @@ def apply_voltage_limits(model, width: float = VOLTAGE_LIMIT_WIDTH):
 
 
 def limit_schedule(groups, off: np.ndarray, t_end: float):
-    """(V_HI_PARAM, CV_PARAM) as functions of time on the chain clock: formation groups
-    4.2 V with CV, the others 4.3 V hard stop; a fitted gap keeps the previous group's."""
+    """(V_HI_PARAM, CV_PARAM) as functions of time on the chain clock: each group's
+    ``charge_limit_v`` and ``charge_cv``; a fitted gap keeps the previous group's."""
     import pybamm
 
     tk, vk, ck = [], [], []
     starts = list(off) + [max(float(t_end), float(off[-1])) + 1.0]
     for g, lo, hi in zip(groups, starts[:-1], starts[1:]):
-        form = bool(g.get("formation"))
-        v_hi, c = (CYCLER_V_MAX_FORMATION, 1.0) if form else (CYCLER_V_MAX_CYCLING, 0.0)
+        v_hi, c = float(g["charge_limit_v"]), (1.0 if g["charge_cv"] else 0.0)
         for t in (lo, max(hi - 1e-3, lo + 1e-6)):
             if tk and t <= tk[-1]:
                 continue
@@ -781,7 +779,7 @@ class ChainModel:
 
             from battery_oracle.eis import eis_model
             self._model = eis_model(pybamm.lithium_ion.DFN, self.options)
-            apply_voltage_limits(self._model)
+            apply_voltage_limits(self._model, self.data["discharge_limit_v"])
             # electrolyte floor as a solver EVENT: a candidate whose electrolyte runs out
             # stops at the floor instead of crawling on with ever smaller steps (a joint fit
             # spent > 100 min per candidate there); the truncated history is penalised below
@@ -797,7 +795,7 @@ class ChainModel:
 
     @staticmethod
     def _solve_segments(sim, t_eval: np.ndarray, capture: np.ndarray | None = None):
-        """Integrate with exact cycler hard stops (see CYCLER_V_MIN): segments between
+        """Integrate with exact cycler hard stops (see VOLTAGE_LIMIT_WIDTH): segments between
         EVENT_LIMIT / EVENT_RELEASE, each continued from the last state with CUT_INPUT
         switched, on one built model. Segments also end at every ``capture`` time,
         where the full state is recorded (the EIS linearisation points when the
@@ -869,7 +867,7 @@ class ChainModel:
         import pybamm
 
         from battery_oracle.eis import drift_leakage, impedance_scale, linearised_impedance
-        from battery_oracle.patches import single_thread_solver
+        from battery_oracle.fit.pybop_ext import single_thread_solver
 
         t0 = time.time()
         cap = self.data.get("cell_capacity_mah")
@@ -1121,11 +1119,13 @@ def _warm_start(config: FitConfig) -> dict | None:
 def _run_optimiser(meta, fit: dict, config: FitConfig, warm_inputs: dict | None, *,
                    max_iterations: int, max_unchanged: int, seed: int | None, label: str):
     """CMA-ES over ``meta`` (or, with ``config.from_checkpoint``, the best-so-far candidate
-    of the checkpoint of a stopped fit, patches._checkpoint_best); returns (result, runtime s)."""
+    of the checkpoint of a stopped fit); returns (result, runtime s)."""
     import json
     from types import SimpleNamespace
 
     import pybop
+
+    from battery_oracle.fit import pybop_ext
 
     meta.set_run(workers=config.workers, timeout_s=config.candidate_timeout_s, checkpoint=config.checkpoint)
     if seed is not None:
@@ -1142,10 +1142,7 @@ def _run_optimiser(meta, fit: dict, config: FitConfig, warm_inputs: dict | None,
                                      verbose=True)
         optim = pybop.CMAES(meta, options=options)
         if warm_inputs is not None:
-            # PyBOP starts population optimisers at the prior mean: restart at the warm values
-            optim._optimiser = optim._pints_optimiser(
-                x0=optim.problem.parameters.get_initial_values(transformed=True),
-                sigma0=np.asarray(optim._std0, float) * config.warm_sigma, boundaries=optim._boundaries)
+            pybop_ext.restart_population(optim, config.warm_sigma)
         result = optim.run()
     return result, time.time() - t0
 
@@ -1158,179 +1155,143 @@ def _start_at_warm(fit: dict, warm_inputs: dict) -> None:
             prm.update_initial_value(float(np.clip(warm_inputs[k], lo + 1e-6 * span, hi - 1e-6 * span)))
 
 
-def fit_cell_chain(cell_id: str, data: dict, pv, *, warm: dict | None = None,
-                   max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
-                   free: list[str] | None = None, ambient_k: float | None = None,
-                   bounds: dict | None = None, ec_diffusivity_factor: float = 1.0,
-                   config: FitConfig | None = None) -> dict[str, Any]:
-    """Chain fit of one cell (module docstring); returns a JSON-able report.
-    ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
-    Two-step stage A: the electrode balance (positive capacity, N:P, cyclable lithium)
-    is fixed by the closed-form OCV fit to the measured rest voltages and dQ/dV feature
-    (``ocv_balance``); the DFN fit then adjusts kinetics, transport and architecture
-    only, with the negative/positive thickness ratio replacing the negative active
-    fraction (which follows from the fixed N:P). ``ec_diffusivity_factor`` multiplies
-    the template EC diffusivity as the oracle does (0.25 x sei_rate_scale). ``config``:
-    mesh, envelope probe, electrolyte floor, warm start and run control (recorded in the
-    report)."""
-    import pybop
-
-    from battery_oracle import patches
-
-    patches.apply()
-    pv_base = base_values(pv, ambient_k)
-    if ec_diffusivity_factor != 1.0:
-        pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * float(ec_diffusivity_factor)
-    balance_report = ocv_balance(data, pv_base, features=True)
-    q_meas = float(data["cell_capacity_mah"]) / 1000.0
-    fixed = {Q_P_RATIO: balance_report["Q_p_Ah"] / q_meas, NP_RATIO: balance_report["np_ratio"],
-             LI_FRACTION: balance_report["li_fraction"]}
-    log.info("%s: OCV balance %s -> fixed %s", cell_id, balance_report, fixed)
-    bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
-    config = config or FitConfig()
-    # warm start: CMA-ES starts at the warm values, and every parameter not freed
-    # (config.free) is held at its warm value -- not at the template's
-    warm_inputs = _warm_start(config)
-    if warm_inputs is not None:
-        warm = {**(warm or {}), **warm_inputs}
-        if config.free:
-            free = list(config.free)
-    fit = fit_parameters_chain(pv_base, data, warm, free=free, bounds=bounds)
-    for k in fixed:
-        fit.pop(k, None)
-    fit.pop(EPS_N, None)
-    if warm_inputs is not None:
-        held = {k: v for k, v in warm_inputs.items() if k not in fit and k not in fixed and k != EPS_N}
-        fixed = {**fixed, **held}
-        _start_at_warm(fit, warm_inputs)
-        log.info("%s: warm start from %s; free %s; held %s", cell_id, config.warm_json, sorted(fit), sorted(held))
-    chain = ChainModel(data, pv_base, fixed=fixed, config=config)
-    problems, chain = build_chain_problems(data, pv_base, fit, chain=chain)
-    meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
-    result, runtime = _run_optimiser(meta, fit, config, warm_inputs, max_iterations=max_iterations,
-                                     max_unchanged=max_unchanged, seed=seed, label=cell_id)
-    best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
-    log.info("%s: chain fit cost %s in %.0f s: %s", cell_id, result.best_cost, runtime, best)
-    fitted = dict(best)
-    best = {**fixed, **best}                   # the full candidate (fixed balance included)
-    return {"cell_id": cell_id, "method": "chain", "best_inputs": best, "fitted_inputs": fitted,
-            "fixed_inputs": fixed, "ocv_balance": balance_report,
-            "ec_diffusivity_factor": float(ec_diffusivity_factor), "fit_config": config.to_dict(),
-            "ambient_k": ambient_k, "seed": seed, "free": sorted(fit),
-            "cost": float(np.asarray(result.best_cost).ravel()[0]),
-            "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()},
-            "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
-            "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
-            "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
-            **evaluate_chain(data, pv_base, fitted, chain=chain)}
+def _is_rest(name: str) -> bool:
+    return name.startswith("Rest before ")
 
 
-def _joint_data(data: dict, cell_id: str) -> dict:
+def _cell_data(data: dict, cell_id: str) -> dict:
     """``data`` with its group names prefixed by the cell id, so every cell's unrecorded
-    rests are separate fit parameters in a joint fit (gap_name follows the group name)."""
+    rests are separate fit parameters (gap_name follows the group name)."""
     groups = [dict(g, name=f"{cell_id}:{g['name']}") for g in data["groups"]]
     return {**data, "groups": groups}
 
 
 def _unprefixed(inputs: dict, cell_id: str) -> dict:
-    """A joint fit's inputs for one cell, with that cell's rest names as in its own data."""
+    """Inputs of one cell, with that cell's rest names as in its own data (the other
+    cells' rests dropped)."""
     tag = f"{cell_id}:"
+    return {k.replace(tag, "") if _is_rest(k) else k: v for k, v in inputs.items()
+            if not _is_rest(k) or tag in k}
+
+
+def _prefixed(inputs: dict, cells: list[str], datas: dict) -> dict:
+    """Inputs in the fit's names: a rest named as in a cell's own data (a report's
+    ``best_inputs``) is given to every cell that has that group."""
     out = {}
     for k, v in inputs.items():
-        if k.startswith("Rest before "):
-            if tag not in k:
-                continue
-            k = k.replace(tag, "")
-        out[k] = v
+        if not _is_rest(k) or any(f"{c}:" in k for c in cells):
+            out[k] = v
+            continue
+        for c in cells:          # datas: the fit's (prefixed) data; k names the cell's own group
+            if any(gap_name(g["name"][len(c) + 1:]) == k for g in datas[c]["groups"]):
+                out[k.replace("Rest before ", f"Rest before {c}:")] = v
     return out
 
 
-def fit_cells_chain_joint(datas: dict, pv, *, warm: dict | None = None,
-                          max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
-                          ambient_k: float | None = None, bounds: dict | None = None,
-                          ec_diffusivity_factor: float = 1.0,
-                          config: FitConfig | None = None) -> dict[str, dict]:
-    """Joint chain fit of several cells: ONE set of kinetic, transport and geometric
-    parameters shared by all cells, scored on every cell's records and spectra.
+def _own(inputs: dict, cell_id: str) -> dict:
+    """The shared inputs and this cell's rests, in the fit's names."""
+    return {k: v for k, v in inputs.items() if not _is_rest(k) or f"{cell_id}:" in k}
 
-    Per cell: the electrode balance (step one, ``ocv_balance``: capacities differ
-    between cells) and the unrecorded rests. A single-cell fit can tune the shared
-    physics to one cell's history; the joint fit cannot. Returns {cell_id: report},
-    each report shaped like ``fit_cell_chain``'s (``best_inputs`` with the cell's own
-    rest names), so ``aggregate_chain`` works unchanged. ``config`` as in
-    ``fit_cell_chain``; ``config.dry_run`` builds the problems and returns their sizes
+
+def fit_cells(datas: dict, pv, *, warm: dict | None = None,
+              max_iterations: int = 150, max_unchanged: int = 30, seed: int | None = 0,
+              ambient_k: float | None = None, bounds: dict | None = None,
+              ec_diffusivity_factor: float = 1.0, config: FitConfig | None = None) -> dict[str, dict]:
+    """Chain fit of one or several cells (module docstring): ONE set of kinetic, transport
+    and geometric parameters shared by all cells, scored on every cell's records and
+    spectra. Returns {cell_id: JSON-able report}.
+
+    Two steps per cell. The electrode balance (positive capacity, N:P, cyclable lithium)
+    is fixed by the closed-form OCV fit to the measured rest voltages and dQ/dV feature
+    (``ocv_balance``: capacities differ between cells); the DFN fit then adjusts
+    kinetics, transport and architecture only, with the negative/positive thickness
+    ratio replacing the negative active fraction (which follows from the fixed N:P).
+    Each cell's unrecorded rests are its own parameters. A fit of one cell can tune the
+    shared physics to that cell's history; a fit of several cannot.
+
+    ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
+    ``ec_diffusivity_factor`` multiplies the template EC diffusivity as the oracle does
+    (0.25 x sei_rate_scale). ``config``: mesh, envelope probe, electrolyte floor, warm
+    start (CMA-ES starts at the warm values; with ``config.free`` every other parameter
+    is held at its warm value, not the template's), run control (recorded in each
+    report); ``config.dry_run`` builds the problems and returns {"dry_run": sizes}
     without optimising."""
     import pybop
 
-    from battery_oracle import patches
+    from battery_oracle.fit import pybop_ext
 
-    patches.apply()
+    pybop_ext.apply()
     pv_base = base_values(pv, ambient_k)
     if ec_diffusivity_factor != 1.0:
         pv_base[EC_DIFFUSIVITY] = float(pv_base[EC_DIFFUSIVITY]) * float(ec_diffusivity_factor)
     cells = list(datas)
-    jdata = {c: _joint_data(d, c) for c, d in datas.items()}
+    cdata = {c: _cell_data(d, c) for c, d in datas.items()}
     fixed, balances = {}, {}
     for c in cells:
-        rep = ocv_balance(jdata[c], pv_base, features=True)
-        q_meas = float(jdata[c]["cell_capacity_mah"]) / 1000.0
+        rep = ocv_balance(cdata[c], pv_base, features=True)
+        q_meas = float(cdata[c]["cell_capacity_mah"]) / 1000.0
         fixed[c] = {Q_P_RATIO: rep["Q_p_Ah"] / q_meas, NP_RATIO: rep["np_ratio"], LI_FRACTION: rep["li_fraction"]}
         balances[c] = rep
-        log.info("joint fit %s: OCV balance -> fixed %s", c, fixed[c])
-    bounds = dict(bounds or {})
-    bounds[NEG_THICKNESS_RATIO] = NEG_THICKNESS_RATIO_BOUNDS
+        log.info("%s: OCV balance %s -> fixed %s", c, rep, fixed[c])
+    bounds = {**(bounds or {}), NEG_THICKNESS_RATIO: NEG_THICKNESS_RATIO_BOUNDS}
     config = config or FitConfig()
-    warm = dict(warm or {})
+    warm = _prefixed(dict(warm or {}), cells, cdata)
     warm_inputs = _warm_start(config)
     if warm_inputs is not None:
+        warm_inputs = _prefixed(warm_inputs, cells, cdata)
         warm.update(warm_inputs)
     fit = {}
     for c in cells:                          # shared names coincide; rests are per cell
-        fit.update(fit_parameters_chain(pv_base, jdata[c], warm, bounds=bounds))
+        fit.update(fit_parameters_chain(pv_base, cdata[c], warm, bounds=bounds))
     for k in (Q_P_RATIO, NP_RATIO, LI_FRACTION, EPS_N):
         fit.pop(k, None)
     if warm_inputs is not None:
+        if config.free:
+            names = {k for c in cells for k in _unprefixed(fit, c)}
+            missing = [k for k in config.free if k not in names and k not in fit]
+            if missing:
+                raise KeyError(f"unknown free parameters {missing}; choose from {sorted(names)}")
+            free = set(_prefixed({k: 0 for k in config.free}, cells, cdata))
+            fit = {k: v for k, v in fit.items() if k in free}
+        held = {k: v for k, v in warm_inputs.items()
+                if k not in fit and k not in (Q_P_RATIO, NP_RATIO, LI_FRACTION, EPS_N)}
+        for c in cells:
+            fixed[c] = {**fixed[c], **_own(held, c)}
         _start_at_warm(fit, warm_inputs)
+        log.info("warm start from %s; free %s; held %s", config.warm_json, sorted(fit), sorted(held))
     chains, problems = {}, []
     for c in cells:
-        own = {k: v for k, v in fit.items() if not k.startswith("Rest before ") or f"{c}:" in k}
-        chains[c] = ChainModel(jdata[c], pv_base, fixed=fixed[c], config=config)
-        probs, _ = build_chain_problems(jdata[c], pv_base, own, chain=chains[c])
+        chains[c] = ChainModel(cdata[c], pv_base, fixed=fixed[c], config=config)
+        probs, _ = build_chain_problems(cdata[c], pv_base, _own(fit, c), chain=chains[c])
         problems += probs
-    shared = sorted(k for k in fit if not k.startswith("Rest before "))
-    log.info("joint fit %s: %d shared parameters, %d rests, %d problems", cells, len(shared),
+    shared = sorted(k for k in fit if not _is_rest(k))
+    log.info("fit %s: %d shared parameters, %d rests, %d problems", cells, len(shared),
              len(fit) - len(shared), len(problems))
     if config.dry_run:
         return {"dry_run": {"cells": cells, "shared": shared, "rests": sorted(set(fit) - set(shared)),
                             "n_problems": len(problems), "fixed": fixed}}
     meta = pybop.MetaProblem(*[p[2] for p in problems], weights=[p[3] for p in problems])
     result, runtime = _run_optimiser(meta, fit, config, warm_inputs, max_iterations=max_iterations,
-                                     max_unchanged=max_unchanged, seed=seed, label=f"joint fit {cells}")
+                                     max_unchanged=max_unchanged, seed=seed, label=f"fit {cells}")
     best = {k: float(np.asarray(v).ravel()[0]) for k, v in result.best_inputs.items()}
     cost = float(np.asarray(result.best_cost).ravel()[0])
-    log.info("joint fit %s: cost %s in %.0f s: %s", cells, cost, runtime, best)
+    log.info("fit %s: cost %s in %.0f s: %s", cells, cost, runtime, best)
+    log_params = [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)]
     reports = {}
     for c in cells:
-        own = {k: v for k, v in best.items() if not k.startswith("Rest before ") or f"{c}:" in k}
-        ev = evaluate_chain(jdata[c], pv_base, own, chain=chains[c])
         mine = _unprefixed(best, c)
+        own_fixed = _unprefixed(fixed[c], c)
         reports[c] = {
-            "cell_id": c, "method": "chain-joint", "best_inputs": {**fixed[c], **mine}, "fitted_inputs": mine,
-            "fixed_inputs": fixed[c], "ocv_balance": balances[c],
+            "cell_id": c, "method": "chain", "best_inputs": {**own_fixed, **mine}, "fitted_inputs": mine,
+            "fixed_inputs": own_fixed, "ocv_balance": balances[c],
             "ec_diffusivity_factor": float(ec_diffusivity_factor), "fit_config": config.to_dict(),
-            "ambient_k": ambient_k, "seed": seed,
-            "joint": {"cells": cells, "cost": cost, "shared": shared},
-            "cost": cost,
-            "param_bounds": {k: list(map(float, p.bounds)) for k, p in fit.items()
-                             if not k.startswith("Rest before ") or f"{c}:" in k},
-            "log_params": [k for k, p in fit.items() if isinstance(p.transformation, pybop.LogTransformation)],
-            "runtime_s": round(runtime, 1), "worker_pool": dict(patches.POOL_STATS),
+            "ambient_k": ambient_k, "seed": seed, "free": sorted(_unprefixed(fit, c)),
+            "cells": cells, "shared": shared, "cost": cost,
+            "param_bounds": {k: list(map(float, p.bounds)) for k, p in _unprefixed(fit, c).items()},
+            "log_params": list(_unprefixed({k: None for k in log_params}, c)),
+            "runtime_s": round(runtime, 1), "worker_pool": dict(pybop_ext.POOL_STATS),
             "n_iterations": (int(result.n_iterations) if getattr(result, "n_iterations", None) is not None else None),
-            **ev}
-        # report the cell's own rest names (as in its unprefixed data)
-        reports[c]["param_bounds"] = _unprefixed(reports[c]["param_bounds"], c)
-        reports[c]["log_params"] = [k.replace(f"{c}:", "") for k in reports[c]["log_params"]
-                                    if not k.startswith("Rest before ") or f"{c}:" in k]
+            **evaluate_chain(cdata[c], pv_base, _own(best, c), chain=chains[c])}
     return reports
 
 
@@ -1516,8 +1477,11 @@ def overrides_from_chain(pv, best: dict, measured_capacity_mah: float | None = N
 
 
 def aggregate_chain(cell_reports: list[dict], pv) -> dict:
-    """Median over cells (geometric for log-scale parameters) -> bol section. Rests
-    between sequences are measurement history, not cell properties: reported only."""
+    """Median over cells (geometric for log-scale parameters) -> the oracle settings of
+    the fitted cell (``parameter_scales``, ``parameter_overrides``,
+    ``contact_resistance_ohm`` of the oracle YAML's ``bol`` section; ``thermal``,
+    ``h_total_W_per_m2K`` of its ``cycling`` section; ``radial_mesh``). Rests between
+    sequences are measurement history, not cell properties: reported only."""
     ok = [c for c in cell_reports if c.get("best_inputs")]
     failed = [{"cell_id": c["cell_id"], "reason": c.get("error", "no fit")} for c in cell_reports
               if not c.get("best_inputs")]

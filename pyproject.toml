@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "battery-oracle"
 version = "0.4.0"
-description = "Standalone PyBaMM/SPMe battery oracle (simulator) + EIS + ECM fitting, with an Optuna calibration engine."
+description = "Stateful PyBaMM DFN battery oracle with non-stationary EIS, ECM features and physical-validity checks; stage-A fitting as the [fit] extra."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -40,6 +40,12 @@ autoeis = [
 #   pip install "hybrid-drt @ git+https://github.com/jdhuang-csm/hybrid-drt.git" "Mittag-Leffler @ git+https://github.com/jdhuang-csm/mittag-leffler.git"
 drt = [
     "tqdm",
+]
+# Stage-A fitting (battery_oracle.fit) and the oracle's non-stationary EIS, which
+# builds PyBOP's EIS model. The PyBOP extensions (battery_oracle.fit.pybop_ext) are
+# tested against this commit of the develop branch, which reports version 26.3.
+fit = [
+    "pybop",
 ]
 # Jupyter kernel for the notebooks/ directory. The `battery-oracle-venv` kernel
 # launches `.venv/bin/python3 -m ipykernel_launcher`, so ipykernel must be in the
@@ -77,7 +83,7 @@ Issues = "https://github.com/TRustworthy-AI-Tools-for-Science/battery-oracle/iss
 # without them (Randles stub / DRT peaks omitted). `docs` is only for the Sphinx
 # build. Add those per-invocation with `uv sync --extra autoeis`, etc.
 dev = [
-    "battery-oracle[notebook]",
+    "battery-oracle[notebook,fit]",
     "pytest>=8.0",
     "ruff",
 ]
@@ -91,6 +97,7 @@ default-groups = ["dev"]
 [tool.uv.sources]
 hybrid-drt     = { git = "https://github.com/jdhuang-csm/hybrid-drt.git" }
 "Mittag-Leffler" = { git = "https://github.com/jdhuang-csm/mittag-leffler.git" }
+pybop          = { git = "https://github.com/pybop-team/PyBOP.git", rev = "25d0b5be0ed3f6abaaf1ec388ae3cea54dbf4c84" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/battery_oracle"]

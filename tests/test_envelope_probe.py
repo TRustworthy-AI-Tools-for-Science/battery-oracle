@@ -1,12 +1,13 @@
-"""Envelope probe (bol_chain.with_envelope_probe, FitConfig.envelope_ma): single- and two-stage
+"""Envelope probe (chain.with_envelope_probe, FitConfig.envelope_ma): single- and two-stage
 charge, parsing of ORACLE_FIT_ENVELOPE_MA (synthetic data only)."""
 import numpy as np
 import pytest
 
-from battery_oracle import bol_chain as bc
-from battery_oracle.fit_config import FitConfig
+from battery_oracle.fit import chain as bc
+from battery_oracle.fit.config import FitConfig
 
-DATA = {"groups": [{"name": "g0", "duration_s": 100.0}], "current": [{"group": 0, "t": np.array([0.0, 100.0]),
+DATA = {"groups": [{"name": "f", "duration_s": 50.0, "formation": True, "charge_limit_v": 4.2, "charge_cv": True},
+                   {"name": "g0", "duration_s": 100.0, "charge_limit_v": 4.3, "charge_cv": False}], "current": [{"group": 0, "t": np.array([0.0, 100.0]),
                                                                       "I": np.array([0.0, 0.0])}]}
 
 
@@ -22,6 +23,11 @@ def test_single_stage_probe_unchanged():
     assert set(np.round(np.unique(p["I"]), 6)) == {-0.15, 0.0, 0.12}
     q, _, _ = _charge(p)
     assert q == pytest.approx(0.15 * bc.PROBE_STEP_S, rel=1e-3)
+
+
+def test_probe_runs_to_the_cycling_charge_limit():
+    g = bc.with_envelope_probe(DATA, 150.0, 120.0)["groups"][-1]
+    assert (g["charge_limit_v"], g["charge_cv"]) == (4.3, False)
 
 
 def test_two_stage_probe_charges_c1_then_c2_back_to_back():

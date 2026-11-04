@@ -1,34 +1,25 @@
-"""Physicality report: checks that a calibration produced a physically sensible cell.
+"""Physicality checks: is a parameterised oracle a physically sensible cell?
 
 Every check returns ``{"name", "status", "value", "limit", "note"}`` with
 ``status`` one of ``"pass"``, ``"warn"`` (suspicious -- inspect before trusting),
 ``"fail"`` (unphysical -- do not use) or ``"skip"`` (could not be evaluated).
-:func:`summarise` reduces a list to an overall status (the worst one); the
-battery-forecast pipeline refuses to start the degradation tune (stage B) on a
-stage-A result whose overall status is ``"fail"`` unless forced.
+:func:`summarise` reduces a list to an overall status (the worst one).
 
-Validity before accuracy: a fit need not reproduce the cell
-exactly, but it must be physically valid. In the chain report (:func:`check_chain`) the
-fit-accuracy checks (voltage and EIS errors) are therefore reported but never fail a
-fit (at worst ``warn``), while the internal-solution checks of
-:mod:`battery_oracle.validity` (interface flux continuity, charge balance, mesh
-oscillation, lithium conservation) and the state checks (electrolyte, stoichiometry,
-OCP data range, temperature, whole history simulated) do.
+Validity before accuracy: a calibration need not reproduce the cell exactly, but it
+must be physically valid; these checks judge the internal solution and the
+parameters, never the fit error.
 
-Stage A (:func:`check_chain`, on a chain fit's aggregate report and per-cell reports):
+* fitted kinetics/transport at a reference state inside broad plausibility windows
+  (about an order of magnitude either side of published LiCoO2/graphite values -- a
+  guard against runaway fits, not a literature fit), :func:`check_fitted_values`;
+* electrode state of health: PyBaMM's electrode-SOH solve succeeds with x/y limits
+  strictly inside (0, 1), :func:`check_esoh`;
+* one demanding DFN cycle on the deployed oracle (:func:`check_dfn_cycle`): completes
+  at full fidelity, no electrolyte depletion (:data:`CE_FAIL_REL`), no surface-
+  stoichiometry saturation, lithium conserved, and the two-mesh validity gate of
+  :mod:`battery_oracle.validity`.
 
-* fitted values at a reference state inside broad plausibility windows (about an order
-  of magnitude either side of published LiCoO2/graphite values -- a guard against
-  runaway fits, not a literature fit); microstructure and volume fractions;
-* electrode state of health: PyBaMM's electrode-SOH solve on the fitted cell succeeds
-  with x/y limits strictly inside (0, 1);
-* one demanding DFN cycle on the fitted oracle (:func:`check_dfn_cycle`): completes at
-  full fidelity, no electrolyte depletion, no surface-stoichiometry saturation, and the
-  two-mesh validity gate.
-
-Stage B (:func:`check_tune`, on the tune's best candidate and search ranges):
-degradation scales pinned at a search bound, capacity gain between replayed
-cycles, FAILED calibration targets.
+The stage-A checks of a chain fit build on these (:mod:`battery_oracle.fit.checks`).
 """
 from __future__ import annotations
 
@@ -41,6 +32,18 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 _ORDER = {"pass": 0, "skip": 0, "warn": 1, "fail": 2}
+
+#: Electrolyte depletion (minimum c_e / initial), one pair for every check and the fits'
+#: floor (:data:`battery_oracle.fit.config.CE_FLOOR_DEFAULT`): below CE_FAIL_REL the
+#: electrolyte, not the electrodes, is the rate limit, and the DFN is least reliable;
+#: below CE_WARN_REL the margin to it is small.
+CE_FAIL_REL = 0.1
+CE_WARN_REL = 0.2
+
+
+def electrolyte_status(ce_min_rel: float) -> str:
+    """pass / warn / fail of a minimum electrolyte concentration relative to initial."""
+    return "fail" if ce_min_rel < CE_FAIL_REL else ("warn" if ce_min_rel < CE_WARN_REL else "pass")
 
 
 def _check(name: str, status: str, value: Any = None, limit: Any = None, note: str = "") -> dict:
@@ -228,10 +231,8 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         ce = _entries("Electrolyte concentration [mol.m-3]")
         ce0 = float(oracle._pv["Initial concentration in electrolyte [mol.m-3]"])
         ratio = float(np.min(ce)) / ce0
-        # the final model must be physical: below the fits' 0.1 c0
-        # floor the oracle reaches its rate limit through electrolyte starvation
-        status = "fail" if ratio < 0.1 else ("warn" if ratio < 0.2 else "pass")
-        out.append(_check("electrolyte not depleted (min c_e / initial)", status, ratio, ">= 0.1 (fail), 0.2 (warn)",
+        out.append(_check("electrolyte not depleted (min c_e / initial)", electrolyte_status(ratio), ratio,
+                          [CE_FAIL_REL, CE_WARN_REL],
                           "the fits' electrolyte floor; below it the electrolyte is the rate limit"))
     except Exception as exc:
         out.append(_check("electrolyte not depleted", "skip", None, None, str(exc)[:120]))
@@ -328,196 +329,3 @@ def fitted_oracle_kwargs(fit_report: dict, oracle_kwargs: dict, ambient_k: float
         # the demanding cycle and its two-mesh gate judge the deployed mesh, not PyBaMM's default
         kw["radial_mesh"] = fit_report["radial_mesh"]
     return kw
-
-
-def check_chain(fit_report: dict, cell_reports: list[dict], pv_template, oracle_kwargs: dict,
-                *, ambient_k: float | None = None) -> dict:
-    """Stage-A physicality report for a chain fit (:mod:`battery_oracle.bol_chain`).
-
-    Per cell: fit quality per record and spectrum, whole history simulated,
-    parameters at a search bound (each parameter's own bounds), OCP data-range
-    excursions, cell temperature rise, electrolyte depletion. Population: geometry,
-    N:P, thickness, lithium inventory, heat transfer vs plausible ranges, kinetics/
-    transport windows, electrode-SOH solve and one demanding DFN cycle on the
-    fitted oracle (lumped thermal).
-    """
-    from battery_oracle.bol_chain import H_TOTAL, LI_FRACTION, THICKNESS_SCALE
-    from battery_oracle.bol_chain import EPS_N
-    from battery_oracle.params import apply_parameter_overrides, apply_parameter_scales
-
-    checks: list[dict] = []
-    for c in cell_reports:
-        cid = c["cell_id"]
-        bounds, logs = c.get("param_bounds", {}), set(c.get("log_params", []))
-        for r in c.get("records", []):
-            lab = r["label"]
-            if "error" in r:
-                checks.append(_check(f"fit[{cid}] {r['kind']} {lab} evaluated", "fail", None, None, r["error"]))
-            elif r["kind"] in ("formation", "cycling"):
-                # accuracy: reported, never fails the fit; a record not simulated does
-                done = r["n_simulated"] / max(r["n_points"], 1)
-                st = "fail" if done < 0.99 else ("warn" if r["rmse_v"] > 0.03 else "pass")
-                checks.append(_check(f"accuracy[{cid}] {r['kind']} voltage RMSE {lab}", st, round(r["rmse_v"], 4),
-                                     [0.03, 0.1], f"{done:.0%} of the record simulated; accuracy is "
-                                     "reported, not a validity gate"))
-            else:
-                st = "warn" if r["rel_rmse"] > 0.15 else "pass"
-                checks.append(_check(f"accuracy[{cid}] EIS relative RMSE {lab}", st, round(r["rel_rmse"], 3),
-                                     [0.15, 0.4], "accuracy is reported, not a validity gate"))
-        for name, v in c.get("best_inputs", {}).items():
-            if name in bounds:
-                hit = at_bound(v, *bounds[name], log_scale=name in logs)
-                if hit:
-                    checks.append(_check(f"fit[{cid}] {name[:60]} not at bound", "warn", v, bounds[name],
-                                         f"at {hit} bound: not identified by the data"))
-        d = c.get("diagnostics") or {}
-        if "error" in d:
-            checks.append(_check(f"fit[{cid}] history simulated", "fail", None, None, d["error"]))
-            continue
-        if d.get("validity"):
-            checks += d["validity"]
-        else:
-            checks.append(_check(f"validity[{cid}] internal-solution checks evaluated", "fail", None, None,
-                                 "no validity checks in the cell report (re-evaluate with "
-                                 "bol_chain.evaluate_chain)"))
-        done = d.get("t_simulated_s", 0.0) / max(d.get("t_total_s", 1.0), 1.0)
-        checks.append(_check(f"fit[{cid}] whole history simulated", "pass" if done > 0.999 else "fail",
-                             round(done, 4), 1.0, d.get("termination", "")))
-        for dom, o in (d.get("ocp") or {}).items():
-            st = "pass" if o["fraction_out"] == 0 else ("warn" if o["excursion"] <= 0.02 else "fail")
-            checks.append(_check(f"fit[{cid}] {dom} surface stoichiometry inside OCP data", st,
-                                 round(o["fraction_out"], 4), 0.0,
-                                 f"simulated {o['min']:.3f}-{o['max']:.3f}, data {o['data_range'][0]:.3f}-"
-                                 f"{o['data_range'][1]:.3f} (fraction of time outside)"))
-        if "T_max_K" in d and ambient_k is not None:
-            rise = d["T_max_K"] - ambient_k
-            checks.append(_check(f"fit[{cid}] cell temperature rise", "pass" if rise < 10 else
-                                 ("warn" if rise < 20 else "fail"), round(rise, 2), [0, 10],
-                                 "lumped thermal; coin cell at <=4C should stay within ~10 K"))
-        if "c_e_min_rel" in d:
-            ce = d["c_e_min_rel"]
-            checks.append(_check(f"fit[{cid}] electrolyte not depleted", "pass" if ce > 0.2 else
-                                 ("warn" if ce > 0.05 else "fail"), round(ce, 4), 0.2,
-                                 "minimum electrolyte concentration / initial over the history"))
-
-    ov = fit_report["parameter_overrides"]
-    t_area = float(pv_template["Electrode height [m]"]) * float(pv_template["Electrode width [m]"])
-    checks.append(_range_check("geometry: electrode area / template",
-                               ov["Electrode height [m]"] * ov["Electrode width [m]"] / t_area,
-                               0.5, 2.0, "template area scaled from Ai2020 area-per-capacity", fail_factor=2.0))
-    checks.append(_range_check("geometry: negative active fraction / template", ov[EPS_N] / float(pv_template[EPS_N]),
-                               0.7, 1.3, "N:P knob; commercial anodes 0.5-0.7", fail_factor=1.5))
-    for dom in ("Negative", "Positive"):
-        act = float(ov.get(f"{dom} electrode active material volume fraction",
-                           pv_template[f"{dom} electrode active material volume fraction"]))
-        por = float(ov.get(f"{dom} electrode porosity", pv_template[f"{dom} electrode porosity"]))
-        checks.append(_check(f"geometry: {dom.lower()} volume fractions (active + pores) <= 1",
-                             "pass" if act + por <= 1.0 + 1e-9 and por >= 0.15 else "fail",
-                             round(act + por, 4), 1.0, f"active {act:.3f}, porosity {por:.3f}"))
-    med = {k: v["median"] for k, v in fit_report["fit"]["distributions"].items()}
-    if THICKNESS_SCALE in med:
-        checks.append(_range_check("geometry: electrode thickness / template", med[THICKNESS_SCALE], 0.52, 1.31,
-                                   "40-100 um per electrode (Chen 2020; Ecker 2015); Ai2020 68-77 um",
-                                   fail_factor=1.2))
-    if LI_FRACTION in med:
-        checks.append(_range_check("cyclable lithium / positive capacity", med[LI_FRACTION], 0.85, 1.0,
-                                   "LiCoO2 is made fully lithiated (1.0); 5-15% lost at formation",
-                                   fail_factor=1.1))
-    if H_TOTAL in med:
-        checks.append(_range_check("heat-transfer coefficient [W/(m2 K)]", med[H_TOTAL], 5.0, 25.0,
-                                   "natural convection 5-25 W/(m2 K), plus conduction into the holder",
-                                   fail_factor=2.0))
-    esoh = fit_report["fit"].get("esoh") or {}
-    meas = fit_report["fit"].get("measured_capacity_mah")
-    if "capacity_ah" in esoh and meas:
-        checks.append(_range_check("capacity between OCV limits / measured 1C capacity",
-                                   1000.0 * esoh["capacity_ah"] / meas, 1.0, 1.3,
-                                   "open-circuit capacity must hold the measured ~1C capacity, "
-                                   "with a modest rate loss", fail_factor=1.3))
-    elif "error" in esoh:
-        checks.append(_check("electrode SOH on the fitted cell", "fail", None, None, esoh["error"]))
-    for key, nom in (("ocv100", 4.2), ("ocv0", 3.0)):
-        if key in esoh:
-            clamped = esoh.get(f"{key}_clamped")
-            checks.append(_check(f"SOC window {key} inside OCP data", "warn" if clamped else "pass",
-                                 round(esoh[key], 4), nom,
-                                 "clamped to the electrode OCP data edge" if clamped else "protocol value"))
-    fitted_kwargs = fitted_oracle_kwargs(fit_report, oracle_kwargs, ambient_k)
-    pv_fitted = apply_parameter_overrides(pv_template.copy(), ov)
-    apply_parameter_scales(pv_fitted, fit_report["parameter_scales"])
-    pv_fitted.update({"Contact resistance [Ohm]": fit_report["contact_resistance_ohm"]}, check_already_exists=False)
-    # bound hits are checked per cell above (each parameter has its own centred bounds)
-    shim = {"fit": {"eis": {}},
-            "parameter_scales": fit_report["parameter_scales"],
-            "contact_resistance_ohm": fit_report["contact_resistance_ohm"]}
-    checks += _microstructure_checks(pv_fitted, fit_report["fit"].get("measured_capacity_mah"))
-    checks += check_fitted_values(pv_fitted, shim) + check_esoh(pv_fitted) + check_dfn_cycle(fitted_kwargs)
-    report = {"stage": "A (chain)", **summarise(checks), "checks": checks}
-    log.info("stage-A (chain) physicality: %s %s", report["status"], report["counts"])
-    return report
-
-
-def _microstructure_checks(pv, measured_capacity_mah: float | None) -> list[dict]:
-    """Tortuosities, positive utilisation and N:P of the fitted cell vs measured
-    ranges (graphite tau 3-10: Landesfeind et al. 2016, Ebner et al. 2014; separator
-    MacMullin 2.5-5: Landesfeind 2016, Thorat et al. 2009; LiCoO2 cycles ~40-65% of
-    its theoretical capacity; practical N:P ~1.05-1.2 (reversible negative/positive))."""
-    from battery_oracle.bol_chain import electrode_capacities_ah
-
-    out = []
-    for dom, lo, hi, ref in (("Negative electrode", 3.0, 10.0, "graphite tau 3-10"),
-                             ("Positive electrode", 1.5, 6.0, "LiCoO2 electrodes tau ~2-5"),
-                             ("Separator", None, None, "")):
-        eps = float(pv[f"{dom} porosity"])
-        b = float(pv[f"{dom} Bruggeman coefficient (electrolyte)"])
-        tau = eps ** (1.0 - b)
-        if dom == "Separator":
-            n_m = eps ** (-b)
-            out.append(_range_check("separator MacMullin number", n_m, 2.5, 5.0,
-                                    "Celgard-type separators ~2.8-4.5", fail_factor=1.5))
-        else:
-            out.append(_range_check(f"{dom.lower()} tortuosity", tau, lo, hi, ref, fail_factor=1.5))
-    try:
-        q_n, q_p = electrode_capacities_ah(pv)
-        if measured_capacity_mah:
-            q = measured_capacity_mah / 1000.0
-            out.append(_range_check("positive utilisation (measured / theoretical)", q / q_p, 0.40, 0.65,
-                                    "LiCoO2 cycles ~0.45-1.0 of its lithium", fail_factor=1.3))
-            out.append(_range_check("practical N:P (0.93 Q_n / measured)", 0.93 * q_n / q, 1.0, 1.4,
-                                    "commercial 1.05-1.2", fail_factor=1.3))
-    except Exception as exc:                    # noqa: BLE001
-        out.append(_check("electrode capacities", "skip", None, None, str(exc)[:120]))
-    return out
-
-
-def check_tune(best: dict, ranges: dict, calibration_statuses: dict | None = None,
-               soh_history: list[float] | None = None) -> dict:
-    """Stage-B physicality report: degradation scales at bounds, capacity gains,
-    FAILED calibration targets."""
-    checks = []
-    for key, lo_k, hi_k in (("sei_rate_scale", "srs_min", "srs_max"),
-                            ("dead_li_decay_scale", "dds_min", "dds_max"),
-                            ("plating_rate_scale", "prs_min", "prs_max"),
-                            ("dod_lam_scale", "dl_min", "dl_max"),
-                            ("kinetics_scale", "ks_min", "ks_max")):
-        lo, hi = ranges.get(lo_k), ranges.get(hi_k)
-        v = best.get(key)
-        if v is None or lo is None or hi is None or lo == hi:
-            continue
-        hit = at_bound(float(v), float(lo), float(hi), log_scale=True)
-        checks.append(_check(f"{key} not at search bound", "warn" if hit else "pass", v, [lo, hi],
-                             f"at {hit} bound: widen the range or the target does not "
-                             f"constrain it" if hit else ""))
-    if soh_history and len(soh_history) > 1:
-        gains = np.diff(np.asarray(soh_history, dtype=float))
-        worst = float(np.max(gains))
-        checks.append(_check("no capacity gain between cycles (max SOH increase)",
-                             "pass" if worst <= 1e-4 else "warn", worst, "<= 1e-4",
-                             "SOH should not rise between cycles"))
-    for target, status in (calibration_statuses or {}).items():
-        checks.append(_check(f"calibration target: {target}",
-                             "fail" if str(status).startswith("FAILED") else
-                             ("warn" if str(status).startswith("partial") else "pass"), status))
-    report = {"stage": "B", **summarise(checks), "checks": checks}
-    log.info("stage-B physicality: %s %s", report["status"], report["counts"])
-    return report

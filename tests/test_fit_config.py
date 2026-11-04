@@ -1,8 +1,8 @@
-"""battery_oracle.fit_config: a fit's settings survive the report round trip, and a report
+"""battery_oracle.fit.config: a fit's settings survive the report round trip, and a report
 without them is refused."""
 import pytest
 
-from battery_oracle.fit_config import FitConfig
+from battery_oracle.fit.config import FitConfig
 
 
 def test_report_round_trip_preserves_every_setting():

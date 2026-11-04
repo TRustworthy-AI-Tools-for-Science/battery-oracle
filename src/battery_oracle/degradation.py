@@ -71,47 +71,29 @@ def _build_degradation_config(
     ``kinetics_scale`` has a side effect on R1/SEI growth rate that's independent
     of its intended effect on the EIS arc shape: lower exchange-current density
     raises the electrode overpotential needed for the same applied current, and
-    the SEI growth law is exponential in that overpotential (η_SEI; see
-    ORACLE.md §2.1), so kinetics_scale alone *also* accelerates SEI growth as an
+    the SEI growth law is exponential in that overpotential (η_SEI), so kinetics_scale alone *also* accelerates SEI growth as an
     unintended side effect. sei_rate_scale lets R1 growth rate be tuned back down
     independently, without re-perturbing the arc-shape calibration kinetics_scale
     was actually tuned for.
 
     ``"nominal"``
-        SEI (``"ec reaction limited"``) + particle cracking, using Ai2020's
-        unmodified critical stress (60 MPa).  PyBaMM's LAM rate is a smooth power
-        law ``beta_LAM * (sigma_h/sigma_critical)^m_LAM`` with no threshold — there
-        is no C-rate "onset"; sensitivity comes entirely from how sigma_hyd scales
-        with C-rate, which Ai2020's stress model already provides.  No plating,
-        no SEI-on-cracks.
-        Target EOL: ~80–150 cycles at 1C (commercial CR2032-calibrated).
+        SEI (``"ec reaction limited"``) only.
 
     ``"accelerated"``  *(default)*
-        SEI + cracking (Ai2020 default critical stress) + partially-reversible
-        lithium plating.  No "SEI on cracks": the three-way crack→SEI-on-cracks→
-        plating coupling causes IDA solver stiffness (h → 0); cracking + plating
-        together already provide C-rate sensitivity.
-        Plating kinetic rate 1e-8 m/s, dead-Li decay 4e-6 s⁻¹.
-        Target EOL: ~40–70 cycles at 1C.
+        SEI + partially-reversible lithium plating (kinetic rate 1e-8 m/s, dead-Li
+        decay 4e-6 s⁻¹): plating grows exponentially with the local overpotential, so
+        it gives the C-rate sensitivity.
 
     ``"severe"``
         Same model options as accelerated; faster plating (1e-7 m/s, decay 1e-4 s⁻¹).
-        Target EOL: ~20–50 cycles at 1C.
 
-    An earlier version of this function reduced critical stress to 15 MPa for all
-    presets, reasoning that this would create a C-rate "activation threshold" for
-    cracking.  That reasoning was wrong: the LAM rate has no threshold/switch at
-    sigma_critical (it is a smooth power law), so the C-rate sensitivity RATIO
-    (sigma_1C/sigma_critical)^2 / (sigma_0.3C/sigma_critical)^2 =
-    (sigma_1C/sigma_0.3C)^2 is invariant to sigma_critical — it cancels out.
-    Lowering sigma_critical 4x (60->15 MPa) bought zero C-rate differentiation
-    while amplifying the Jacobian sensitivity d(rate)/d(sigma) ~ 1/sigma_critical^2
-    by 16x, which is what was causing repeated IDA_ERR_FAIL convergence failures
-    in the IDA solver.  Reverted to Ai2020 defaults for all presets.
+    Particle mechanics (cracking, LAM) are off in every preset: with the Chen2020
+    graphite OCP the cracking stress submodel fails DAE initialisation (recorded on
+    PyBaMM 26.6.2.0; see the ``nominal`` branch). The presets' EOL labels in
+    config_oracle_defaults.yml are not calibrated against the DFN.
 
-    Physical basis: Reniers et al. (2019) for SEI; Ai et al. (2020) for crack/LAM
-    parameters and the underlying sigma_hyd(C-rate) stress model; OKane et al.
-    (2022) for plating kinetics.
+    Physical basis: Reniers et al. (2019) for SEI; OKane et al. (2022) for plating
+    kinetics.
 
     ``ec_diffusivity_base_factor`` (default 0.25) is the universal EC
     diffusivity correction factor described below; ``preset_constants``

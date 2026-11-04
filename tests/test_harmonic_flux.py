@@ -1,6 +1,5 @@
 """Interface averaging of flux coefficients (battery_oracle.patches harmonic_flux_coefficients)."""
 import numpy as np
-import pytest
 
 
 def _discretised_divergences(patched: bool):
@@ -46,22 +45,3 @@ def test_stock_pybamm_averages_flux_combinations_arithmetically():
     bare, combo = _discretised_divergences(patched=False)
     assert not np.allclose(bare, combo)
     assert np.allclose(bare[:5], combo[:5]) and np.allclose(bare[-5:], combo[-5:])   # interface cells only
-
-
-def test_fit_checkpoint_keeps_the_best_candidate(tmp_path):
-    """parallel_batches writes the best-so-far candidate (FitConfig.checkpoint), so a
-    fit killed at the job time limit still leaves its parameters."""
-    import json
-
-    from battery_oracle import patches
-
-    path = tmp_path / "cell.checkpoint.json"
-    patches._BEST.clear()
-    patches._BEST["cost"] = np.inf
-    patches._checkpoint_best(str(path), [{"a": 1.0}, {"a": np.array([2.0])}], np.array([3.0, 1.0]))
-    first = json.loads(path.read_text())
-    assert first["best_cost"] == 1.0 and first["best_inputs"] == {"a": 2.0}
-    patches._checkpoint_best(str(path), [{"a": 5.0}], np.array([4.0]))            # worse: unchanged
-    assert json.loads(path.read_text())["best_inputs"] == {"a": 2.0}
-    patches._checkpoint_best(str(path), [{"a": 7.0}], np.array([np.inf]))         # failed: unchanged
-    assert json.loads(path.read_text())["best_cost"] == 1.0

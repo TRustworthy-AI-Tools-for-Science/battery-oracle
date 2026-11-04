@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from battery_oracle import bol_chain as bc
+from battery_oracle.fit import chain as bc
 from battery_oracle import validity
-from battery_oracle.fit_config import FitConfig
+from battery_oracle.fit.config import FitConfig
 
 
 class FakeChain:

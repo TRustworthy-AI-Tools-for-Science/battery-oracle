@@ -1,10 +1,13 @@
-"""battery_oracle.physicality: check classification and the stage-A / stage-B reports."""
+"""battery_oracle.physicality and battery_oracle.fit.checks: check classification and the
+stage-A physical-validity checks."""
 import pytest
 
 from battery_oracle.physicality import (
     _range_check,
+    CE_FAIL_REL,
+    CE_WARN_REL,
     at_bound,
-    check_tune,
+    electrolyte_status,
     summarise,
 )
 
@@ -31,34 +34,29 @@ def test_summarise_takes_the_worst_and_ignores_skips():
     assert summarise([{"status": "skip"}])["status"] == "pass"
 
 
-def test_check_tune_flags_bounds_gains_and_failed_targets():
-    best = {"sei_rate_scale": 0.01005, "plating_rate_scale": 0.5, "kinetics_scale": 1.0}
-    ranges = {"srs_min": 0.01, "srs_max": 1.0, "prs_min": 0.01, "prs_max": 10.0,
-              "ks_min": 1.0, "ks_max": 1.0}
-    rep = check_tune(best, ranges, {"step_shape": "FAILED — outside CI",
-                                    "capacity_fade": "partial — off"},
-                     soh_history=[1.0, 0.999, 0.9995])
-    by = {c["name"]: c["status"] for c in rep["checks"]}
-    assert by["sei_rate_scale not at search bound"] == "warn"
-    assert by["plating_rate_scale not at search bound"] == "pass"
-    assert "kinetics_scale not at search bound" not in by          # pinned range skipped
-    assert by["no capacity gain between cycles (max SOH increase)"] == "warn"
-    assert by["calibration target: step_shape"] == "fail"
-    assert by["calibration target: capacity_fade"] == "warn"
-    assert rep["status"] == "fail"
+def test_one_electrolyte_threshold_pair_for_checks_and_fit_floor():
+    from battery_oracle.fit.config import CE_FLOOR_DEFAULT
+
+    assert CE_FLOOR_DEFAULT == CE_FAIL_REL < CE_WARN_REL
+    assert electrolyte_status(0.5 * CE_FAIL_REL) == "fail"
+    assert electrolyte_status(0.5 * (CE_FAIL_REL + CE_WARN_REL)) == "warn"
+    assert electrolyte_status(2.0 * CE_WARN_REL) == "pass"
 
 
-def test_fitted_values_and_esoh_on_the_template_pass():
-    pytest.importorskip("pybamm")
-    from battery_oracle.parameter_sets import lir2032
-    from battery_oracle.physicality import check_esoh, evaluate_parameter, PLAUSIBILITY_WINDOWS
+def test_cell_checks_judge_validity_not_accuracy():
+    """A cell's physical checks come from its diagnostics; its fit errors are not judged."""
+    from battery_oracle.fit.checks import cell_checks
 
-    pv = lir2032()
-    for name, kind, lo, hi, _ in PLAUSIBILITY_WINDOWS:
-        v = evaluate_parameter(pv, name, kind)
-        assert v > 0, name
-    (esoh,) = check_esoh(pv)
-    assert esoh["status"] == "pass", esoh
+    valid = {"name": "validity[c] lithium conserved", "status": "pass", "value": 0.0}
+    rep = {"cell_id": "c", "records": [{"kind": "cycling", "label": "c/1", "rmse_v": 9.9,
+                                        "n_simulated": 10, "n_points": 10}],
+           "diagnostics": {"validity": [valid], "t_simulated_s": 100.0, "t_total_s": 100.0,
+                           "c_e_min_rel": 0.5 * CE_FAIL_REL, "T_max_K": 301.0}}
+    by = {c["name"]: c["status"] for c in cell_checks(rep, ambient_k=300.0)}
+    assert by == {valid["name"]: "pass", "fit[c] whole history simulated": "pass",
+                  "fit[c] cell temperature rise": "pass", "fit[c] electrolyte not depleted": "fail"}
+    failed = cell_checks({"cell_id": "c", "diagnostics": {"error": "solver"}})
+    assert [c["status"] for c in failed] == ["fail"]
 
 
 @pytest.mark.slow
