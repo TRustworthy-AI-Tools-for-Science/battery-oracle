@@ -87,7 +87,7 @@ def test_protocol_bound_kwarg_overrides_sanitisation():
     assert o._C_MAX_mA == pytest.approx(0.25 * o._nominal_mAh)
     assert o._C_MIN_mA == pytest.approx(0.02 * o._nominal_mAh)
     amps = o._sanitise_current(999_999.0, 500.0, o._C_MIN_mA, o._C_MAX_mA)
-    assert amps == pytest.approx(1234.0 / 1000.0)
+    assert amps == pytest.approx(0.25 * o._nominal_mAh / 1000.0)
 
 
 def test_solver_and_ecm_kwargs_wire_to_instance_attrs():
