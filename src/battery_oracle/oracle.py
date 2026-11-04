@@ -547,7 +547,7 @@ class PyBaMMOracle:
         self._dead_li_to_R  = 5e-2 / (a_s * V_el)  # ρ_dead≈0.05 Ω·m [OKane2022]
 
     @classmethod
-    def from_config(cls, source: "str | Path | dict | None" = None) -> "PyBaMMOracle":
+    def from_config(cls, source: "str | Path | dict | None" = None, *, ecm_model_fn=None) -> "PyBaMMOracle":
         """Build a calibrated oracle from an oracle-config YAML (recommended entry point).
 
         The friendliest way to get a working, calibrated ``PyBaMMOracle``
@@ -564,6 +564,9 @@ class PyBaMMOracle:
             * A path to a custom ``config_oracle_*.yml`` (e.g. a
               ``tune.write_oracle_config`` output).
             * An already-parsed config ``dict``.
+        ecm_model_fn : callable, optional
+            The ECM fitter (default the Randles stub; see
+            :func:`battery_oracle.experiment.build_oracle_from_oracle_config`).
 
         Returns
         -------
@@ -580,7 +583,7 @@ class PyBaMMOracle:
         # through to load_oracle_config(source) for anything that isn't a dict
         # -- and load_oracle_config(None) loads the
         # packaged config_oracle_defaults.yml -- so None is passed through as-is.
-        return build_oracle_from_oracle_config(source)
+        return build_oracle_from_oracle_config(source, ecm_model_fn=ecm_model_fn)
 
     def _model_var_pts(self, model):
         """Mesh for a PyBaMM model of this oracle: the defaults, with the coarse

@@ -282,7 +282,7 @@ def build_oracle_from_config(cfg: dict | str | Path) -> "PyBaMMOracle":
     return PyBaMMOracle(**kwargs)
 
 
-def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle":
+def build_oracle_from_oracle_config(source: str | Path | dict, *, ecm_model_fn=None) -> "PyBaMMOracle":
     """Build a :class:`PyBaMMOracle` straight from an oracle/calibration config.
 
     Unlike :func:`build_oracle_from_config`, this needs no experiment YAML /
@@ -290,6 +290,10 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     a calibrated oracle. ``source`` is a path to a ``config_oracle_*.yml``
     or an already-parsed dict. The three-layer precedence collapses to a single oracle-config
     layer here (no experiment overlay).
+
+    The ECM fitter is not part of an oracle config: ``ecm_model_fn`` (default the fast
+    Randles stub, :func:`battery_oracle.ecm.randles_stub_ecm`; pass
+    :func:`battery_oracle.ecm.autoeis_ecm` for Bayesian fits).
     """
     if isinstance(source, dict):
         oracle_cfg = source
@@ -306,10 +310,8 @@ def build_oracle_from_oracle_config(source: str | Path | dict) -> "PyBaMMOracle"
     if pset:
         kwargs["parameter_values"] = resolve_parameter_values(pset)
 
-    # This layer carries an ecm.circuit-derived `circuit`; the fitter is not part
-    # of the oracle config, so default to the fast Randles stub.
     kwargs.pop("ecm_fitter", None)
-    kwargs["ecm_model_fn"] = randles_stub_ecm
+    kwargs["ecm_model_fn"] = randles_stub_ecm if ecm_model_fn is None else ecm_model_fn
     return PyBaMMOracle(**kwargs)
 
 

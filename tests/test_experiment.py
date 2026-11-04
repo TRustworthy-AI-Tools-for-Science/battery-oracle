@@ -213,3 +213,15 @@ def test_run_experiment_default():
     history = run_experiment(path)
     assert isinstance(history, list)
     assert len(history) >= 1
+
+
+def test_oracle_config_builder_takes_the_ecm_fitter():
+    """The ECM fitter is not in the oracle config: the Randles stub by default, or the
+    fitter passed."""
+    from battery_oracle import PyBaMMOracle, randles_stub_ecm
+
+    def fitter(*a, **k):
+        return randles_stub_ecm(*a, **k)
+
+    assert PyBaMMOracle.from_config().ecm_model_fn is randles_stub_ecm
+    assert PyBaMMOracle.from_config(ecm_model_fn=fitter).ecm_model_fn is fitter
