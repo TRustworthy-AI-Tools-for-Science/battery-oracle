@@ -337,3 +337,13 @@ def test_fit_cells_shares_physics_and_keeps_rests_per_cell(monkeypatch):
     assert one["rests"] == [chain.gap_name("a:002")]
     assert two["rests"] == [chain.gap_name("a:002"), chain.gap_name("b:002")]
     assert (one["n_problems"], two["n_problems"]) == (per_cell, 2 * per_cell)
+
+
+def test_candidate_values_rejects_inputs_it_does_not_apply():
+    """Every fitted or fixed parameter of the chain fit is applied; anything else raises."""
+    from battery_oracle.fit.chain import LITERATURE_BOUNDS, NEG_THICKNESS_RATIO, NP_RATIO, candidate_inputs, candidate_values
+
+    assert set(LITERATURE_BOUNDS) | {NEG_THICKNESS_RATIO, NP_RATIO} <= candidate_inputs()
+    with pytest.raises(KeyError, match="unknown candidate inputs"):
+        candidate_values(_pv(), {"Positive OCP wall stoichiometry": 0.9}, 3.96, 0.042)
+

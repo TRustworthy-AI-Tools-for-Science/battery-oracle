@@ -676,10 +676,22 @@ def geometry_overrides(pv_template, inputs: dict, measured_capacity_ah: float | 
     return ov
 
 
+def candidate_inputs() -> frozenset[str]:
+    """Every input name :func:`candidate_values` applies (the rests before groups,
+    ``gap_name``, are read by ``ChainModel.offsets``)."""
+    return frozenset({scale_parameter_name(n) for n in CHAIN_SCALES} | {CONTACT_R, H_TOTAL, *RADII, LI_FRACTION}
+                     | {THICKNESS_SCALE, NEG_THICKNESS_RATIO, NP_RATIO, EPS_N, TORTUOSITY_N, MACMULLIN_S,
+                        Q_P_RATIO})
+
+
 def candidate_values(pv_base, inputs: dict, initial_voltage: float,
                      measured_capacity_ah: float | None = None):
     """Plain-number ParameterValues of one candidate (no input parameters: geometry,
-    thickness and initial concentrations all change per candidate)."""
+    thickness and initial concentrations all change per candidate). An input it does
+    not apply raises KeyError (a misspelt or removed parameter is never ignored)."""
+    unknown = sorted(k for k in inputs if k not in candidate_inputs() and not k.startswith("Rest before "))
+    if unknown:
+        raise KeyError(f"unknown candidate inputs {unknown}; known: {sorted(candidate_inputs())}")
     pv = pv_base.copy()
     scales = {n: _f(inputs[scale_parameter_name(n)]) for n in CHAIN_SCALES
               if scale_parameter_name(n) in inputs}
