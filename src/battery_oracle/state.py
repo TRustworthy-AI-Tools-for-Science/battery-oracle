@@ -84,12 +84,9 @@ class CycleResult:
         rest.
     capacity_ah : float
         Measured or voltage-limited discharge capacity for this cycle, in Ah.
-    fidelity : str
-        ``"full"`` for every completed cycle (the model is never swapped; an
-        emergency-solver retry is recorded in ``failure_kind`` instead).
     failure_kind : FailureKind or None
-        Non-fatal degradation classification recorded for this cycle, if any.
-        ``None`` for a full-fidelity cycle. (A *fatal* failure raises
+        Non-fatal solver status of this cycle: ``FailureKind.SOLVER_DEGRADED`` when the
+        emergency solver finished it, ``None`` for a primary-solver cycle. (A *fatal* failure raises
         :class:`OracleFailure` instead of returning a ``CycleResult``.)
     protocol : np.ndarray
         The protocol vector exactly as received by ``run_cycle`` (before
@@ -130,7 +127,6 @@ class CycleResult:
     soc_charge: float
     soc_discharge: float
     capacity_ah: float
-    fidelity: str
     failure_kind: "FailureKind | None"
     protocol: np.ndarray
     protocol_applied: Protocol

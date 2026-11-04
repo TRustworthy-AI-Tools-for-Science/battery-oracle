@@ -115,6 +115,6 @@ def test_dfn_lir2032_oracle_applies_real_cell_currents_unscaled():
                      dur_min_s=1.0, ecm_rescale_target_r0=None)
     o(np.array([3.5 * q, 1.5 * q, 0.25, 0.25, 1.3 * q, 0.1]))
     h = o.history[-1]
-    assert h["fidelity"] == "full"
+    assert h["failure_kind"] is None
     assert h["step_stats"][2]["current_A"] == pytest.approx(3.5 * q / 1000.0, rel=1e-3)
     assert h["step_stats"][2]["frac"] > 0.0

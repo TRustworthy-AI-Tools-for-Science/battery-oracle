@@ -518,9 +518,9 @@ class PyBaMMOracle:
         self._cumulative_dod_lam_frac = 0.0   # dimensionless cumulative loss fraction
         self._cumulative_dod_lam_ah = 0.0     # = frac * nominal_cap (eol_loss budget)
         self._cumulative_dod_throughput_ah = 0.0
-        # Per-call fidelity status (reset each run_cycle; downgraded by the fallback).
+        # Per-call solver status (reset each run_cycle; SOLVER_DEGRADED when the
+        # emergency solver finished the cycle).
         self._last_failure_kind: FailureKind | None = None
-        self._last_fidelity: str = "full"
         # Most recent CycleResult (None until the first successful run_cycle()).
         self._last_result: CycleResult | None = None
         # Clamp *signatures* (field + reason, not exact values) already warned
@@ -728,7 +728,7 @@ class PyBaMMOracle:
         call immediately. It exists to *reuse* an existing instance for a new
         run (e.g. a new active-learning policy/seed) without paying the cost
         of rebuilding the PyBaMM model/solvers from scratch: it clears
-        ``history``, accumulated degradation state, and cached fidelity/
+        ``history``, accumulated degradation state, and cached solver/
         fallback status, then rebuilds the native model. It also re-seeds the
         EIS noise generator from the original ``seed`` kwarg, so a
         ``reset()``-then-run sequence reproduces the same noise realisation
@@ -1104,7 +1104,7 @@ class PyBaMMOracle:
         return any(len(c.steps) < expected for c in added)
 
     def _solve_with_fallbacks(self, experiment, protocol, solve_kw):
-        """Solve ``experiment``, returning ``(solution, fidelity, failure_kind)``.
+        """Solve ``experiment``, returning ``(solution, failure_kind)``.
 
         Primary solver, then the emergency (looser) solver on the same model and cell
         state. The model is never swapped: when both solvers fail, ``OracleFailure``
@@ -1132,11 +1132,11 @@ class PyBaMMOracle:
         # Same model throughout: primary solver, then the emergency (looser) solver on the
         # SAME model and cell state. No model swap: if both fail, OracleFailure is raised.
         active_model = self._cycling_model
-        primary_solver, emerg_solver, base_fid = self._solver, self._solver_emerg, "full"
+        primary_solver, emerg_solver = self._solver, self._solver_emerg
 
         try:
             sol = _solve(active_model, primary_solver)
-            return sol, base_fid, None
+            return sol, None
         except Exception as exc1:
             log.warning("[PyBaMMOracle] primary solver failed (%s: %s); retrying "
                         "with emergency solver (same cell state)",
@@ -1155,8 +1155,8 @@ class PyBaMMOracle:
                 f"Battery simulation failed after two attempts: {exc2}",
                 protocol=proto, failure_kind=kind,
             ) from exc2
-        # Emergency (looser Casadi) succeeded — record the degrade, keep base fidelity.
-        return sol, base_fid, FailureKind.SOLVER_DEGRADED
+        # The emergency (looser) solver succeeded: record the degrade.
+        return sol, FailureKind.SOLVER_DEGRADED
 
     def __call__(self, protocol: "Protocol | np.ndarray | Sequence[float]") -> np.ndarray:
         """Run one cycle and return the raw state vector.
@@ -1203,11 +1203,10 @@ class PyBaMMOracle:
             protocol.to_array() if isinstance(protocol, Protocol)
             else np.asarray(protocol, dtype=float)
         )
-        # Per-call fidelity/degradation status, recorded into this call's history
-        # row. Reset to full fidelity every call; _solve_with_fallbacks records
-        # SOLVER_DEGRADED when it needed the emergency solver (same model).
+        # Per-call solver status, recorded into this call's history row:
+        # _solve_with_fallbacks records SOLVER_DEGRADED when it needed the emergency
+        # solver (same model).
         self._last_failure_kind = None
-        self._last_fidelity = "full"
         experiment, protocol_applied = self._protocol_to_experiment(protocol)
         # On the first call (no prior solution), start at 80 % SOC so the initial
         # OCV (~3.9–4.0 V) sits safely inside the experiment voltage window.
@@ -1215,7 +1214,7 @@ class PyBaMMOracle:
         solve_kw: dict = {"initial_soc": self._initial_soc} if first_call else {}
         protocol_applied = self._apply_ambient(protocol, protocol_applied, first_call)
 
-        sol, self._last_fidelity, self._last_failure_kind = \
+        sol, self._last_failure_kind = \
             self._solve_with_fallbacks(experiment, protocol, solve_kw)
         self._prev_solution = sol
 
@@ -1260,9 +1259,8 @@ class PyBaMMOracle:
             "chemistry":          self._chemistry,
             "protocol":           np.asarray(protocol).copy(),
             # Non-fatal per-step status; SOLVER_DEGRADED (Phase 1) is recorded
-            # here, never raised. Successful full-fidelity steps carry None/"full".
+            # here, never raised; None for a primary-solver cycle.
             "failure_kind":       self._last_failure_kind,
-            "fidelity":           self._last_fidelity,
             "eis_mode_used":      self._last_eis_mode_used,
             # lock-in drift leakage included in Z (non-stationary EIS only) [Ohm]
             "eis_leakage_charge": None if leak_charge is None else np.asarray(leak_charge).copy(),
@@ -1339,7 +1337,6 @@ class PyBaMMOracle:
             soc_charge=soc_charge,
             soc_discharge=soc_discharge,
             capacity_ah=cap_ah,
-            fidelity=self._last_fidelity,
             failure_kind=self._last_failure_kind,
             protocol=np.asarray(protocol).copy(),
             protocol_applied=protocol_applied,

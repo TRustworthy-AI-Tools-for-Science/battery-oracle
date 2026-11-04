@@ -121,7 +121,7 @@ Pass the circuit your experiment is featurised with (`PyBaMMOracle(circuit=...)`
 | `soh` | state of health after this call (1.0 = fresh) |
 | `soc_charge`, `soc_discharge` | SOC at the end of the charged / discharged rest |
 | `capacity_ah` | discharge capacity of the call [A h] (C/20 check capacity with `capacity_check`) |
-| `fidelity`, `failure_kind` | `"full"` for every returned cycle; `FailureKind.SOLVER_DEGRADED` or `None` |
+| `failure_kind` | `FailureKind.SOLVER_DEGRADED` (the emergency solver finished the cycle) or `None` |
 | `protocol` | the protocol as received |
 | `protocol_applied` | the sanitised protocol actually simulated, as a `Protocol` in the simulated cell's mA/h |
 | `eis_charge`, `eis_discharge` | `(frequencies_hz, Z)` with complex `Z` [Ohm] |
@@ -141,7 +141,7 @@ the last call), `last_parameter_values` (the parameter values it was solved with
 | Key | Content |
 |---|---|
 | `call_idx`, `chemistry`, `protocol` | provenance |
-| `failure_kind`, `fidelity` | solver status of the call |
+| `failure_kind` | solver status of the call |
 | `eis_mode_used` | `"equilibrium"`, `"nonstationary"`, or `"equilibrium (non-stationary failed)"` |
 | `eis_leakage_charge`, `eis_leakage_discharge` | lock-in drift leakage included in Z [Ohm] (non-stationary EIS only) |
 | `end_soh` | SOH from the loss budget (see [Degradation](degradation.md)) |

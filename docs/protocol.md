@@ -232,7 +232,7 @@ history = run_experiment("my_experiment.yml")      # load, build, run every prot
 
 `run_experiment` calls `reset()` first (`reset=False` skips it), runs the protocols
 in order, and stops at the first {class}`~battery_oracle.OracleFailure`. It then
-appends a terminal row (`failed: True`, `failure_kind`, `fidelity: "failed"`,
+appends a terminal row (`failed: True`, `failure_kind`,
 `protocol`) and returns the history: a short history is data, not an error.
 
 The pieces compose, for example for a sweep over a base config:

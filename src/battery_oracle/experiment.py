@@ -357,7 +357,6 @@ def run_experiment(path: str | Path | None = None, *, reset: bool = True) -> lis
                 "call_idx":     len(oracle.history),
                 "failed":       True,
                 "failure_kind": fk,
-                "fidelity":     "failed",
                 "protocol": (
                     np.asarray(exc.protocol).copy()
                     if exc.protocol is not None

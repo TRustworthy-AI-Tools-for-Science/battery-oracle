@@ -90,7 +90,7 @@ voltage traces outside the current steps of either.
   oracle built from `oracle_kwargs` (default 3.8C first charge stage, 2C second, 3.8C
   discharge, at the C-rates of the oracle's own nominal capacity, Randles-stub ECM;
   {func}`~battery_oracle.physicality.run_demanding_cycle`). It checks that the cycle
-  completes at full fidelity; the electrolyte is not depleted (minimum $c_e$ over its
+  completes with the primary solver; the electrolyte is not depleted (minimum $c_e$ over its
   initial value: fail below `CE_FAIL_REL` = 0.1, warn below `CE_WARN_REL` = 0.2); the
   surface stoichiometries stay inside (0.005, 0.995); the positive stoichiometry stays
   inside the OCP data range; lithium is conserved (PyBaMM's total loss equals its loss

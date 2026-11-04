@@ -235,14 +235,14 @@ def test_current_bounds_are_c_rates_of_the_cells_own_capacity():
 
 
 @pytest.mark.slow
-def test_one_cycle_runs_at_full_fidelity(one_cycle):
-    """A real DFN cycle runs end-to-end at full fidelity (the model is never swapped)
+def test_one_cycle_runs_with_the_primary_solver(one_cycle):
+    """A real DFN cycle runs end-to-end with the primary solver
     and records one history row with the cycle's ECM fit and SOH."""
     oracle, res = one_cycle
     assert len(res.state) == oracle.state_vector_len
     assert len(oracle.history) == 1
     h = oracle.history[-1]
-    assert h["fidelity"] == "full" and h["failure_kind"] is None
+    assert h["failure_kind"] is None and "fidelity" not in h
     assert 0.0 < h["end_soh"] <= 1.0
     assert len(h["ecm_params_charge"]) == len(oracle._ecm_param_names)
 

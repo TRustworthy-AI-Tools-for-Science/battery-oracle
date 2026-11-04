@@ -108,7 +108,7 @@ def test_oracle_cycle_measures_spectra_inside_the_sweep():
                      real_cell_capacity_mah=42.0, c_max_crate=3.5, c2_max_crate=3.5)
     o(np.array([80.0, 40.0, 0.2, 0.2, 60.0, 0.5]))
     h = o.history[-1]
-    assert h["fidelity"] == "full", h["fidelity"]                  # cycling model unchanged
+    assert h["failure_kind"] is None, h["failure_kind"]            # primary solver
     assert h["eis_mode_used"] == "nonstationary", h["eis_mode_used"]
     for side in ("charge", "discharge"):
         zr, zi = np.asarray(h[f"Z_{side}_real"]), np.asarray(h[f"Z_{side}_neg_imag"])

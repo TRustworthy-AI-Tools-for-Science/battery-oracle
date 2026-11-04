@@ -15,7 +15,7 @@ parameters, never the fit error.
 * electrode state of health: PyBaMM's electrode-SOH solve succeeds with x/y limits
   strictly inside (0, 1), :func:`check_esoh`;
 * one demanding DFN cycle on the deployed oracle (:func:`check_dfn_cycle`): completes
-  at full fidelity, no electrolyte depletion (:data:`CE_FAIL_REL`), no surface-
+  with the primary solver, no electrolyte depletion (:data:`CE_FAIL_REL`), no surface-
   stoichiometry saturation, lithium conserved, and the two-mesh validity gate of
   :mod:`battery_oracle.validity`.
 
@@ -225,8 +225,9 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
                        f"{type(exc).__name__}: {str(exc)[:200]}")]
     h = oracle.history[-1]
     sol = oracle._prev_solution
-    out = [_check("demanding DFN cycle completes at full fidelity",
-                  "pass" if h.get("fidelity") == "full" else "warn", h.get("fidelity"), "full",
+    fk = h.get("failure_kind")
+    out = [_check("demanding DFN cycle completes with the primary solver",
+                  "pass" if fk is None else "warn", None if fk is None else str(fk), None,
                   f"{c1_crate}C/{c2_crate}C charge, {d_crate}C discharge")]
 
     def _entries(var):
@@ -286,7 +287,7 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
                     tight = run_demanding_cycle(kw, **rates, dfn_solver_rtol=oracle._dfn_solver_rtol * f,
                                                 dfn_solver_atol=oracle._dfn_solver_atol * f)
                     tsol = tight.last_solution
-                    complete = (tight.history[-1].get("fidelity") == "full"
+                    complete = (tight.history[-1].get("failure_kind") is None
                                 and float(tsol.t[-1]) >= float(sol.t[-1]) - 1.0)
                 except OracleFailure:
                     complete = False

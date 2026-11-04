@@ -5,8 +5,6 @@ could not be confirmed from the code alone.
 
 ## Oracle
 
-- [ ] `fidelity` is always `"full"` (the model is never swapped): drop the field, or
-  report the emergency-solver case there instead of only in `failure_kind`.
 - [ ] `harmonic_flux_coefficients` (`battery_oracle.patches`) stays until upstream PR
   #5856 ships: it changes 8 operators in the stage-A oracle and 7 in the default oracle
   (the electrolyte current), none in the chain fit's model. Drop it then.
