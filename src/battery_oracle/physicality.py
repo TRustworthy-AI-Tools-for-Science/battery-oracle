@@ -185,7 +185,9 @@ def run_demanding_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate:
                         d_crate: float = 3.8, **overrides):
     """The fitted oracle (``oracle_kwargs`` plus ``overrides``, Randles-stub ECM) after one
     demanding cycle at the stated C-rates of its own nominal capacity (real-cell scaling 1):
-    two 0.25 h charge stages, then a discharge of up to 4 h. Raises what the oracle raises."""
+    two 0.25 h charge stages, then a discharge of up to 4 h. The oracle's current bounds
+    and DFN C-rate ceiling are raised to the stated rates where they are lower, so the
+    cycle runs at those rates (never silently clipped). Raises what the oracle raises."""
     from battery_oracle.ecm import randles_stub_ecm
     from battery_oracle.oracle import PyBaMMOracle
 
@@ -193,6 +195,10 @@ def run_demanding_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate:
     nominal = oracle._nominal_mAh
     oracle._real_cell_capacity_mah = nominal
     oracle._cap_scale = 1.0
+    top = max(c1_crate, c2_crate, d_crate)
+    oracle._dfn_max_crate = max(oracle._dfn_max_crate, top)
+    oracle._C_MAX_mA = max(oracle._C_MAX_mA, top * nominal)
+    oracle._C2_MAX_mA = max(oracle._C2_MAX_mA, c2_crate * nominal)
     oracle(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))
     return oracle
 

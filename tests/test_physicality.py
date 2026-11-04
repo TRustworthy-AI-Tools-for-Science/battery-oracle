@@ -87,3 +87,20 @@ def test_fitted_oracle_kwargs_carry_the_fit_mesh_and_thermal():
     bare = fitted_oracle_kwargs({k: rep[k] for k in ("parameter_overrides", "parameter_scales",
                                                       "contact_resistance_ohm")}, {"chemistry": "X"})
     assert "radial_mesh" not in bare and "thermal" not in bare
+
+
+def test_demanding_cycle_is_not_clipped_by_the_oracle_bounds(monkeypatch):
+    """The default oracle's DFN ceiling is 1.5C; the demanding cycle still runs at its
+    stated rates (the cycle itself is not solved here)."""
+    from battery_oracle.oracle import PyBaMMOracle
+    from battery_oracle.physicality import run_demanding_cycle
+
+    applied = {}
+    monkeypatch.setattr(PyBaMMOracle, "__call__",
+                        lambda self, p: applied.setdefault("p", self._protocol_to_experiment(p)[1]))
+    o = run_demanding_cycle({}, c1_crate=3.8, c2_crate=2.0, d_crate=3.0)
+    nominal = o._nominal_mAh
+    p = applied["p"]
+    assert p.charge_current_1_mA == pytest.approx(3.8 * nominal)
+    assert p.charge_current_2_mA == pytest.approx(2.0 * nominal)
+    assert p.discharge_current_mA == pytest.approx(3.0 * nominal)
