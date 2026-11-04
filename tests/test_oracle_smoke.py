@@ -373,3 +373,18 @@ def test_dod_lam_follows_the_simulated_discharge():
     off = PyBaMMOracle()
     off._accumulate_dod_lam(stats(0.8))
     assert off._cumulative_dod_lam_frac == 0.0
+
+
+def test_reset_restores_the_ambient_a_7d_protocol_set():
+    """A 7-D protocol's ambient slot rewrites the cell's ambient and initial temperature;
+    reset() returns them to the constructed cell's."""
+    from battery_oracle import Protocol
+
+    o = PyBaMMOracle(thermal="lumped", use_temperature_protocol=True, T_ambient_K=298.15)
+    before = (float(o._pv["Ambient temperature [K]"]), float(o._pv["Initial temperature [K]"]))
+    p7 = np.r_[PROTOCOL, 313.15]
+    o._apply_ambient(p7, Protocol.from_array(p7), first_call=True)
+    assert float(o._pv["Ambient temperature [K]"]) == pytest.approx(313.15)
+    o.reset()
+    assert (float(o._pv["Ambient temperature [K]"]), float(o._pv["Initial temperature [K]"])) == before
+    assert o._T_ambient_K == pytest.approx(298.15)

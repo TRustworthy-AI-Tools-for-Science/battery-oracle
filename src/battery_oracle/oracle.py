@@ -240,9 +240,14 @@ class PyBaMMOracle:
         from battery_oracle import patches as _patches
         _patches.apply(["harmonic_flux_coefficients"], strict=False)
 
+        # what a 7-D protocol's ambient slot overwrites; reset() restores it
+        self._fresh_temperatures = ({k: self._pv[k] for k in ("Ambient temperature [K]", "Initial temperature [K]")},
+                                    self._T_ambient_K)
+
         self._build_native_state()
 
-        self._lock = threading.Lock()
+        # one call at a time: the solve and everything it updates (history, RNG, counters)
+        self._lock = threading.RLock()
         self._eis_lin_ok: bool | None = None       # state layout check (first spectrum)
         self._clear_cell_state()
         self._init_film_resistances()
@@ -726,8 +731,11 @@ class PyBaMMOracle:
         ``reset()``-then-run sequence reproduces the same noise realisation
         as a fresh instance.
         """
-        self._clear_cell_state()
-        self._build_native_state()
+        with self._lock:
+            temps, self._T_ambient_K = self._fresh_temperatures
+            self._pv.update(dict(temps))
+            self._clear_cell_state()
+            self._build_native_state()
 
     # Protocol bounds -- _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/
     # _DUR_MAX_s/_V_CHARGE_MAX/_V_DISCHARGE_MIN/_CHARGE_STAGE_MAX_s -- are INSTANCE
@@ -1193,6 +1201,11 @@ class PyBaMMOracle:
             end-of-life (SOH below ``eol_capacity_fraction``). The oracle
             state is **not** reset — see the class docstring.
         """
+        with self._lock:
+            return self._run_cycle(protocol)
+
+    def _run_cycle(self, protocol) -> "CycleResult":
+        """:meth:`run_cycle`, holding the lock."""
         protocol = (
             protocol.to_array() if isinstance(protocol, Protocol)
             else np.asarray(protocol, dtype=float)
@@ -1209,12 +1222,9 @@ class PyBaMMOracle:
         solve_kw: dict = {"initial_soc": self._initial_soc} if first_call else {}
         protocol_applied = self._apply_ambient(protocol, protocol_applied, first_call)
 
-        # Lock protects _prev_solution so sequential state accumulation is safe
-        # even if callers inadvertently share this oracle across threads.
-        with self._lock:
-            sol, self._last_fidelity, self._last_failure_kind = \
-                self._solve_with_fallbacks(experiment, protocol, solve_kw)
-            self._prev_solution = sol
+        sol, self._last_fidelity, self._last_failure_kind = \
+            self._solve_with_fallbacks(experiment, protocol, solve_kw)
+        self._prev_solution = sol
 
         # With tuple-based experiment, steps live in sol.cycles[-1].steps[i].
         # Faithful 5-step cycle (see _protocol_to_experiment):
