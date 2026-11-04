@@ -105,7 +105,7 @@ def test_oracle_cycle_measures_spectra_inside_the_sweep():
     o = PyBaMMOracle(ecm_model_fn=randles_stub_ecm, chemistry="LiR2032",
                      thermal="lumped", T_ambient_K=296.15, contact_resistance_ohm=0.1,
                      eis_mode="nonstationary", eis_noise_level=0.0, frequencies=f,
-                     real_cell_capacity_mah=42.0, c_max_mA=150.0, c2_max_mA=150.0, dfn_max_crate=4.0)
+                     real_cell_capacity_mah=42.0, c_max_crate=3.5, c2_max_crate=3.5)
     o(np.array([80.0, 40.0, 0.2, 0.2, 60.0, 0.5]))
     h = o.history[-1]
     assert h["fidelity"] == "full", h["fidelity"]                  # cycling model unchanged

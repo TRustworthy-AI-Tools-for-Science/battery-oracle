@@ -77,8 +77,8 @@ Stock PyBaMM runs whatever experiment string it is given. The oracle imposes:
   $I_{\mathrm{sim}} = I_{\mathrm{real}}\,Q_{\mathrm{nom}}/Q_{\mathrm{real}}$
   (`real_cell_capacity_mah`). This assumes degradation and relative impedance respond
   to C-rate, not to absolute current.
-- **A bounded envelope.** Currents are clipped to `[c_min_mA, min(c_max_mA,
-  dfn_max_crate · Q_nom)]` (default ceiling 1.5C), durations to [60 s, 8 h], each CC
+- **A bounded envelope.** Currents are clipped to C-rate bounds of the simulated cell
+  (`c_*_crate`, default 0.01C to 1.5C), durations to [60 s, 8 h], each CC
   charge stage to 900 s, and (with `discharge_mode: cutoff`) the discharge is given at
   least 1 h so it reaches the cut-off. Requests outside are clipped, not rejected, so
   an active-learning loop always gets an answer.

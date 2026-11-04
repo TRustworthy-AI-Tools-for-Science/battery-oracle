@@ -111,8 +111,8 @@ def test_dfn_lir2032_oracle_applies_real_cell_currents_unscaled():
     q = ps.nominal_capacity_mah("LiR2032")
     o = PyBaMMOracle(chemistry="LiR2032", ecm_model_fn=randles_stub_ecm,
                      real_cell_capacity_mah=q, discharge_mode="protocol",
-                     c_min_mA=0.01 * q, c2_min_mA=0.01 * q, c_max_mA=4.5 * q, c2_max_mA=4.5 * q,
-                     dfn_max_crate=4.5, dur_min_s=1.0, ecm_rescale_target_r0=None)
+                     c_min_crate=0.01, c2_min_crate=0.01, c_max_crate=4.5, c2_max_crate=4.5,
+                     dur_min_s=1.0, ecm_rescale_target_r0=None)
     o(np.array([3.5 * q, 1.5 * q, 0.25, 0.25, 1.3 * q, 0.1]))
     h = o.history[-1]
     assert h["fidelity"] == "full"

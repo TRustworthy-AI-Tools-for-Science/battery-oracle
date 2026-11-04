@@ -52,11 +52,11 @@ when the error mentions the voltage). The model is never replaced by a simpler o
 ## The C-rate ceiling
 
 Stiffness and the cost of consistent initialisation grow with the applied current.
-The oracle clips protocol currents to `dfn_max_crate` (1.5C) of the simulated cell's
-nominal capacity, in addition to `c_max_mA` ([protocol](protocol.md)). This is a
-harness decision: clipping keeps an active-learning loop alive at the cost of a flat
-response beyond the bound. A cell whose measured protocols exceed 1.5C (the jones2022
-coin cells are cycled at up to ~3.8C) needs `protocol_bounds.dfn_max_crate` raised.
+The oracle clips protocol currents to `c_max_crate` / `c2_max_crate` (1.5C by default)
+of the simulated cell's nominal capacity ([protocol](protocol.md)). This is a harness
+decision: clipping keeps an active-learning loop alive at the cost of a flat response
+beyond the bound. A cell whose measured protocols exceed 1.5C (the jones2022 coin cells
+are cycled at up to ~3.8C) needs the ceilings raised.
 
 ## Silent truncation
 

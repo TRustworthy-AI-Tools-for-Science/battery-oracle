@@ -83,9 +83,9 @@ def test_ec_diffusivity_base_factor_override():
 
 
 def test_protocol_bound_kwarg_overrides_sanitisation():
-    o = PyBaMMOracle(c_max_mA=1234.0, c_min_mA=77.0)
-    assert o._C_MAX_mA == pytest.approx(1234.0)
-    assert o._C_MIN_mA == pytest.approx(77.0)
+    o = PyBaMMOracle(c_max_crate=0.25, c_min_crate=0.02)
+    assert o._C_MAX_mA == pytest.approx(0.25 * o._nominal_mAh)
+    assert o._C_MIN_mA == pytest.approx(0.02 * o._nominal_mAh)
     amps = o._sanitise_current(999_999.0, 500.0, o._C_MIN_mA, o._C_MAX_mA)
     assert amps == pytest.approx(1234.0 / 1000.0)
 
@@ -215,22 +215,23 @@ def test_temperature_protocol_action_names_and_validation():
 
 def test_dfn_solver_kwargs_wire_to_instance_attrs():
     o = PyBaMMOracle(dfn_solver_rtol=1e-7, dfn_solver_atol=1e-9,
-                     dfn_solver_dt_max_s=0.5, dfn_max_crate=1.2)
+                     dfn_solver_dt_max_s=0.5)
     assert o._dfn_solver_rtol == pytest.approx(1e-7)
     assert o._dfn_solver_atol == pytest.approx(1e-9)
     assert o._dfn_solver_dt_max_s == pytest.approx(0.5)
-    assert o._dfn_max_crate == pytest.approx(1.2)
 
 
-def test_dfn_current_ceiling():
-    """The DFN current ceiling is _dfn_max_crate of the cell's own nominal current,
-    derived from its C/20 current (no hardcoded mA)."""
-    dfn = PyBaMMOracle()
-    # DFN: ceiling = dfn_max_crate * nominal_A * 1000, derived from _c20_A.
-    nominal_A = 20.0 * dfn._c20_A
-    expected = min(dfn._C_MAX_mA, dfn._dfn_max_crate * nominal_A * 1000.0)
-    assert dfn._current_ceiling_mA(dfn._C_MAX_mA) == pytest.approx(expected)
-    assert dfn._current_ceiling_mA(dfn._C_MAX_mA) < dfn._C_MAX_mA
+def test_current_bounds_are_c_rates_of_the_cells_own_capacity():
+    """The same C-rate bounds give mA bounds in proportion to each cell's nominal
+    capacity (a 5 Ah pouch and a ~42 mAh coin cell)."""
+    cfg = OracleConfig()
+    for chemistry in (OracleConfig().chemistry, "LiR2032"):
+        o = PyBaMMOracle(chemistry=chemistry)
+        q = o._nominal_mAh
+        assert (o._C_MIN_mA, o._C_MAX_mA, o._C2_MIN_mA, o._C2_MAX_mA) == pytest.approx(
+            (cfg.c_min_crate * q, cfg.c_max_crate * q, cfg.c2_min_crate * q, cfg.c2_max_crate * q))
+    lo = o._sanitise_current(1e-6, 1.0, o._C_MIN_mA, o._C_MAX_mA)
+    assert 1000.0 * lo == pytest.approx(cfg.c_min_crate * o._nominal_mAh)   # floor below 1C on a coin cell
 
 
 @pytest.mark.slow

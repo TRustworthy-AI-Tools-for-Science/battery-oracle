@@ -5,8 +5,6 @@ could not be confirmed from the code alone.
 
 ## Oracle
 
-- [ ] The default `protocol_bounds` (`c_min_mA = 50`, `c2_min_mA = 20`) are above 1C for
-  a 42 mAh LiR2032 cell; decide whether the bounds should be C-rate based.
 - [ ] `fidelity` is always `"full"` (the model is never swapped): drop the field, or
   report the emergency-solver case there instead of only in `failure_kind`.
 - [ ] `harmonic_flux_coefficients` (`battery_oracle.patches`) stays until upstream PR

@@ -64,8 +64,8 @@ def test_demanding_dfn_cycle_on_the_template():
     pytest.importorskip("pybamm")
     from battery_oracle.physicality import check_dfn_cycle
 
-    kw = dict(chemistry="LiR2032", c_min_mA=0.42, c2_min_mA=0.42,
-              c_max_mA=189.0, c2_max_mA=189.0, dfn_max_crate=4.5, dur_min_s=1.0,
+    kw = dict(chemistry="LiR2032", c_min_crate=0.01, c2_min_crate=0.01,
+              c_max_crate=4.5, c2_max_crate=4.5, dur_min_s=1.0,
               ecm_rescale_target_r0=None, temperature_K=296.15)
     checks = check_dfn_cycle(kw)
     names = [c["name"] for c in checks]

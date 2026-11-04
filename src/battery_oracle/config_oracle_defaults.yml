@@ -57,20 +57,20 @@ solver:
     atol: 1.0e-8
     dt_max_s: 1.0
 
-# Protocol bounds for the Chen2020 cell (nominal capacity ~5 Ah). Sanitises
-# protocol vectors before building the PyBaMM Experiment -- see
-# oracle.py:_sanitise_current/_sanitise_duration/_protocol_to_experiment.
+# Protocol bounds. Sanitises protocol vectors before building the PyBaMM Experiment --
+# see oracle.py:_sanitise_current/_sanitise_duration/_protocol_to_experiment.
+# Currents are C-rates of the oracle cell's own nominal capacity (the simulated
+# currents); protocols outside them are clipped with a warning.
 protocol_bounds:
-  c_min_mA: 50.0            # charge step 1 / discharge lower bound
-  c_max_mA: 10000.0         # 2C on a 5 Ah cell; the DFN ceiling is dfn_max_crate below
-  c2_min_mA: 20.0           # charge step 2 (taper stage) lower bound
-  c2_max_mA: 10000.0        # shares the 2C ceiling with c_max_mA (see oracle.py comment)
+  c_min_crate: 0.01         # charge stage 1 / discharge lower bound (50 mA on 5 Ah)
+  c_max_crate: 1.5          # charge stage 1 / discharge ceiling: the DFN's stable range
+  c2_min_crate: 0.004       # charge stage 2 (taper stage) lower bound (20 mA on 5 Ah)
+  c2_max_crate: 1.5         # charge stage 2 ceiling
   dur_min_s: 60.0
   dur_max_s: 28800.0        # 8 h
   v_charge_max: 4.3         # charge safety cutoff (V) -- Jones, Stimming & Lee 2022
   v_discharge_min: 3.0      # discharge cutoff (V)
   charge_stage_max_s: 900.0 # 15 min per CC charge stage (paper limit)
-  dfn_max_crate: 1.5        # DFN current ceiling (C); protocols above it are clipped (with a warning)
 
 eis:
   freq_min_hz: 0.01

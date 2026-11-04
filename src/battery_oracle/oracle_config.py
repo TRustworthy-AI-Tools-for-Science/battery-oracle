@@ -90,13 +90,15 @@ class OracleConfig:
     dfn_solver_rtol: float = 1e-6
     dfn_solver_atol: float = 1e-8
     dfn_solver_dt_max_s: float = 1.0
-    # _protocol_to_experiment caps the current at this C-rate (DFN stability).
-    dfn_max_crate: float = 1.5
     # -- Protocol sanitisation bounds (config_oracle_defaults.yml: protocol_bounds.*) --
-    c_min_mA: float = 50.0
-    c_max_mA: float = 10_000.0
-    c2_min_mA: float = 20.0
-    c2_max_mA: float = 10_000.0
+    # Current bounds as C-rates of the oracle cell's own nominal capacity (the
+    # simulated currents), so they scale with the parameter set: charge stage 1 and
+    # the discharge (c_*), charge stage 2 (c2_*). The ceilings are the DFN's stable
+    # range (1.5C); protocols outside the bounds are clipped with a warning.
+    c_min_crate: float = 0.01
+    c_max_crate: float = 1.5
+    c2_min_crate: float = 0.004
+    c2_max_crate: float = 1.5
     dur_min_s: float = 60.0
     dur_max_s: float = 28_800.0
     v_charge_max: float = 4.3
@@ -175,9 +177,8 @@ YAML_KEYS: dict[str, tuple[str, ...]] = {
     "dfn_solver_rtol": ("solver", "dfn", "rtol"),
     "dfn_solver_atol": ("solver", "dfn", "atol"),
     "dfn_solver_dt_max_s": ("solver", "dfn", "dt_max_s"),
-    **{k: ("protocol_bounds", k) for k in ("c_min_mA", "c_max_mA", "c2_min_mA", "c2_max_mA", "dur_min_s",
-                                           "dur_max_s", "v_charge_max", "v_discharge_min", "charge_stage_max_s",
-                                           "dfn_max_crate")},
+    **{k: ("protocol_bounds", k) for k in ("c_min_crate", "c_max_crate", "c2_min_crate", "c2_max_crate", "dur_min_s",
+                                           "dur_max_s", "v_charge_max", "v_discharge_min", "charge_stage_max_s")},
 }
 #: YAML keys read by the mappers that are not a field of their own (the EIS grid, the
 #: parameter set, the per-preset constants) or that belong to a consumer of the oracle

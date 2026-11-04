@@ -38,13 +38,14 @@ identity.
 
 ### Sanitisation
 
-The mapped values are bounded before the experiment is built. All current bounds are
-in the simulated cell's mA:
+The mapped values are bounded before the experiment is built. The current bounds are
+C-rates of the simulated cell's nominal capacity $Q_{nom}$, so the same bounds suit a
+5 Ah pouch and a 42 mAh coin cell:
 
 | Quantity | Bound | Default |
 |---|---|---|
-| charge stage 1, discharge current | `[c_min_mA, min(c_max_mA, dfn_max_crate · Q_nom)]` | 50 mA, 10 000 mA, 1.5C |
-| charge stage 2 current | `[c2_min_mA, min(c2_max_mA, dfn_max_crate · Q_nom)]` | 20 mA, 10 000 mA |
+| charge stage 1, discharge current | `[c_min_crate · Q_nom, c_max_crate · Q_nom]` | 0.01C, 1.5C |
+| charge stage 2 current | `[c2_min_crate · Q_nom, c2_max_crate · Q_nom]` | 0.004C, 1.5C |
 | every duration | `[dur_min_s, dur_max_s]` | 60 s, 8 h |
 | each charge stage | at most `charge_stage_max_s` | 900 s |
 | discharge duration, `discharge_mode: cutoff` | at least 3600 s, so the discharge reaches `v_discharge_min` | |
@@ -95,7 +96,7 @@ field-to-key map is `battery_oracle.oracle_config.YAML_KEYS`:
 | `cycling` | `parameter_set`, `chemistry`, `n_cycles`, `temperature_K`, `initial_soc`, `rest_s`, `thermal`, `T_ambient_K`, `h_total_W_per_m2K`, `use_temperature_protocol`, `discharge_mode` |
 | `bol` | `parameter_scales`, `parameter_overrides`, `contact_resistance_ohm`, `radial_mesh` |
 | `solver` | `dfn.rtol`, `dfn.atol`, `dfn.dt_max_s`, `emergency.rtol`, `emergency.atol` |
-| `protocol_bounds` | `c_min_mA`, `c_max_mA`, `c2_min_mA`, `c2_max_mA`, `dur_min_s`, `dur_max_s`, `v_charge_max`, `v_discharge_min`, `charge_stage_max_s`, `dfn_max_crate` |
+| `protocol_bounds` | `c_min_crate`, `c_max_crate`, `c2_min_crate`, `c2_max_crate`, `dur_min_s`, `dur_max_s`, `v_charge_max`, `v_discharge_min`, `charge_stage_max_s` |
 | `eis` | `freq_min_hz`, `freq_max_hz`, `n_freq_points` or `frequencies_hz`; `noise_level`, `noise_model`, `noise_combined_flicker_frac`, `noise_combined_white_frac`, `seed`; `mode`, `amplitude_mA`, `sweep_periods`, `sweep_overhead_s`; `E_a_J_per_mol`, `E_a_electrolyte_J_per_mol`; `soc_clip_min`, `soc_clip_max`; `linkk.c`, `linkk.max_M` |
 | `ecm` | `circuit`, `cpe_seeds.{w,n,w_default,n_default}`, `rescale_target_r0`, `autoeis.{num_warmup,num_samples}` |
 | `degradation` | `preset`, `eol_capacity_fraction`, `capacity_check`, `ec_diffusivity_base_factor`, `lam_ceiling`, `dod_lam_scale`, `preset_constants.<preset>` |
@@ -166,7 +167,7 @@ protocols:                       # one or more; 'name' is optional
 
 A 2C/1C two-stage charge of a 200 mAh cell with the `severe` preset. On the 5 Ah
 simulated cell 2C is above the 1.5C ceiling, so stage 1 is clipped to 7.5 A; raise
-`protocol_bounds.dfn_max_crate` in the oracle YAML to run it as asked.
+`protocol_bounds.c_max_crate` in the oracle YAML to run it as asked.
 
 ```yaml
 cycling: {n_cycles: 1, temperature_K: 298.15, parameter_set: Chen2020,

@@ -114,8 +114,8 @@ active-learning role:
   initialisation failure with the Chen2020 graphite OCP). Capacity fade comes from SEI
   growth and lithium plating; an optional, off-by-default `dod_lam_scale` term
   approximates depth-of-discharge-driven active-material loss.
-- Protocol currents are clipped to 1.5C of the simulated cell by default
-  (`dfn_max_crate`).
+- Protocol currents are clipped to C-rate bounds of the simulated cell (0.01C to
+  1.5C by default; `protocol_bounds.c_*_crate`).
 - The default (equilibrium) EIS model has no degradation submodels; degradation
   enters the spectrum as a series film resistance and a reduced active-material
   fraction. Non-stationary EIS (`eis_mode="nonstationary"`) linearises the cycling

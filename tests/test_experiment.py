@@ -156,8 +156,6 @@ def test_built_oracle_matches_resolved_kwargs():
         "_dfn_solver_rtol": "dfn_solver_rtol", "_dfn_solver_atol": "dfn_solver_atol",
         "_dfn_solver_dt_max_s": "dfn_solver_dt_max_s",
         "_emergency_solver_rtol": "emergency_solver_rtol",
-        "_C_MIN_mA": "c_min_mA", "_C_MAX_mA": "c_max_mA",
-        "_C2_MIN_mA": "c2_min_mA", "_C2_MAX_mA": "c2_max_mA",
         "_DUR_MIN_s": "dur_min_s", "_DUR_MAX_s": "dur_max_s",
         "_V_CHARGE_MAX": "v_charge_max", "_V_DISCHARGE_MIN": "v_discharge_min",
         "_CHARGE_STAGE_MAX_s": "charge_stage_max_s",
@@ -177,6 +175,9 @@ def test_built_oracle_matches_resolved_kwargs():
     }
     for attr, key in attr_to_kwarg.items():
         assert getattr(o, attr) == kw[key], f"{attr} != kwargs[{key!r}]"
+    for attr, key in (("_C_MIN_mA", "c_min_crate"), ("_C_MAX_mA", "c_max_crate"),
+                      ("_C2_MIN_mA", "c2_min_crate"), ("_C2_MAX_mA", "c2_max_crate")):
+        assert getattr(o, attr) == pytest.approx(kw[key] * o._nominal_mAh), attr
     assert o._cpe_w_seed == kw["cpe_w_seed"]
     assert o._cpe_n_seed == kw["cpe_n_seed"]
 
@@ -199,7 +200,7 @@ def test_oracle_config_pointer_overrides_defaults(tmp_path):
     assert o._dfn_solver_rtol == pytest.approx(1e-4)
     # Fields the custom oracle YAML omits (e.g. protocol_bounds entirely) fall
     # back to PyBaMMOracle's own Python-literal defaults, not an error.
-    assert o._C_MAX_mA == pytest.approx(10_000.0)
+    assert o._C_MAX_mA == pytest.approx(1.5 * o._nominal_mAh)
 
 
 @pytest.mark.slow

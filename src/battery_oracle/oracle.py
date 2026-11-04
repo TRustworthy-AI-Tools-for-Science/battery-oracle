@@ -199,7 +199,8 @@ class PyBaMMOracle:
 
     * ``dfn_solver_*`` / ``emergency_solver_*`` — solver tolerances
       (YAML section ``solver``).
-    * ``c_min_mA`` / ``c_max_mA`` / ``dur_min_s`` / ``dur_max_s`` / ``v_charge_max`` /
+    * ``c_min_crate`` / ``c_max_crate`` / ``c2_*_crate`` (C-rates of the oracle cell) /
+      ``dur_min_s`` / ``dur_max_s`` / ``v_charge_max`` /
       ``v_discharge_min`` / ... — protocol sanitisation bounds (YAML ``protocol_bounds``).
     * ``eis_*`` / ``noise_combined_*`` / ``linkk_*`` — EIS synthesis + validation
       (YAML ``eis``).
@@ -365,15 +366,14 @@ class PyBaMMOracle:
         self._dfn_solver_rtol = float(cfg.dfn_solver_rtol)
         self._dfn_solver_atol = float(cfg.dfn_solver_atol)
         self._dfn_solver_dt_max_s = float(cfg.dfn_solver_dt_max_s)
-        self._dfn_max_crate = float(cfg.dfn_max_crate)
 
         # Protocol sanitisation bounds (see _sanitise_current/_sanitise_duration/
         # _protocol_to_experiment/_cap_check_steps). Instance attributes (not
-        # class constants) so a YAML-driven build can override them per oracle.
-        self._C_MIN_mA = float(cfg.c_min_mA)
-        self._C_MAX_mA = float(cfg.c_max_mA)
-        self._C2_MIN_mA = float(cfg.c2_min_mA)
-        self._C2_MAX_mA = float(cfg.c2_max_mA)
+        # class constants) so a YAML-driven build can override them per oracle. The
+        # current bounds are C-rates; their mA values (simulated cell) follow the
+        # nominal capacity in _init_parameter_values.
+        self._current_bounds_crate = (float(cfg.c_min_crate), float(cfg.c_max_crate),
+                                      float(cfg.c2_min_crate), float(cfg.c2_max_crate))
         self._DUR_MIN_s = float(cfg.dur_min_s)
         self._DUR_MAX_s = float(cfg.dur_max_s)
         self._V_CHARGE_MAX = float(cfg.v_charge_max)
@@ -445,6 +445,9 @@ class PyBaMMOracle:
         self._nominal_mAh = 1000.0 * float(self._pv["Nominal cell capacity [A.h]"])
         self._cap_scale = self._nominal_mAh / self._real_cell_capacity_mah
         self._c20_A = self._nominal_mAh / 1000.0 / 20.0
+        # current bounds [mA] of the simulated cell from their C-rates
+        self._C_MIN_mA, self._C_MAX_mA, self._C2_MIN_mA, self._C2_MAX_mA = (
+            c * self._nominal_mAh for c in self._current_bounds_crate)
         self._contact_resistance_ohm = (
             float(cfg.contact_resistance_ohm) if cfg.contact_resistance_ohm is not None else None
         )
@@ -739,10 +742,10 @@ class PyBaMMOracle:
 
     # Protocol bounds -- _C_MIN_mA/_C_MAX_mA/_C2_MIN_mA/_C2_MAX_mA/_DUR_MIN_s/
     # _DUR_MAX_s/_V_CHARGE_MAX/_V_DISCHARGE_MIN/_CHARGE_STAGE_MAX_s -- are INSTANCE
-    # attributes set in __init__ (from the c_min_mA/... kwargs, YAML-overridable
-    # via config_oracle_defaults.yml's protocol_bounds section). Upper duration:
-    # 8 h is generous for any step that also has a voltage-cutoff termination
-    # condition. The charge step 2 (taper stage) shares the C1 ceiling. Voltage/duration
+    # attributes set in __init__ (the current bounds from the c_*_crate C-rates of the
+    # simulated cell, YAML-overridable via config_oracle_defaults.yml's protocol_bounds
+    # section). Upper duration: 8 h is generous for any step that also has a
+    # voltage-cutoff termination condition. Voltage/duration
     # cutoffs from Jones, Stimming & Lee 2022 (Nat. Commun. 13:4806), Methods
     # "Battery cycling": two-stage CC charge (<=15 min/stage) stopping at
     # 4.3 V (no CV hold), single-stage CC discharge until 3.0 V.
@@ -768,15 +771,6 @@ class PyBaMMOracle:
                 clamps.append((f"{label}:bounds",
                                 f"{label} {v:.0f}→{out:.0f} mA (bounds [{lo:.0f}, {hi:.0f}])"))
         return out / 1000.0
-
-    def _current_ceiling_mA(self, base_hi: float) -> float:
-        """Model-aware upper current bound (in the 5 Ah PyBaMM frame, mA).
-
-        Tightened to ``_dfn_max_crate`` — computed from the cell's own C/20 current, so
-        no mA value is hardcoded (``nominal_A = 20 * self._c20_A``).
-        """
-        dfn_hi_mA = self._dfn_max_crate * (20.0 * self._c20_A) * 1000.0
-        return min(base_hi, dfn_hi_mA)
 
     def _sanitise_duration(self, val_h: float, default_h: float, *,
                            label: str | None = None,
@@ -869,8 +863,7 @@ class PyBaMMOracle:
         # the per-cycle ambient temperature, consumed in __call__, not here.
         C1_mA, C2_mA, dur1_h, dur2_h, D_mA, dur_d_h = protocol[:6]
         s = self._cap_scale
-        c_hi  = self._current_ceiling_mA(self._C_MAX_mA)
-        c2_hi = self._current_ceiling_mA(self._C2_MAX_mA)
+        c_hi, c2_hi = self._C_MAX_mA, self._C2_MAX_mA
 
         clamps: list[tuple[str, str]] = []
         # NaN fallbacks: 0.1C / 0.05C of the simulated cell (500 / 250 mA on 5 Ah).

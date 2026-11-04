@@ -96,9 +96,9 @@ voltage traces outside the current steps of either.
   inside the OCP data range; lithium is conserved (PyBaMM's total loss equals its loss
   to side reactions within $10^{-3}$); and it runs the two-mesh gate on this cycle (the
   electrode/separator mesh refined 2×, with the tolerance ladder when an exact law is
-  above $10\,\mathrm{rtol}$, and the voltage-resolution check). The currents pass
-  through the oracle's protocol bounds, so `oracle_kwargs` must raise
-  `dfn_max_crate` (1.5C by default) for the cycle to run at the stated rates.
+  above $10\,\mathrm{rtol}$, and the voltage-resolution check). It raises the
+  oracle's current ceilings to the stated rates where they are lower, so the cycle
+  always runs at them.
 - {func}`~battery_oracle.physicality.fitted_oracle_kwargs`: the oracle keywords of a
   stage-A fit report (fitted values, thermal submodel, mesh).
 

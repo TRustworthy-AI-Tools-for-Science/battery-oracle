@@ -195,8 +195,7 @@ def run_demanding_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate:
     nominal = oracle._nominal_mAh
     oracle._real_cell_capacity_mah = nominal
     oracle._cap_scale = 1.0
-    top = max(c1_crate, c2_crate, d_crate)
-    oracle._dfn_max_crate = max(oracle._dfn_max_crate, top)
+    top = max(c1_crate, d_crate)
     oracle._C_MAX_mA = max(oracle._C_MAX_mA, top * nominal)
     oracle._C2_MAX_mA = max(oracle._C2_MAX_mA, c2_crate * nominal)
     oracle(np.array([c1_crate * nominal, c2_crate * nominal, 0.25, 0.25, d_crate * nominal, 4.0]))

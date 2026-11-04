@@ -190,5 +190,5 @@ The stage-A fit uses the same functions ([Fitting](fitting.md)).
 | Isothermal at `temperature_K` (default) | every Arrhenius-dependent parameter | self-heating at high rate; use `thermal="lumped"` |
 | x-averaged film state for the EIS correction | equilibrium EIS ohmic shift | through-thickness SEI or plating heterogeneity, which the DFN resolves but the correction averages |
 | Equilibrium EIS model without degradation submodels | the equilibrium spectrum | film capacitance and SOC-dependent film effects; see [Divergences](divergences.md) |
-| Protocol currents clipped to `dfn_max_crate` | every cycle | protocols above 1.5C, unless the bound is raised |
+| Protocol currents clipped to `c_max_crate` | every cycle | protocols above 1.5C, unless the bound is raised |
 | Parameter set | everything | a chemistry other than the set's; the calibration scales absorb some cell-to-cell variation, not a change of chemistry |

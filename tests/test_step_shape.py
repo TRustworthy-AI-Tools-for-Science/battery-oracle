@@ -58,8 +58,7 @@ def test_oracle_protocol_discharge_mode_honours_duration_and_records_steps():
     from battery_oracle.oracle import PyBaMMOracle
 
     proto = np.array([150.0, 60.0, 0.25, 0.25, 60.0, 0.05])   # 3 min discharge request
-    kw = dict(ecm_model_fn=randles_stub_ecm, real_cell_capacity_mah=42.0,
-              c_max_mA=22_500.0, c2_max_mA=22_500.0, dur_min_s=1.0)
+    kw = dict(ecm_model_fn=randles_stub_ecm, real_cell_capacity_mah=42.0, dur_min_s=1.0)
     timed = PyBaMMOracle(discharge_mode="protocol", **kw)
     timed(proto)
     steps = timed.history[-1]["step_stats"]
@@ -79,7 +78,7 @@ def test_oracle_contact_resistance_lowers_charge_acceptance():
 
     proto = np.array([150.0, 60.0, 0.25, 0.25, 60.0, 0.05])
     kw = dict(ecm_model_fn=randles_stub_ecm, real_cell_capacity_mah=42.0,
-              c_max_mA=22_500.0, c2_max_mA=22_500.0, dur_min_s=1.0, discharge_mode="protocol")
+              dur_min_s=1.0, discharge_mode="protocol")
     ref = PyBaMMOracle(**kw)
     ref(proto)
     resist = PyBaMMOracle(contact_resistance_ohm=0.05, **kw)
