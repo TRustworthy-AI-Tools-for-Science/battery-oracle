@@ -1473,10 +1473,12 @@ class PyBaMMOracle:
     def _cycle_spectrum(self, soc: float, T_cell: float, step, eis_pv,
                         sei_thick: float, delta_R_ohmic: float) -> np.ndarray:
         """One noisy EIS spectrum: non-stationary from ``step`` when configured (and
-        the solve was full fidelity), otherwise the equilibrium spectrum at ``soc``
+        the primary solver did the cycle), otherwise the equilibrium spectrum at ``soc``
         with the Arrhenius and ohmic-film corrections."""
         native = False
-        if self._eis_mode == "nonstationary" and step is not None and self._last_fidelity == "full":
+        # only after a solve by the primary solver (the emergency solver's looser
+        # tolerances leave the states the linearisation uses less accurate)
+        if self._eis_mode == "nonstationary" and step is not None and self._last_failure_kind is None:
             try:
                 Z = self._nonstationary_spectrum(step, eis_pv)
                 native = True
