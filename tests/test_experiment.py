@@ -106,7 +106,10 @@ def test_load_oracle_config_packaged_default():
                     "protocol_scaling"):
         assert section in oc
     assert "dfn" in oc["solver"] and "emergency" in oc["solver"]
-    assert set(oc["degradation"]["preset_constants"]) == {"nominal", "accelerated", "severe"}
+    from battery_oracle.degradation import PRESETS, _DEFAULT_PRESET_CONSTANTS
+    assert set(oc["degradation"]["preset_constants"]) == set(PRESETS)
+    # the YAML mirrors the module fallback (the code's defaults are the YAML's)
+    assert oc["degradation"]["preset_constants"] == _DEFAULT_PRESET_CONSTANTS
 
 
 def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
@@ -127,9 +130,9 @@ def test_build_oracle_rejects_chemistry_parameter_set_mismatch():
 
 def test_oracle_kwargs_from_oracle_config_preset_resolution():
     oc = load_oracle_config()
-    severe = oracle_kwargs_from_oracle_config(oc, preset="severe")
-    assert severe["degradation_preset"] == "severe"
-    assert severe["preset_constants"]["plating_kinetic_rate_constant_m_s"] == pytest.approx(1e-7)
+    accel = oracle_kwargs_from_oracle_config(oc, preset="accelerated")
+    assert accel["degradation_preset"] == "accelerated"
+    assert accel["preset_constants"] == oc["degradation"]["preset_constants"]["accelerated"]
     nominal = oracle_kwargs_from_oracle_config(oc, preset="nominal")
     assert "plating_kinetic_rate_constant_m_s" not in nominal["preset_constants"]
 

@@ -8,8 +8,8 @@ simulates the real cell's currents directly, with no scaling onto a larger cell.
 It is built on PyBaMM's Ai2020 LiCoO2/graphite set (Ai et al. 2020, J. Electrochem.
 Soc. 167:013512), which supplies everything the jones2022 data cannot identify --
 thicknesses, porosities, active-material fractions, particle radii, Bruggeman
-exponents, electrolyte transport, conductivities, thermal and SEI parameters. What
-changes from it here (the stage-A fit refines the rest against the real data):
+exponents, electrolyte transport, conductivities and thermal parameters. What changes
+from it here (the stage-A fit refines the rest against the real data):
 
 * **one electrode pair** (the template's 34-layer pouch becomes a single layer of
   the cell's total electrode area);
@@ -22,6 +22,8 @@ changes from it here (the stage-A fit refines the rest against the real data):
 * **coin-cell thermal** volume, cooling area and heat capacity of the LiR2032 can;
 * **activation energies** of a LiCoO2/graphite set (Ramadass et al. 2004), replacing
   Dualfoil's 5 kJ/mol;
+* **SEI growth** values with their sources (:data:`LIR2032_SEI`): the template's are
+  PyBaMM example values, with U_SEI 0.4 V and no activation energy;
 * **LiCoO2 OCP** of PyBaMM's Marquis2019 (Dualfoil LiCoO2, stoichiometry stretched by
   1.062): a flat ~3.91 V plateau ending in a near-vertical wall at y ~ 0.95-0.97, as
   measured (Reimers & Dahn 1992; Ohzuku & Ueda 1994);
@@ -60,6 +62,29 @@ LIR2032_ACTIVATION_J_MOL = {
     "Positive particle diffusivity [m2.s-1]": 18550.0,
 }
 AI2020_ACTIVATION_J_MOL = 5000.0
+#: SEI growth of the "ec reaction limited" law (Yang et al. 2017, J. Power Sources 360:28,
+#: eqs 10-11). Yang 2017 Table 1 (graphite/NMC622 pouch, EC/EMC 3:7 + 2 wt% VC): D_EC and
+#: k_SEI fitted ("adjusted"); c_EC,0, M/rho (162 g/mol / 1690 kg/m3), kappa_SEI 5e-6 S/m
+#: (resistivity 2e5 Ohm m) and alpha 0.5 taken from Safari et al. 2009. Lithium per SEI
+#: molecule 2 ((CH2OCO2Li)2, Yang eq. 6b). Yang gives no U_SEI, initial thickness or
+#: activation energy: U_SEI 0.8 V (Pinson & Bazant 2013, J. Electrochem. Soc. 160:A243;
+#: Attia et al. 2019 Part I: "canonically, 0.8 V vs Li+/Li0"); E = 0.52 eV (Pinson & Bazant
+#: 2013 eq. 9, fitted to the solvent diffusivity on graphite at 15-60 C); initial thickness
+#: 5 nm (PyBaMM's shared value, attributed to Safari 2009, not verified). D_EC is what the
+#: oracle's sei_rate_scale multiplies (Stage B search [1e-3, 1] -> 2e-21 (Pinson & Bazant
+#: 2013, fitted on graphite) to 2e-18 m2/s).
+LIR2032_SEI = {
+    "EC diffusivity [m2.s-1]": 2.0e-18,
+    "SEI kinetic rate constant [m.s-1]": 1.0e-12,
+    "EC initial concentration in electrolyte [mol.m-3]": 4541.0,
+    "SEI partial molar volume [m3.mol-1]": 0.162 / 1690.0,
+    "SEI resistivity [Ohm.m]": 1.0 / 5.0e-6,
+    "SEI growth transfer coefficient": 0.5,
+    "Ratio of lithium moles to SEI moles": 2.0,
+    "SEI open-circuit potential [V]": 0.8,
+    "SEI growth activation energy [J.mol-1]": 0.52 * 96485.33212,
+    "Initial SEI thickness [m]": 5.0e-9,
+}
 T_REF_K = 298.15
 #: Floor on the LiCoO2 thermodynamic factor: a numerical guard only (the analytic,
 #: monotone Marquis2019 OCP keeps Theta > 0).
@@ -162,6 +187,7 @@ def lir2032(nominal_ah: float = LIR2032_NOMINAL_AH, graphite_ocp: str = "Mohtat2
         "Total heat transfer coefficient [W.m-2.K-1]": COIN_H_DEFAULT,
     }, check_already_exists=False)
     pv.update({name: _with_activation(pv[name], e) for name, e in LIR2032_ACTIVATION_J_MOL.items()})
+    pv.update(LIR2032_SEI)
     if graphite_ocp != "Ai2020":
         pv.update(_graphite_ocp(graphite_ocp))
     pv.update({"Positive electrode OCP [V]": pybamm.ParameterValues("Marquis2019")["Positive electrode OCP [V]"],

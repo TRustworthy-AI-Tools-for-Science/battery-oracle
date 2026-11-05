@@ -45,10 +45,11 @@ from a degraded cycling solution into it.
 ## 3. Particle cracking disabled everywhere
 
 O'Kane et al. {cite:p}`okane2022` couple particle cracking, SEI on crack faces and
-active-material loss. The oracle turns particle mechanics off in every preset because
-the cracking stress submodel fails DAE initialisation with the Chen2020 graphite OCP
-(recorded on PyBaMM 26.6.2.0; see [Numerical stability](numerics.md)). C-rate
-sensitivity comes from plating kinetics instead ([Degradation](degradation.md)).
+active-material loss. The oracle turns particle mechanics off in every preset: on
+PyBaMM 26.10 with the LiR2032 set they solve, but stress-driven LAM is negligible at the
+template's values, SEI on cracks starts from bare crack surfaces, and the published
+crack length disagrees 1000× with PyBaMM's ([Degradation](degradation.md)). C-rate
+sensitivity comes from plating kinetics instead.
 
 ## 4. Parameter changes
 
@@ -57,7 +58,7 @@ then `params.apply_parameter_scales` / `apply_parameter_overrides`):
 
 | Modification | Mechanism | Rationale |
 |---|---|---|
-| `EC diffusivity [m2.s-1]` × 0.25 × `sei_rate_scale` | direct override | commercial electrolytes with film-forming additives form a denser SEI than the LP30 baseline {cite:p}`reniers2019`; applied in every preset |
+| `EC diffusivity [m2.s-1]` × `sei_rate_scale` | direct override | the SEI rate Stage B fits; the LiR2032 SEI values and sources are in `parameter_sets.LIR2032_SEI` |
 | both exchange-current densities × `kinetics_scale` | function wrapper | the $j_0(c_e, c_s^{\mathrm{surf}}, c_{s,\max}, T)$ are callables; wrapping keeps their dependence and rescales the magnitude |
 | plating parameters from OKane2022 | copied only where absent | Chen2020 has none; values already in the set win |
 | `Initial plated lithium concentration [mol.m-3]` = 0 | override | a fresh cell; OKane2022's formation plating would strip and drive the plating loss negative |

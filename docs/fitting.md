@@ -124,7 +124,7 @@ cannot. The cost is a weighted sum of root-mean-square errors: voltage with weig
 $1/(10\ \mathrm{mV})$ (`SIGMA_V`), each spectrum with $1/(0.05\,\mathrm{median}|Z|)$
 (`SIGMA_Z_REL`). `bounds` overrides entries of `LITERATURE_BOUNDS`;
 `ec_diffusivity_factor` multiplies the template EC diffusivity as the oracle does
-(0.25 × `sei_rate_scale`).
+(its `sei_rate_scale`).
 
 `fit_cells` returns `{cell_id: report}`. A report holds `best_inputs`,
 `fitted_inputs`, `fixed_inputs`, `ocv_balance`, `param_bounds`, `log_params`, `cost`,

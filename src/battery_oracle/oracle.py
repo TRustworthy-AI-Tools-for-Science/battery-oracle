@@ -150,11 +150,9 @@ class PyBaMMOracle:
         chemistry needs its own calibration (degradation preset, voltage window) —
         see :meth:`from_config` with a matching ``config_oracle_*.yml``.
     degradation_preset : str
-        Degradation physics preset — ``"nominal"``, ``"accelerated"`` (default),
-        or ``"severe"``.  See :func:`_build_degradation_config`. The
-        particle-cracking/LAM submodels are disabled in every
-        preset (see the comment in :func:`_build_degradation_config` — an
-        upstream PyBaMM regression workaround, not a design choice).
+        Degradation physics preset — ``"nominal"`` (SEI) or ``"accelerated"``
+        (SEI + lithium plating, default). See :mod:`battery_oracle.degradation` for the
+        values, their sources, and why particle mechanics are off in every preset.
     thermal : str
         Thermal submodel — ``"isothermal"`` (default, cell held at
         ``temperature_K``) or ``"lumped"`` (Timms 2021 lumped thermal ODE;
@@ -337,8 +335,8 @@ class PyBaMMOracle:
         # growing the R3+R5 charge-transfer arc) so this degradation appears in
         # the observable impedance/state vector the surrogate sees -- the way
         # real jones2022 cells age via R_ct growth -- not only in the hidden SOH.
-        # This stands in for the physical particle-cracking/LAM submodel that the
-        # PyBaMM 26.6.2.0 OCP regression forces off (see _build_degradation_config).
+        # This stands in for the physical particle-cracking/LAM submodel, which is off
+        # (see battery_oracle.degradation).
         # dod_lam_scale must be calibrated
         # to a literature magnitude or a deep-DoD dataset BEFORE enabling --
         # jones2022's shallow range cannot fix it. 0.0 = contributes nothing.
@@ -422,14 +420,12 @@ class PyBaMMOracle:
         if self._temperature_K != 298.15:
             self._pv["Ambient temperature [K]"] = self._temperature_K
         # Build degradation model options and (optionally) override parameters.
-        # "ec reaction limited" is always the SEI base; accelerated/severe add
-        # lithium plating and particle cracking on top of it.
+        # "ec reaction limited" is always the SEI base; accelerated adds lithium plating.
         self._deg_opts, self._pv = _build_degradation_config(
             cfg.degradation_preset, self._pv,
             kinetics_scale=cfg.kinetics_scale, sei_rate_scale=cfg.sei_rate_scale,
             dead_li_decay_scale=cfg.dead_li_decay_scale,
             plating_rate_scale=cfg.plating_rate_scale,
-            ec_diffusivity_base_factor=cfg.ec_diffusivity_base_factor,
             preset_constants=cfg.preset_constants,
         )
 

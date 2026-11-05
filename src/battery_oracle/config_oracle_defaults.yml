@@ -143,13 +143,9 @@ ecm:
     num_samples: 200
 
 degradation:
-  preset: accelerated              # nominal | accelerated | severe (see oracle.py:_build_degradation_config)
+  preset: accelerated              # nominal (SEI) | accelerated (SEI + lithium plating); see battery_oracle.degradation
   eol_capacity_fraction: 0.80       # OracleFailure raised when SOH < this
   capacity_check: false            # true appends a C/20 reference charge+discharge each call (~20x slower, more accurate)
-
-  # Universal correction applied identically across all presets -- electrolyte
-  # quality is treated as a cell property, not a degradation-severity setting.
-  ec_diffusivity_base_factor: 0.25 # Chen2020 EC diffusivity x this, before protocol_scaling.sei_rate_scale is also applied
 
   lam_ceiling: 0.95        # max allowed loss-of-active-material fraction fed into the EIS linearisation
 
@@ -159,36 +155,14 @@ degradation:
   # enabling.
   dod_lam_scale: 0.0
 
-  # Read by oracle.py:_build_degradation_config for the active preset above.
-  # NOTE: particle_cracking is DISABLED in all presets (PyBaMM 26.6.2.0 regression).
-  # The Chen2020 LGM50 graphite OCP causes IDAGetDky: IDA_BAD_K at t=0 when
-  # 'particle mechanics: swelling and cracking' is active. Root cause: the cracking
-  # stress submodel evaluates dOCP/dc at initial conditions; the LGM50 function
-  # returns inconsistent values that make IDA DAE initialization fail.
-  # C-rate sensitivity is preserved via lithium plating kinetics in
-  # accelerated/severe presets. Nominal loses C-rate sensitivity (SEI only).
-  # See oracle.py:_build_degradation_config comments (2026-06-23) for full writeup.
+  # Numeric constants of the active preset, read by
+  # battery_oracle.degradation._build_degradation_config. The submodels of each preset
+  # are fixed in that module (particle mechanics are off in both; reasons there).
   preset_constants:
-    nominal:
-      sei: true
-      lithium_plating: false
-      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
-      sei_on_cracks: false
+    nominal: {}
     accelerated:
-      sei: true
-      lithium_plating: true
-      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
-      sei_on_cracks: false
-      plating_kinetic_rate_constant_m_s: 1.0e-8
-      dead_lithium_decay_constant_s: 4.0e-6
-      initial_plated_lithium_concentration_mol_m3: 0.0
-    severe:
-      sei: true
-      lithium_plating: true
-      particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
-      sei_on_cracks: false               # also disabled (cracking required)
-      plating_kinetic_rate_constant_m_s: 1.0e-7
-      dead_lithium_decay_constant_s: 1.0e-4
+      plating_kinetic_rate_constant_m_s: 1.0e-9   # O'Kane et al. 2022 SI Table S5
+      dead_lithium_decay_constant_s: 1.0e-6       # O'Kane et al. 2022 SI Table S5
       initial_plated_lithium_concentration_mol_m3: 0.0
 
 # Real-cell calibration knobs. These are what the stage-B tune (battery-forecast
@@ -203,28 +177,12 @@ protocol_scaling:
 
   kinetics_scale: 1.0   # exchange-current-density multiplier; <1 slows charge-transfer
                           # kinetics and grows the relative EIS arc size (R3/R1, R5/R1)
-  sei_rate_scale: 1.0    # multiplies EC diffusivity (on top of ec_diffusivity_base_factor
-                          # above); <1 slows SEI/R1 growth rate, but with sharply
-                          # diminishing effect once growth becomes reaction-limited (see
-                          # oracle.py's sei_rate_scale docstring -- R1 growth-rate
-                          # calibration is not fully solved by this knob; scaling "SEI
-                          # kinetic rate constant" was tried and reverted, as it moved
-                          # growth the WRONG direction). Needed because kinetics_scale
-                          # has a side effect on SEI growth rate too (lower
-                          # exchange-current density raises overpotential, which the SEI
-                          # growth law is exponential in), so this
-                          # knob exists to un-confound the two effects, even though it
-                          # currently only partially succeeds.
-  dead_li_decay_scale: 1.0  # multiplier on Dead lithium decay constant [s-1]:
-                              #   accelerated base: 4e-6 s-1  → 4e-6 * dead_li_decay_scale
-                              #   severe base:      1e-4 s-1  → 1e-4 * dead_li_decay_scale
-                              # Higher values = faster dead-Li dissolution = less dead-Li
-                              # accumulation from plating = lower R1 ohmic growth.
-                              # Swept via 4D Bayesian optimisation in tune_oracle.py.
-  plating_rate_scale: 1.0   # multiplier on Lithium plating kinetic rate constant [m.s-1]:
-                              #   accelerated base: 1e-8 m/s → 1e-8 * plating_rate_scale
-                              #   severe base:      1e-7 m/s → 1e-7 * plating_rate_scale
-                              # Lower values = slower Li plating = less dead Li formed per
-                              # cycle = lower R1 growth AND longer EOL (unlike dead_li_decay_scale
-                              # which trades one against the other).
-                              # Swept via 4D Bayesian optimisation in tune_oracle.py.
+  sei_rate_scale: 1.0    # multiplies EC diffusivity [m2.s-1] of the parameter set (LiR2032:
+                          # 2e-18 m2/s, Yang et al. 2017 Table 1). Stage B searches [1e-3, 1],
+                          # i.e. D_EC in [2e-21 (Pinson & Bazant 2013), 2e-18] m2/s.
+  dead_li_decay_scale: 1.0  # multiplies the preset's dead-lithium decay constant (accelerated:
+                              # 1e-6 s-1). Stage B searches [0.1, 2.5] -> [1e-7 (Li et al. 2025),
+                              # 2.5e-6 (top of O'Kane 2022's sweep)] s-1.
+  plating_rate_scale: 1.0   # multiplies the preset's plating kinetic rate constant (accelerated:
+                              # 1e-9 m/s). Stage B searches [0.1, 10] -> [1e-10 (Li et al. 2025;
+                              # O'Kane et al. 2020), 1e-8 (top of O'Kane 2022's sweep)] m/s.

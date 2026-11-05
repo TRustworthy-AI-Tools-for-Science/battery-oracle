@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the mechanistic-degradation figures embedded in docs/degradation.md.
 
-Runs the same protocol through each degradation preset (nominal / accelerated /
-severe) for ``--cycles`` oracle calls and records the per-mechanism state the
+Runs the same protocol through each degradation preset (nominal / accelerated)
+for ``--cycles`` oracle calls and records the per-mechanism state the
 oracle exposes in its history (cumulative capacity loss to SEI, plating and
 SEI-on-cracks; SEI and dead-lithium film thicknesses; SOH). Writes PNGs and a
 JSON data record into ``docs/_static/degradation/`` (git-whitelisted).
@@ -38,13 +38,13 @@ from battery_oracle.ecm import randles_stub_ecm
 plt.rcParams.update({"font.family": "serif", "figure.dpi": 120,
                      "axes.grid": True, "grid.alpha": 0.3})
 
-PRESETS = ("nominal", "accelerated", "severe")
-PRESET_COLOR = {"nominal": slipstream(0.15), "accelerated": slipstream(0.55),
-                "severe": slipstream(0.9)}
+from battery_oracle.degradation import PRESETS  # noqa: E402
+
+PRESET_COLOR = {"nominal": slipstream(0.15), "accelerated": slipstream(0.7)}
 
 # Moderately aggressive protocol (1.5C first-stage charge after the x25 capacity
-# scaling onto the 5 Ah Chen2020 cell) so the plating pathway in the accelerated /
-# severe presets is actually exercised; nominal (SEI-only) stays C-rate-insensitive.
+# scaling onto the 5 Ah Chen2020 cell) so the plating pathway of the accelerated
+# preset is actually exercised; nominal (SEI-only) stays C-rate-insensitive.
 PROTOCOL = np.array([300.0, 150.0, 0.25, 0.25, 200.0, 1.0], dtype=np.float64)
 
 HIST_KEYS = [

@@ -33,7 +33,7 @@ cycling:
   initial_soc: 0.80           # -> initial_soc  (first-call starting SOC)
 
 degradation:
-  preset: accelerated        # -> degradation_preset  (nominal | accelerated | severe)
+  preset: accelerated        # -> degradation_preset  (nominal | accelerated)
   eol_capacity_fraction: 0.80  # -> eol_capacity_fraction  (OracleFailure raised when SOH < this)
   capacity_check: false      # -> capacity_check  (true = C/20 reference discharge each call, ~20x slower)
   # Optional calibration scales (each defaults to 1.0 if omitted):

@@ -78,11 +78,11 @@ def test_experiment_yaml_overrides_the_oracle_yaml():
     oracle_cfg = {"cycling": {"n_cycles": 2, "rest_s": 10.0},
                   "protocol_scaling": {"kinetics_scale": 0.5, "real_cell_capacity_mah": 11.0}}
     exp = {"cycling": {"n_cycles": 7, "real_cell_capacity_mah": 33.0},
-           "degradation": {"preset": "severe", "kinetics_scale": 0.25}, "eis": {}}
+           "degradation": {"preset": "nominal", "kinetics_scale": 0.25}, "eis": {}}
     kw = oracle_kwargs_from_config(exp, oracle_cfg)
     assert kw["n_cycles"] == 7 and kw["rest_s"] == 10.0              # experiment wins; the rest stays
     assert kw["real_cell_capacity_mah"] == 33.0 and kw["kinetics_scale"] == 0.25
-    assert kw["degradation_preset"] == "severe"
+    assert kw["degradation_preset"] == "nominal"
     assert oracle_cfg["cycling"]["n_cycles"] == 2                     # inputs not mutated
 
 

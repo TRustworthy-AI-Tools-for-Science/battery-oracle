@@ -114,7 +114,7 @@ CHAIN_OPTIONS = {
     # balance carries the lithium the SEI consumes
     "SEI": ("ec reaction limited", "none"),
 }
-#: oracle EC-diffusivity factor = 0.25 (commercial-electrolyte correction) x sei_rate_scale
+#: the fit's EC-diffusivity factor is the oracle's sei_rate_scale
 EC_DIFFUSIVITY = "EC diffusivity [m2.s-1]"
 
 
@@ -1223,7 +1223,7 @@ def fit_cells(datas: dict, pv, *, warm: dict | None = None,
 
     ``bounds`` overrides entries of LITERATURE_BOUNDS (e.g. a hypothesis test).
     ``ec_diffusivity_factor`` multiplies the template EC diffusivity as the oracle does
-    (0.25 x sei_rate_scale). ``config``: mesh, envelope probe, electrolyte floor, warm
+    (its sei_rate_scale). ``config``: mesh, envelope probe, electrolyte floor, warm
     start (CMA-ES starts at the warm values; with ``config.free`` every other parameter
     is held at its warm value, not the template's), run control (recorded in each
     report); ``config.dry_run`` builds the problems and returns {"dry_run": sizes}

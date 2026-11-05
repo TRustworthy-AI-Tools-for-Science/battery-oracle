@@ -53,7 +53,7 @@ The cycling model is built from the option dict of the degradation preset
 | Option | Value | Set by |
 |---|---|---|
 | `SEI` | `ec reaction limited` | every preset |
-| `lithium plating` | `partially reversible` | `accelerated`, `severe` |
+| `lithium plating` | `partially reversible` | `accelerated` |
 | `contact resistance` | `true` | `contact_resistance_ohm` not `None` |
 | `thermal` | `lumped` | `thermal="lumped"` |
 | `use lumped thermal capacity` | `true` | lumped thermal with a set that has `Cell heat capacity [J.K-1.m-3]` (LiR2032) |

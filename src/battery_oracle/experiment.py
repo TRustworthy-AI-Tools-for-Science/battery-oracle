@@ -58,7 +58,7 @@ _YAML_FIELD_NAME_BY_SLOT = {
     "discharge_duration_h": "dur_d_h",
 }
 _PROTOCOL_FIELDS = tuple(_YAML_FIELD_NAME_BY_SLOT[slot] for slot in PROTOCOL_FIELD_NAMES)
-_VALID_PRESETS = ("nominal", "accelerated", "severe")
+_VALID_PRESETS = ("nominal", "accelerated")   # = battery_oracle.degradation.PRESETS (no pybamm import here)
 # ECM fitter. 'randles' is the fast analytic stub (available on the core install);
 # 'autoeis' is the Bayesian fit and needs the [autoeis] extra. Default 'randles'
 # so a bare `run_experiment` works out of the box.

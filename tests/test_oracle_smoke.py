@@ -41,7 +41,7 @@ def test_construct_custom_circuit():
 
 
 def test_build_degradation_config_default_matches_module_dict():
-    """preset_constants=None (the default) must reproduce today's hardcoded numbers."""
+    """preset_constants=None (the default) takes the module's constants."""
     import pybamm
 
     from battery_oracle.degradation import _build_degradation_config, _DEFAULT_PRESET_CONSTANTS
@@ -50,7 +50,8 @@ def test_build_degradation_config_default_matches_module_dict():
     _, pv2 = _build_degradation_config("accelerated", pv)
     expected = _DEFAULT_PRESET_CONSTANTS["accelerated"]["plating_kinetic_rate_constant_m_s"]
     assert pv2["Lithium plating kinetic rate constant [m.s-1]"] == pytest.approx(expected)
-    assert expected == pytest.approx(1e-8)
+    expected = _DEFAULT_PRESET_CONSTANTS["accelerated"]["dead_lithium_decay_constant_s"]
+    assert pv2["Dead lithium decay constant [s-1]"] == pytest.approx(expected)
 
 
 def test_build_degradation_config_preset_constants_override():
@@ -69,17 +70,43 @@ def test_build_degradation_config_preset_constants_override():
     assert pv2["Dead lithium decay constant [s-1]"] == pytest.approx(2e-5)
 
 
-def test_ec_diffusivity_base_factor_override():
+def test_sei_rate_scale_multiplies_ec_diffusivity_only():
+    """The parameter set's EC diffusivity times sei_rate_scale, with no other factor; the
+    SEI kinetic rate constant is untouched."""
+    import pybamm
+
+    from battery_oracle.degradation import PRESETS, _build_degradation_config
+
+    pv = pybamm.ParameterValues("Chen2020")
+    base_d, base_k = float(pv["EC diffusivity [m2.s-1]"]), float(pv["SEI kinetic rate constant [m.s-1]"])
+    for preset in PRESETS:
+        for scale in (1.0, 0.37):
+            _, pv2 = _build_degradation_config(preset, pv, sei_rate_scale=scale)
+            assert float(pv2["EC diffusivity [m2.s-1]"]) == pytest.approx(base_d * scale)
+            assert float(pv2["SEI kinetic rate constant [m.s-1]"]) == pytest.approx(base_k)
+    assert float(pv["EC diffusivity [m2.s-1]"]) == base_d          # input not mutated
+
+
+def test_plating_scales_multiply_the_preset_constants():
     import pybamm
 
     from battery_oracle.degradation import _build_degradation_config
 
     pv = pybamm.ParameterValues("Chen2020")
-    base_d = float(pv["EC diffusivity [m2.s-1]"])
-    _, pv_default = _build_degradation_config("nominal", pv)
-    _, pv_custom = _build_degradation_config("nominal", pv, ec_diffusivity_base_factor=0.5)
-    assert float(pv_default["EC diffusivity [m2.s-1]"]) == pytest.approx(base_d * 0.25)
-    assert float(pv_custom["EC diffusivity [m2.s-1]"]) == pytest.approx(base_d * 0.5)
+    pc = {"plating_kinetic_rate_constant_m_s": 3e-9, "dead_lithium_decay_constant_s": 7e-7}
+    _, pv2 = _build_degradation_config("accelerated", pv, plating_rate_scale=2.0, dead_li_decay_scale=0.5,
+                                       preset_constants=pc)
+    assert pv2["Lithium plating kinetic rate constant [m.s-1]"] == pytest.approx(6e-9)
+    assert pv2["Dead lithium decay constant [s-1]"] == pytest.approx(3.5e-7)
+
+
+def test_unknown_preset_is_rejected():
+    import pybamm
+
+    from battery_oracle.degradation import _build_degradation_config
+
+    with pytest.raises(ValueError, match="Unknown degradation_preset"):
+        _build_degradation_config("severe", pybamm.ParameterValues("Chen2020"))
 
 
 def test_protocol_bound_kwarg_overrides_sanitisation():

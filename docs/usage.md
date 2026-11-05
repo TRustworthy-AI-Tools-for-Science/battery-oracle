@@ -13,7 +13,7 @@ that replaces the one resolved from `chemistry`).
 from battery_oracle import PyBaMMOracle, randles_stub_ecm
 from battery_oracle.oracle_config import OracleConfig
 
-oracle = PyBaMMOracle(degradation_preset="severe", seed=0)        # keyword settings
+oracle = PyBaMMOracle(degradation_preset="nominal", seed=0)       # keyword settings
 cfg = OracleConfig(chemistry="Chen2020", eis_noise_level=0.01)
 oracle = PyBaMMOracle(cfg, n_cycles=2, ecm_model_fn=randles_stub_ecm)
 oracle.config                                                     # the OracleConfig in use

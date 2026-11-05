@@ -116,7 +116,6 @@ class OracleConfig:
     linkk_c: float = 0.85
     linkk_max_M: int = 50
     # -- Degradation preset physics (config_oracle_defaults.yml: degradation.*) --
-    ec_diffusivity_base_factor: float = 0.25
     preset_constants: dict | None = None
     # -- ECM CPE fit seeds + AutoEIS sampler (config_oracle_defaults.yml: ecm.*) --
     cpe_w_seed: dict | None = None
@@ -149,8 +148,8 @@ YAML_KEYS: dict[str, tuple[str, ...]] = {
                                    "discharge_mode")},
     **{k: ("bol", k) for k in ("parameter_scales", "parameter_overrides", "contact_resistance_ohm")},
     "degradation_preset": ("degradation", "preset"),
-    **{k: ("degradation", k) for k in ("eol_capacity_fraction", "capacity_check", "ec_diffusivity_base_factor",
-                                       "lam_ceiling", "dod_lam_scale")},
+    **{k: ("degradation", k) for k in ("eol_capacity_fraction", "capacity_check", "lam_ceiling",
+                                       "dod_lam_scale")},
     **{k: ("protocol_scaling", k) for k in ("real_cell_capacity_mah", "kinetics_scale", "sei_rate_scale",
                                             "dead_li_decay_scale", "plating_rate_scale")},
     "eis_noise_level": ("eis", "noise_level"),

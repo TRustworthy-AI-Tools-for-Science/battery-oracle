@@ -99,7 +99,7 @@ field-to-key map is `battery_oracle.oracle_config.YAML_KEYS`:
 | `protocol_bounds` | `c_min_crate`, `c_max_crate`, `c2_min_crate`, `c2_max_crate`, `dur_min_s`, `dur_max_s`, `v_charge_max`, `v_discharge_min`, `charge_stage_max_s` |
 | `eis` | `freq_min_hz`, `freq_max_hz`, `n_freq_points` or `frequencies_hz`; `noise_level`, `noise_model`, `noise_combined_flicker_frac`, `noise_combined_white_frac`, `seed`; `mode`, `amplitude_mA`, `sweep_periods`, `sweep_overhead_s`; `E_a_J_per_mol`, `E_a_electrolyte_J_per_mol`; `soc_clip_min`, `soc_clip_max`; `linkk.c`, `linkk.max_M` |
 | `ecm` | `circuit`, `cpe_seeds.{w,n,w_default,n_default}`, `rescale_target_r0`, `autoeis.{num_warmup,num_samples}` |
-| `degradation` | `preset`, `eol_capacity_fraction`, `capacity_check`, `ec_diffusivity_base_factor`, `lam_ceiling`, `dod_lam_scale`, `preset_constants.<preset>` |
+| `degradation` | `preset`, `eol_capacity_fraction`, `capacity_check`, `lam_ceiling`, `dod_lam_scale`, `preset_constants.<preset>` |
 | `protocol_scaling` | `real_cell_capacity_mah`, `kinetics_scale`, `sei_rate_scale`, `dead_li_decay_scale`, `plating_rate_scale` |
 
 A key absent from the YAML takes the `OracleConfig` default. An unknown key under
@@ -121,7 +121,7 @@ to run. Its required sections are `cycling`, `degradation`, `eis` and `protocols
    oracle YAML's `protocol_scaling`.
 
 `ecm.fitter` is `randles` (default, core install) or `autoeis` (needs the `[autoeis]`
-extra). `degradation.preset` must be `nominal`, `accelerated` or `severe`. The
+extra). `degradation.preset` must be `nominal` or `accelerated`. The
 packaged oracle YAML sets `cycling.chemistry: Chen2020`, so an experiment that changes
 `cycling.parameter_set` must set `cycling.chemistry` to the same name. There is no
 model section: the cycling model is always the DFN.
@@ -165,14 +165,14 @@ protocols:                       # one or more; 'name' is optional
 
 ### Fast-charge stress study
 
-A 2C/1C two-stage charge of a 200 mAh cell with the `severe` preset. On the 5 Ah
+A 2C/1C two-stage charge of a 200 mAh cell with the `accelerated` preset (SEI + plating). On the 5 Ah
 simulated cell 2C is above the 1.5C ceiling, so stage 1 is clipped to 7.5 A; raise
 `protocol_bounds.c_max_crate` in the oracle YAML to run it as asked.
 
 ```yaml
 cycling: {n_cycles: 1, temperature_K: 298.15, parameter_set: Chen2020,
           real_cell_capacity_mah: 200.0}
-degradation: {preset: severe, eol_capacity_fraction: 0.80, capacity_check: false}
+degradation: {preset: accelerated, eol_capacity_fraction: 0.80, capacity_check: false}
 eis: {freq_min_hz: 0.1, freq_max_hz: 10000.0, n_freq_points: 60,
       noise_level: 0.01, noise_model: white}
 ecm: {fitter: randles}

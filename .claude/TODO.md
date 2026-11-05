@@ -9,13 +9,12 @@ could not be confirmed from the code alone.
   #5856 ships: it changes 8 operators in the stage-A oracle and 7 in the default oracle
   (the electrolyte current), none in the chain fit's model. Drop it then.
 - [ ] Re-check on PyBaMM 26.10 that particle cracking still fails DAE initialisation
-  with the Chen2020 graphite OCP (the code records PyBaMM 26.6.2.0).
-- [ ] The degradation presets were never checked against the DFN; there is no
-  calibration of them for LiR2032 (battery-forecast Stage B is being rebuilt on
-  lithium-loss targets, 2026-11-04).
+  with the Chen2020 graphite OCP (the code records PyBaMM 26.6.2.0). With the LiR2032
+  set every mechanics variant solves on 26.10 (battery-forecast B5d, 2026-11-05); they
+  stay off for the physical reasons in `battery_oracle.degradation`.
+- [ ] The LiR2032 degradation rates are calibrated by battery-forecast Stage B (published
+  values and bounds set 2026-11-05, decision D9); record the fitted scales here when B6 is done.
 - [ ] `dod_lam_scale` needs a literature value or a deep-DoD dataset before use.
-- [ ] `config_oracle_defaults.yml`: the `preset_constants` submodel switches are not
-  read by the code.
 - [ ] A top-level `model:` section in an experiment YAML is silently ignored; consider
   rejecting unknown top-level keys.
 

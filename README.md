@@ -108,10 +108,11 @@ active-learning role:
   default) and `LiR2032` (the jones2022 LiCoO2/graphite coin cell, built on Ai2020).
   Other PyBaMM sets lack the SEI parameters the degradation model needs and are
   rejected.
-- The degradation presets (`nominal`/`accelerated`/`severe`) are not calibrated
-  against the DFN or the LiR2032 cell; calibrate them downstream.
-- Particle cracking and SEI on cracks are disabled in every preset (a DAE
-  initialisation failure with the Chen2020 graphite OCP). Capacity fade comes from SEI
+- The degradation presets (`nominal` = SEI, `accelerated` = SEI + lithium plating) use
+  published values (`battery_oracle.degradation`, `parameter_sets.LIR2032_SEI`); their
+  rates are calibrated to a dataset downstream (battery-forecast Stage B).
+- Particle cracking and SEI on cracks are disabled in every preset (reasons in
+  `battery_oracle.degradation`). Capacity fade comes from SEI
   growth and lithium plating; an optional, off-by-default `dod_lam_scale` term
   approximates depth-of-discharge-driven active-material loss.
 - Protocol currents are clipped to C-rate bounds of the simulated cell (0.01C to
