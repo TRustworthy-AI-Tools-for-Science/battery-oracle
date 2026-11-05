@@ -224,7 +224,7 @@ def check_dfn_cycle(oracle_kwargs: dict, *, c1_crate: float = 3.8, c2_crate: flo
         return [_check("demanding DFN cycle completes", "fail", None, None,
                        f"{type(exc).__name__}: {str(exc)[:200]}")]
     h = oracle.history[-1]
-    sol = oracle._prev_solution
+    sol = oracle.last_solution
     fk = h.get("failure_kind")
     out = [_check("demanding DFN cycle completes with the primary solver",
                   "pass" if fk is None else "warn", None if fk is None else str(fk), None,

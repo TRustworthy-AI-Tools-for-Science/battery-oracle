@@ -10,11 +10,12 @@ could not be confirmed from the code alone.
   (the electrolyte current), none in the chain fit's model. Drop it then.
 - [ ] Re-check on PyBaMM 26.10 that particle cracking still fails DAE initialisation
   with the Chen2020 graphite OCP (the code records PyBaMM 26.6.2.0).
-- [ ] The degradation presets and their `target_eol_cycles_at_1c` labels were never
-  checked against the DFN; there is no calibration of them for LiR2032.
+- [ ] The degradation presets were never checked against the DFN; there is no
+  calibration of them for LiR2032 (battery-forecast Stage B is being rebuilt on
+  lithium-loss targets, 2026-11-04).
 - [ ] `dod_lam_scale` needs a literature value or a deep-DoD dataset before use.
-- [ ] `config_oracle_defaults.yml`: the `preset_constants` switches and the
-  `target_eol_cycles_at_1c` labels are not read by the code.
+- [ ] `config_oracle_defaults.yml`: the `preset_constants` submodel switches are not
+  read by the code.
 - [ ] A top-level `model:` section in an experiment YAML is silently ignored; consider
   rejecting unknown top-level keys.
 

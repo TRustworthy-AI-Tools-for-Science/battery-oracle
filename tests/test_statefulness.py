@@ -64,6 +64,24 @@ def test_one_call_per_cycle_equals_one_experiment(three_cycles):
     assert float(calls.t[-1]) == pytest.approx(float(whole.t[-1]), rel=1e-6)
 
 
+def test_capacity_is_each_cycles_own_discharge(three_cycles):
+    """Without the capacity check, capacity_ah is the charge the cycle's discharge step
+    passed (the same charge its step statistics integrate), in every cycle, not a running
+    maximum over the history."""
+    _, _, hist = three_cycles
+    for h in hist:
+        assert h["capacity_ah"] == pytest.approx(h["step_stats"][0]["throughput_ah"], rel=1e-3)
+
+
+def test_earlier_calls_are_not_kept(three_cycles):
+    """Each call continues from the previous call's final state only: the last solution
+    holds that state and the one cycle run, not the whole history (memory stays bounded
+    over a long replay)."""
+    o, _, _ = three_cycles
+    assert len(o.last_solution.cycles) <= 2
+    assert o._prev_solution.t.size == 1
+
+
 def test_reset_and_seed_reproduce_the_trajectory(three_cycles):
     """A second oracle with the same seed reproduces the trajectory, noise included; after
     reset() it starts from the fresh cell again and reproduces it once more."""
@@ -77,6 +95,26 @@ def test_reset_and_seed_reproduce_the_trajectory(three_cycles):
         for k in range(2):
             np.testing.assert_allclose(got[k], ref[k], rtol=1e-10, equal_nan=True)
     assert [h["end_soh"] for h in o.history] == pytest.approx([h["end_soh"] for h in ref_hist[:2]], rel=1e-12)
+
+
+def test_age_advances_the_cell_as_run_cycle_does(three_cycles):
+    """age() runs the same cycles without the measurement: the same degradation, state
+    of health and step statistics (rest voltages included) as run_cycle, and history
+    rows with no spectra, ECM, linKK or DRT entries."""
+    _, _, ref_hist = three_cycles
+    o = _oracle()
+    rows = [dict(o.age(PROTOCOL)) for _ in range(N_CYCLES)]
+    assert [h["call_idx"] for h in o.history] == list(range(N_CYCLES))
+    for got, ref in zip(rows, ref_hist):
+        for key in ("end_soh", "cumulative_lli_total_ah", "capacity_ah"):
+            assert got[key] == pytest.approx(ref[key], rel=1e-12), key
+        for a, b in zip(got["step_stats"], ref["step_stats"]):
+            assert a["kind"] == b["kind"]
+            assert a["throughput_ah"] == pytest.approx(b["throughput_ah"], rel=1e-12, abs=1e-15)
+            assert a["v_end"] == pytest.approx(b["v_end"], rel=1e-12, nan_ok=True)
+        measured = [k for k in got if k.startswith(("Z_", "ecm_")) or k in ("drt_peaks", "linkk_rmse")]
+        assert measured == [], measured
+    assert o.last_solution is not None
 
 
 def test_another_seed_changes_only_the_noise(three_cycles):

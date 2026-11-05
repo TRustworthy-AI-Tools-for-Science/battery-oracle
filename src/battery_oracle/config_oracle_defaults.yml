@@ -174,7 +174,6 @@ degradation:
       lithium_plating: false
       particle_cracking: false           # disabled — PyBaMM 26.6.2.0 regression
       sei_on_cracks: false
-      target_eol_cycles_at_1c: "200-400"  # SEI-only → much slower degradation
     accelerated:
       sei: true
       lithium_plating: true
@@ -183,7 +182,6 @@ degradation:
       plating_kinetic_rate_constant_m_s: 1.0e-8
       dead_lithium_decay_constant_s: 4.0e-6
       initial_plated_lithium_concentration_mol_m3: 0.0
-      target_eol_cycles_at_1c: "40-70"
     severe:
       sei: true
       lithium_plating: true
@@ -192,7 +190,6 @@ degradation:
       plating_kinetic_rate_constant_m_s: 1.0e-7
       dead_lithium_decay_constant_s: 1.0e-4
       initial_plated_lithium_concentration_mol_m3: 0.0
-      target_eol_cycles_at_1c: "20-50"
 
 # Real-cell calibration knobs. These are what the stage-B tune (battery-forecast
 # oracle_tune) searches over when fitting the oracle to a dataset's EIS + capacity data.

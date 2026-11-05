@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import types
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -508,7 +508,8 @@ class PyBaMMOracle:
         """Fresh-cell state: accumulated degradation, history, cached status, and the
         EIS noise generator re-seeded from ``seed`` (shared by __init__ and reset)."""
         self._rng = np.random.default_rng(self._seed)
-        self._prev_solution = None
+        self._prev_solution = None      # the final state the next call continues from
+        self._last_solution = None      # this call's solution (its start state + the cycle run)
         self._last_cycle_pv = None
         # Per-call history for diagnostic plots and EOL tracking.
         self._history: list[dict] = []
@@ -661,8 +662,9 @@ class PyBaMMOracle:
 
     @property
     def last_solution(self):
-        """PyBaMM solution of the most recent cycle (``None`` before the first)."""
-        return self._prev_solution
+        """PyBaMM solution of the most recent call: its start state and the cycle it ran
+        (``None`` before the first). Earlier calls are not kept."""
+        return self._last_solution
 
     @property
     def last_parameter_values(self):
@@ -1197,8 +1199,31 @@ class PyBaMMOracle:
         with self._lock:
             return self._run_cycle(protocol)
 
-    def _run_cycle(self, protocol) -> "CycleResult":
-        """:meth:`run_cycle`, holding the lock."""
+    def age(self, protocol: "Protocol | np.ndarray | Sequence[float]") -> Mapping:
+        """Run one cycle without the impedance measurement.
+
+        The cell advances exactly as in :meth:`run_cycle` (same model, solver, state
+        hand-over and end-of-life check) and the cycle's history row is recorded --
+        state of health, degradation budget, per-step statistics including the rest
+        voltages -- but no spectrum is synthesised and no DRT or ECM is fitted. For
+        calibrating degradation over many cycles, where the spectra are not used.
+
+        Returns
+        -------
+        Mapping
+            The cycle's history row (read-only; the same dict appended to
+            :attr:`history`), without the ``Z_*``, ECM, linKK and DRT entries.
+
+        Raises
+        ------
+        OracleFailure
+            As :meth:`run_cycle`.
+        """
+        with self._lock:
+            return self._run_cycle(protocol, measure=False)
+
+    def _run_cycle(self, protocol, measure: bool = True):
+        """:meth:`run_cycle` (``measure``) or :meth:`age`, holding the lock."""
         protocol = (
             protocol.to_array() if isinstance(protocol, Protocol)
             else np.asarray(protocol, dtype=float)
@@ -1216,7 +1241,11 @@ class PyBaMMOracle:
 
         sol, self._last_failure_kind = \
             self._solve_with_fallbacks(experiment, protocol, solve_kw)
-        self._prev_solution = sol
+        # The next call continues from this call's final state only. PyBaMM appends every
+        # cycle to its starting solution, so handing on the whole solution grows memory
+        # with each call (a 32-cycle replay of a real cell's protocol ran out of 32 GB).
+        self._last_solution = sol
+        self._prev_solution = sol.last_state
 
         # With tuple-based experiment, steps live in sol.cycles[-1].steps[i].
         # Faithful 5-step cycle (see _protocol_to_experiment):
@@ -1237,17 +1266,19 @@ class PyBaMMOracle:
         eis_pv, lam_frac = self._eis_parameter_values(sol)
         sei_thick, dead_li_thick, delta_R_ohmic = self._ohmic_films(sol)
 
-        self._last_eis_mode_used = "equilibrium"
+        self._last_eis_mode_used = "equilibrium" if measure else None
         steps = last_cycle.steps if last_cycle is not None else None
         # non-stationary EIS starts from the first state of each rest (current already
         # zero): step 4 for the charged spectrum, step 1 for the discharged one
         self._last_eis_leakage = None
-        Z_charge = self._cycle_spectrum(soc_charge, T_cell_chg, steps[4] if steps else None,
-                                        eis_pv, sei_thick, delta_R_ohmic)
-        leak_charge, self._last_eis_leakage = self._last_eis_leakage, None
-        Z_discharge = self._cycle_spectrum(soc_discharge, T_cell_dis, steps[1] if steps else None,
-                                           eis_pv, sei_thick, delta_R_ohmic)
-        leak_discharge = self._last_eis_leakage
+        Z_charge = Z_discharge = leak_charge = leak_discharge = None
+        if measure:
+            Z_charge = self._cycle_spectrum(soc_charge, T_cell_chg, steps[4] if steps else None,
+                                            eis_pv, sei_thick, delta_R_ohmic)
+            leak_charge, self._last_eis_leakage = self._last_eis_leakage, None
+            Z_discharge = self._cycle_spectrum(soc_discharge, T_cell_dis, steps[1] if steps else None,
+                                               eis_pv, sei_thick, delta_R_ohmic)
+            leak_discharge = self._last_eis_leakage
 
         cap_ah = self._capacity_ah(sol, last_cycle)
         if self._initial_capacity_ah is None:
@@ -1280,9 +1311,12 @@ class PyBaMMOracle:
             # Per-step throughput / duration / end voltage (see _step_stats) --
             # what the tune engine's step-shape term compares to real GCPL steps.
             "step_stats":         step_stats,
-            # EIS spectra at this call, jones2022 raw-data convention
-            # (freq/Hz, Re(Z)/Ohm, -Im(Z)/Ohm) so a Nyquist plot is just
-            # ax.plot(Z_charge_real, Z_charge_neg_imag).
+        })
+        if not measure:
+            return types.MappingProxyType(self._history[-1])
+        # EIS spectra at this call, jones2022 raw-data convention (freq/Hz, Re(Z)/Ohm,
+        # -Im(Z)/Ohm) so a Nyquist plot is just ax.plot(Z_charge_real, Z_charge_neg_imag).
+        self._history[-1].update({
             "Z_charge_real":        Z_charge.real.copy(),
             "Z_charge_neg_imag":    -Z_charge.imag.copy(),
             "Z_discharge_real":     Z_discharge.real.copy(),
@@ -1516,14 +1550,20 @@ class PyBaMMOracle:
 
         With capacity_check, read from the dedicated C/20 discharge step (last step),
         which is sensitive to LLI and protocol. Without it, the voltage-limited
-        discharge capacity of the regular cycling step (less sensitive, ~20× faster).
+        discharge capacity of the regular cycling step, step 0 (less sensitive, ~20×
+        faster): the charge it passed, not the maximum of PyBaMM's cumulative
+        "Discharge capacity" variable, which runs on across calls.
         """
         if self.capacity_check:
             step = last_cycle.steps[-1]
             if isinstance(step, _pb.EmptySolution):     # skipped: already at the cutoff
                 return 0.0
             return float(step["Discharge capacity [A.h]"].entries[-1])
-        return float(np.max(sol["Discharge capacity [A.h]"].entries))
+        step = last_cycle.steps[0]
+        if isinstance(step, _pb.EmptySolution):         # skipped: already at the cutoff
+            return 0.0
+        q = np.asarray(step["Discharge capacity [A.h]"].entries, dtype=float)
+        return float(q[-1] - q[0])
 
     def _state_of_health(self, sol, lam_frac: float, protocol: np.ndarray) -> tuple[float, dict]:
         """SOH from the irreversible-loss budget, and the budget's terms [A.h].

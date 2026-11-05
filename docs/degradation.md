@@ -123,9 +123,8 @@ value or a deep-discharge dataset sets its size.
 The numeric constants come from `degradation.preset_constants.<preset>` of the oracle
 YAML (`plating_kinetic_rate_constant_m_s`, `dead_lithium_decay_constant_s`,
 `initial_plated_lithium_concentration_mol_m3`), with the values above as fallbacks.
-The YAML also lists the submodel switches and a `target_eol_cycles_at_1c` per preset;
-the code does not read those keys (the submodels are fixed per preset in the code), and
-the targets have not been checked against the DFN.
+The YAML also lists the submodel switches per preset; the code does not read them (the
+submodels are fixed per preset in the code).
 
 Severity presets are not the same physics run faster: they change the mechanism mix.
 `nominal` is SEI only, with protocol-insensitive growth; `accelerated` and `severe` add
